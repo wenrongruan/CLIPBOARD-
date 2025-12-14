@@ -1,4 +1,4 @@
-name: Build macOS App
+name: Build Apps
 
 on:
   push:
@@ -8,7 +8,35 @@ on:
   workflow_dispatch:  # 允许手动触发
 
 jobs:
-  build:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name "SharedClipboard" --icon "NONE" --add-data "core;core" --add-data "ui;ui" --add-data "utils;utils" --hidden-import "PySide6.QtCore" --hidden-import "PySide6.QtGui" --hidden-import "PySide6.QtWidgets" --hidden-import "PIL" main.py
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: SharedClipboard-Windows
+          path: dist/SharedClipboard.exe
+
+  build-macos:
     runs-on: macos-latest
 
     steps:
@@ -42,36 +70,40 @@ jobs:
 
       - name: Create DMG
         run: |
-          # 创建临时目录
           mkdir -p dmg_content
           cp -r "dist/共享剪贴板.app" dmg_content/
-
-          # 创建 Applications 快捷方式
           ln -s /Applications dmg_content/Applications
-
-          # 创建 DMG
           hdiutil create -volname "共享剪贴板" \
             -srcfolder dmg_content \
             -ov -format UDZO \
             "共享剪贴板-macOS.dmg"
 
-      - name: Upload App
+      - name: Upload macOS App
         uses: actions/upload-artifact@v4
         with:
           name: SharedClipboard-macOS-App
           path: dist/共享剪贴板.app
 
-      - name: Upload DMG
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
           name: SharedClipboard-macOS-DMG
           path: 共享剪贴板-macOS.dmg
 
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
       - name: Release
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            共享剪贴板-macOS.dmg
+            SharedClipboard-Windows/SharedClipboard.exe
+            SharedClipboard-macOS-DMG/共享剪贴板-macOS.dmg
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
