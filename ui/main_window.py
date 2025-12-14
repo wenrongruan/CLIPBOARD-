@@ -73,11 +73,13 @@ class SettingsDialog(QDialog):
         layout.addRow(button_box)
 
     def _browse_db_path(self):
+        # 使用非原生对话框以支持网络文件夹
         path, _ = QFileDialog.getSaveFileName(
             self,
             "选择数据库文件位置",
             Config.get_database_path(),
             "SQLite数据库 (*.db)",
+            options=QFileDialog.DontUseNativeDialog,
         )
         if path:
             self.db_path_edit.setText(path)

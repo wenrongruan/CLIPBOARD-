@@ -59,14 +59,20 @@ echo "[5/5] 打包应用..."
 pyinstaller --onefile --windowed \
     --name "共享剪贴板" \
     --osx-bundle-identifier "com.sharedclipboard.app" \
+    --osx-entitlements-file "" \
     --add-data "core:core" \
     --add-data "ui:ui" \
     --add-data "utils:utils" \
+    --add-data "Info.plist:." \
     --hidden-import "PySide6.QtCore" \
     --hidden-import "PySide6.QtGui" \
     --hidden-import "PySide6.QtWidgets" \
     --hidden-import "PIL" \
     main.py
+
+# 替换 Info.plist 以隐藏 Dock 图标
+echo "配置应用为菜单栏模式（隐藏 Dock 图标）..."
+cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
 
 echo ""
 echo "=========================================="

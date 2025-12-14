@@ -67,6 +67,8 @@ jobs:
             --hidden-import "PySide6.QtWidgets" \
             --hidden-import "PIL" \
             main.py
+          # 替换 Info.plist 以隐藏 Dock 图标 (LSUIElement)
+          cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
 
       - name: Create DMG
         run: |
