@@ -34,7 +34,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setFixedSize(400, 200)
+        self.setFixedSize(500, 200)
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
 
@@ -51,11 +51,11 @@ class SettingsDialog(QDialog):
         self.dock_combo.setCurrentIndex(edge_map.get(current_edge, 0))
         layout.addRow("停靠位置:", self.dock_combo)
 
-        # 数据库路径
+        # 数据库路径（可手动输入或浏览选择）
         db_layout = QHBoxLayout()
         self.db_path_edit = QLineEdit()
         self.db_path_edit.setText(Config.get_database_path())
-        self.db_path_edit.setReadOnly(True)
+        self.db_path_edit.setPlaceholderText("输入路径或点击浏览，支持网络路径如 /Volumes/...")
         db_layout.addWidget(self.db_path_edit)
 
         browse_btn = QPushButton("浏览...")
