@@ -100,59 +100,31 @@ class ClipboardRepository:
         def operation(conn: sqlite3.Connection) -> Tuple[List[ClipboardItem], int]:
             offset = page * page_size
 
-            # 尝试使用FTS搜索
-            try:
-                # 获取匹配总数
-                cursor = conn.execute(
-                    """
-                    SELECT COUNT(*) FROM clipboard_items
-                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)
-                    """,
-                    (query,),
-                )
-                total = cursor.fetchone()[0]
+            # 使用 LIKE 模糊搜索，支持子字符串匹配
+            like_query = f"%{query}%"
 
-                # 获取分页数据
-                cursor = conn.execute(
-                    """
-                    SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                           content_hash, preview, device_id, device_name,
-                           created_at, is_starred
-                    FROM clipboard_items
-                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)
-                    ORDER BY created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (query, page_size, offset),
-                )
-                items = [ClipboardItem.from_db_row(row) for row in cursor.fetchall()]
+            cursor = conn.execute(
+                """
+                SELECT COUNT(*) FROM clipboard_items
+                WHERE text_content LIKE ? OR preview LIKE ?
+                """,
+                (like_query, like_query),
+            )
+            total = cursor.fetchone()[0]
 
-            except sqlite3.OperationalError:
-                # FTS不可用，回退到LIKE搜索
-                like_query = f"%{query}%"
-
-                cursor = conn.execute(
-                    """
-                    SELECT COUNT(*) FROM clipboard_items
-                    WHERE text_content LIKE ? OR preview LIKE ?
-                    """,
-                    (like_query, like_query),
-                )
-                total = cursor.fetchone()[0]
-
-                cursor = conn.execute(
-                    """
-                    SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                           content_hash, preview, device_id, device_name,
-                           created_at, is_starred
-                    FROM clipboard_items
-                    WHERE text_content LIKE ? OR preview LIKE ?
-                    ORDER BY created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (like_query, like_query, page_size, offset),
-                )
-                items = [ClipboardItem.from_db_row(row) for row in cursor.fetchall()]
+            cursor = conn.execute(
+                """
+                SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
+                       content_hash, preview, device_id, device_name,
+                       created_at, is_starred
+                FROM clipboard_items
+                WHERE text_content LIKE ? OR preview LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (like_query, like_query, page_size, offset),
+            )
+            items = [ClipboardItem.from_db_row(row) for row in cursor.fetchall()]
 
             return items, total
 
