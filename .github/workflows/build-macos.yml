@@ -70,6 +70,13 @@ jobs:
           # 替换 Info.plist 以隐藏 Dock 图标 (LSUIElement)
           cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
 
+      - name: Sign and prepare app
+        run: |
+          # Ad-hoc 签名，避免 Gatekeeper "已损坏" 提示
+          codesign --force --deep --sign - "dist/共享剪贴板.app"
+          # 移除隔离属性
+          xattr -cr "dist/共享剪贴板.app"
+
       - name: Create DMG
         run: |
           mkdir -p dmg_content

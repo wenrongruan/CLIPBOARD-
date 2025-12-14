@@ -16,7 +16,11 @@
       "Bash(git commit:*)",
       "Bash(git remote add:*)",
       "Bash(git branch:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git tag:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfix: 修复 macOS 双程序坞图标和文件选择器网络文件夹问题\n\n- 添加 Info.plist 配置 LSUIElement 隐藏 Dock 图标\n- 更新构建脚本在打包后替换 Info.plist\n- 文件选择器使用非原生对话框以支持网络位置\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfix: 添加 ad-hoc 签名解决 macOS Gatekeeper \"已损坏\" 问题\n\n- 构建后使用 codesign 进行 ad-hoc 签名\n- 移除隔离属性避免安全提示\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")"
     ]
   }
 }

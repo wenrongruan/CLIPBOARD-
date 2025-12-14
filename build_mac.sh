@@ -74,6 +74,11 @@ pyinstaller --onefile --windowed \
 echo "配置应用为菜单栏模式（隐藏 Dock 图标）..."
 cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
 
+# Ad-hoc 签名，避免 Gatekeeper "已损坏" 提示
+echo "签名应用..."
+codesign --force --deep --sign - "dist/共享剪贴板.app"
+xattr -cr "dist/共享剪贴板.app"
+
 echo ""
 echo "=========================================="
 echo "  打包完成！"
