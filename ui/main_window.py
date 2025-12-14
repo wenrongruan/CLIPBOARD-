@@ -18,6 +18,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QSizePolicy,
+    QGroupBox,
+    QSpinBox,
+    QTabWidget,
 )
 
 from core.models import ClipboardItem
@@ -34,14 +37,23 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setFixedSize(500, 200)
+        self.setFixedSize(550, 450)
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
 
     def _setup_ui(self):
-        layout = QFormLayout(self)
+        layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(20, 20, 20, 20)
+
+        # 使用选项卡组织设置
+        tab_widget = QTabWidget()
+        layout.addWidget(tab_widget)
+
+        # ========== 通用设置选项卡 ==========
+        general_tab = QWidget()
+        general_layout = QFormLayout(general_tab)
+        general_layout.setSpacing(12)
 
         # 停靠边缘
         self.dock_combo = QComboBox()
@@ -49,47 +61,138 @@ class SettingsDialog(QDialog):
         edge_map = {"right": 0, "left": 1, "top": 2, "bottom": 3}
         current_edge = Config.get_dock_edge()
         self.dock_combo.setCurrentIndex(edge_map.get(current_edge, 0))
-        layout.addRow("停靠位置:", self.dock_combo)
+        general_layout.addRow("停靠位置:", self.dock_combo)
 
-        # 数据库路径（可手动输入或浏览选择）
-        db_layout = QHBoxLayout()
+        # 热键设置
+        hotkey_layout = QHBoxLayout()
+        self.hotkey_edit = QLineEdit()
+        self.hotkey_edit.setText(Config.get_hotkey())
+        self.hotkey_edit.setPlaceholderText("例如: <cmd>+v")
+        hotkey_layout.addWidget(self.hotkey_edit)
+
+        hotkey_help = QLabel("?")
+        hotkey_help.setToolTip(
+            "热键格式说明:\n"
+            "• <cmd> = Win键(Windows) / Cmd键(macOS)\n"
+            "• <ctrl> = Ctrl键\n"
+            "• <alt> = Alt键\n"
+            "• <shift> = Shift键\n"
+            "• 示例: <cmd>+v, <ctrl>+<shift>+c"
+        )
+        hotkey_help.setStyleSheet("color: #888; font-weight: bold;")
+        hotkey_layout.addWidget(hotkey_help)
+        general_layout.addRow("全局热键:", hotkey_layout)
+
+        tab_widget.addTab(general_tab, "通用")
+
+        # ========== 数据库设置选项卡 ==========
+        db_tab = QWidget()
+        db_layout = QVBoxLayout(db_tab)
+        db_layout.setSpacing(12)
+
+        # 数据库类型选择
+        db_type_layout = QFormLayout()
+        self.db_type_combo = QComboBox()
+        self.db_type_combo.addItems(["SQLite (本地文件)", "MySQL (网络数据库)"])
+        self.db_type_combo.setCurrentIndex(0 if Config.get_db_type() == "sqlite" else 1)
+        self.db_type_combo.currentIndexChanged.connect(self._on_db_type_changed)
+        db_type_layout.addRow("数据库类型:", self.db_type_combo)
+        db_layout.addLayout(db_type_layout)
+
+        # SQLite 配置组
+        self.sqlite_group = QGroupBox("SQLite 配置")
+        sqlite_layout = QFormLayout(self.sqlite_group)
+
+        path_layout = QHBoxLayout()
         self.db_path_edit = QLineEdit()
         self.db_path_edit.setText(Config.get_database_path())
-        self.db_path_edit.setPlaceholderText("输入路径或点击浏览，支持网络路径如 /Volumes/...")
-        db_layout.addWidget(self.db_path_edit)
+        self.db_path_edit.setPlaceholderText("输入路径或点击浏览...")
+        path_layout.addWidget(self.db_path_edit)
 
         browse_btn = QPushButton("浏览...")
         browse_btn.clicked.connect(self._browse_db_path)
-        db_layout.addWidget(browse_btn)
+        path_layout.addWidget(browse_btn)
+        sqlite_layout.addRow("数据库路径:", path_layout)
 
-        layout.addRow("数据库路径:", db_layout)
+        db_layout.addWidget(self.sqlite_group)
 
-        # 按钮
+        # MySQL 配置组
+        self.mysql_group = QGroupBox("MySQL 配置")
+        mysql_layout = QFormLayout(self.mysql_group)
+
+        mysql_config = Config.get_mysql_config()
+
+        self.mysql_host_edit = QLineEdit()
+        self.mysql_host_edit.setText(mysql_config["host"])
+        self.mysql_host_edit.setPlaceholderText("localhost")
+        mysql_layout.addRow("主机:", self.mysql_host_edit)
+
+        self.mysql_port_spin = QSpinBox()
+        self.mysql_port_spin.setRange(1, 65535)
+        self.mysql_port_spin.setValue(mysql_config["port"])
+        mysql_layout.addRow("端口:", self.mysql_port_spin)
+
+        self.mysql_user_edit = QLineEdit()
+        self.mysql_user_edit.setText(mysql_config["user"])
+        self.mysql_user_edit.setPlaceholderText("root")
+        mysql_layout.addRow("用户名:", self.mysql_user_edit)
+
+        self.mysql_password_edit = QLineEdit()
+        self.mysql_password_edit.setText(mysql_config["password"])
+        self.mysql_password_edit.setEchoMode(QLineEdit.Password)
+        self.mysql_password_edit.setPlaceholderText("输入密码")
+        mysql_layout.addRow("密码:", self.mysql_password_edit)
+
+        self.mysql_database_edit = QLineEdit()
+        self.mysql_database_edit.setText(mysql_config["database"])
+        self.mysql_database_edit.setPlaceholderText("clipboard")
+        mysql_layout.addRow("数据库名:", self.mysql_database_edit)
+
+        # 测试连接按钮
+        test_btn_layout = QHBoxLayout()
+        self.test_connection_btn = QPushButton("测试连接")
+        self.test_connection_btn.clicked.connect(self._test_mysql_connection)
+        test_btn_layout.addWidget(self.test_connection_btn)
+        test_btn_layout.addStretch()
+        mysql_layout.addRow("", test_btn_layout)
+
+        db_layout.addWidget(self.mysql_group)
+        db_layout.addStretch()
+
+        tab_widget.addTab(db_tab, "数据库")
+
+        # 根据当前数据库类型显示/隐藏配置组
+        self._on_db_type_changed(self.db_type_combo.currentIndex())
+
+        # ========== 按钮 ==========
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
-        button_box.accepted.connect(self.accept)
+        button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
-        layout.addRow(button_box)
+        layout.addWidget(button_box)
+
+    def _on_db_type_changed(self, index: int):
+        """数据库类型切换时显示/隐藏对应配置"""
+        is_sqlite = index == 0
+        self.sqlite_group.setVisible(is_sqlite)
+        self.mysql_group.setVisible(not is_sqlite)
 
     def _browse_db_path(self):
         import platform
         import os
 
-        # 确定起始目录：优先使用当前路径的目录，否则用默认位置
         current_path = self.db_path_edit.text()
         if current_path and os.path.exists(os.path.dirname(current_path)):
             start_dir = current_path
         elif platform.system() == "Darwin" and os.path.exists("/Volumes"):
-            # macOS: 从 /Volumes 开始方便访问网络驱动器
             start_dir = "/Volumes"
         else:
             start_dir = Config.get_database_path()
 
-        # 使用非原生对话框以支持网络文件夹
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "选择数据库文件位置（可导航到 /Volumes 访问网络驱动器）",
+            "选择数据库文件位置",
             start_dir,
             "SQLite数据库 (*.db)",
             options=QFileDialog.DontUseNativeDialog,
@@ -97,11 +200,83 @@ class SettingsDialog(QDialog):
         if path:
             self.db_path_edit.setText(path)
 
+    def _test_mysql_connection(self):
+        """测试 MySQL 连接"""
+        try:
+            from core.mysql_database import MySQLDatabaseManager
+
+            host = self.mysql_host_edit.text() or "localhost"
+            port = self.mysql_port_spin.value()
+            user = self.mysql_user_edit.text()
+            password = self.mysql_password_edit.text()
+            database = self.mysql_database_edit.text() or "clipboard"
+
+            success, message = MySQLDatabaseManager.test_connection(
+                host, port, user, password, database
+            )
+
+            if success:
+                QMessageBox.information(self, "连接成功", message)
+            else:
+                QMessageBox.warning(self, "连接失败", message)
+        except ImportError:
+            QMessageBox.warning(
+                self, "缺少依赖",
+                "pymysql 未安装，请运行:\npip install pymysql"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"测试连接时出错:\n{str(e)}")
+
+    def _on_accept(self):
+        """确认保存设置前进行验证"""
+        # 如果选择了 MySQL，验证连接
+        if self.db_type_combo.currentIndex() == 1:
+            try:
+                from core.mysql_database import MySQLDatabaseManager
+
+                host = self.mysql_host_edit.text() or "localhost"
+                port = self.mysql_port_spin.value()
+                user = self.mysql_user_edit.text()
+                password = self.mysql_password_edit.text()
+                database = self.mysql_database_edit.text() or "clipboard"
+
+                success, message = MySQLDatabaseManager.test_connection(
+                    host, port, user, password, database
+                )
+
+                if not success:
+                    reply = QMessageBox.question(
+                        self,
+                        "连接失败",
+                        f"{message}\n\n是否仍要保存设置？",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if reply != QMessageBox.Yes:
+                        return
+            except ImportError:
+                QMessageBox.warning(
+                    self, "缺少依赖",
+                    "pymysql 未安装，无法使用 MySQL。\n请运行: pip install pymysql"
+                )
+                return
+
+        self.accept()
+
     def get_settings(self) -> dict:
         edge_map = {0: "right", 1: "left", 2: "top", 3: "bottom"}
+        db_type = "sqlite" if self.db_type_combo.currentIndex() == 0 else "mysql"
+
         return {
             "dock_edge": edge_map[self.dock_combo.currentIndex()],
+            "hotkey": self.hotkey_edit.text(),
+            "db_type": db_type,
             "database_path": self.db_path_edit.text(),
+            "mysql_host": self.mysql_host_edit.text() or "localhost",
+            "mysql_port": self.mysql_port_spin.value(),
+            "mysql_user": self.mysql_user_edit.text(),
+            "mysql_password": self.mysql_password_edit.text(),
+            "mysql_database": self.mysql_database_edit.text() or "clipboard",
         }
 
 
@@ -301,20 +476,54 @@ class MainWindow(EdgeHiddenWindow):
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
             settings = dialog.get_settings()
+            need_restart = False
 
             # 应用停靠边缘
             new_edge = settings["dock_edge"]
             if new_edge != Config.get_dock_edge():
                 self.set_dock_edge(new_edge)
 
-            # 数据库路径变更需要重启
-            new_db_path = settings["database_path"]
-            if new_db_path != Config.get_database_path():
-                Config.set_database_path(new_db_path)
+            # 热键变更
+            new_hotkey = settings["hotkey"]
+            if new_hotkey != Config.get_hotkey():
+                Config.set_hotkey(new_hotkey)
+                need_restart = True
+
+            # 数据库类型变更
+            new_db_type = settings["db_type"]
+            if new_db_type != Config.get_db_type():
+                Config.set_db_type(new_db_type)
+                need_restart = True
+
+            # SQLite 路径变更
+            if new_db_type == "sqlite":
+                new_db_path = settings["database_path"]
+                if new_db_path != Config.get_database_path():
+                    Config.set_database_path(new_db_path)
+                    need_restart = True
+
+            # MySQL 配置变更
+            if new_db_type == "mysql":
+                mysql_config = Config.get_mysql_config()
+                if (settings["mysql_host"] != mysql_config["host"] or
+                    settings["mysql_port"] != mysql_config["port"] or
+                    settings["mysql_user"] != mysql_config["user"] or
+                    settings["mysql_password"] != mysql_config["password"] or
+                    settings["mysql_database"] != mysql_config["database"]):
+                    Config.set_mysql_config(
+                        settings["mysql_host"],
+                        settings["mysql_port"],
+                        settings["mysql_user"],
+                        settings["mysql_password"],
+                        settings["mysql_database"],
+                    )
+                    need_restart = True
+
+            if need_restart:
                 QMessageBox.information(
                     self,
                     "需要重启",
-                    "数据库路径已更改，请重启应用程序以生效。",
+                    "设置已更改，请重启应用程序以生效。",
                 )
 
     def _request_quit(self):

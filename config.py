@@ -135,3 +135,50 @@ class Config:
     @classmethod
     def set_last_sync_id(cls, sync_id: int):
         cls.set_setting("last_sync_id", sync_id)
+
+    # ========== 热键配置 ==========
+    @classmethod
+    def get_default_hotkey(cls) -> str:
+        """获取默认热键"""
+        if cls.IS_MACOS:
+            return "<cmd>+v"
+        else:
+            return "<cmd>+v"  # pynput 中 <cmd> 在 Windows 上映射为 Win 键
+
+    @classmethod
+    def get_hotkey(cls) -> str:
+        return cls.get_setting("hotkey", cls.get_default_hotkey())
+
+    @classmethod
+    def set_hotkey(cls, hotkey: str):
+        cls.set_setting("hotkey", hotkey)
+
+    # ========== 数据库类型配置 ==========
+    @classmethod
+    def get_db_type(cls) -> str:
+        """获取数据库类型: sqlite 或 mysql"""
+        return cls.get_setting("db_type", "sqlite")
+
+    @classmethod
+    def set_db_type(cls, db_type: str):
+        if db_type in ("sqlite", "mysql"):
+            cls.set_setting("db_type", db_type)
+
+    # ========== MySQL 配置 ==========
+    @classmethod
+    def get_mysql_config(cls) -> dict:
+        return {
+            "host": cls.get_setting("mysql_host", "localhost"),
+            "port": cls.get_setting("mysql_port", 3306),
+            "user": cls.get_setting("mysql_user", ""),
+            "password": cls.get_setting("mysql_password", ""),
+            "database": cls.get_setting("mysql_database", "clipboard"),
+        }
+
+    @classmethod
+    def set_mysql_config(cls, host: str, port: int, user: str, password: str, database: str):
+        cls.set_setting("mysql_host", host)
+        cls.set_setting("mysql_port", port)
+        cls.set_setting("mysql_user", user)
+        cls.set_setting("mysql_password", password)
+        cls.set_setting("mysql_database", database)

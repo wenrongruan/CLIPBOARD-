@@ -1,7 +1,7 @@
 import platform
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, QPoint
+from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, QPoint, Slot
 from PySide6.QtGui import QCursor, QScreen
 from PySide6.QtWidgets import QWidget, QApplication
 
@@ -256,6 +256,7 @@ class EdgeHiddenWindow(QWidget):
         self._animation.start()
         self._is_visible = False
 
+    @Slot()
     def show_window(self):
         # 启动显示保护期，防止立即隐藏
         self._show_protection = True

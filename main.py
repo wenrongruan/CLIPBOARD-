@@ -2,22 +2,30 @@ import sys
 import os
 import logging
 import platform
+import threading
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QCursor
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QMetaObject, Q_ARG
 
 IS_MACOS = platform.system() == "Darwin"
 
 from config import Config
-from core.database import DatabaseManager
+from core.db_factory import create_database_manager
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
 from ui.main_window import MainWindow
+
+# 全局热键支持
+try:
+    from pynput import keyboard
+    HOTKEY_AVAILABLE = True
+except ImportError:
+    HOTKEY_AVAILABLE = False
 
 # 配置日志 (只显示警告和错误)
 logging.basicConfig(
@@ -107,10 +115,13 @@ class ClipboardApp:
         # 创建主窗口
         self._create_main_window()
 
+        # 初始化全局热键
+        self._init_hotkey()
+
     def _init_components(self):
         """初始化核心组件"""
-        db_path = Config.get_database_path()
-        self.db_manager = DatabaseManager(db_path)
+        # 使用数据库工厂创建合适的数据库管理器
+        self.db_manager = create_database_manager()
         self.repository = ClipboardRepository(self.db_manager)
 
     def _create_tray_icon(self):
@@ -193,8 +204,47 @@ class ClipboardApp:
             self.sync_service.start()
             self.pause_action.setText("暂停监控")
 
+    def _init_hotkey(self):
+        """初始化全局热键"""
+        self.hotkey_listener = None
+
+        if not HOTKEY_AVAILABLE:
+            logger.warning("pynput 未安装，全局热键功能不可用")
+            return
+
+        hotkey = Config.get_hotkey()
+        if not hotkey:
+            return
+
+        try:
+            # 创建热键监听器
+            self.hotkey_listener = keyboard.GlobalHotKeys({
+                hotkey: self._on_hotkey_pressed
+            })
+            self.hotkey_listener.start()
+            logger.info(f"全局热键已注册: {hotkey}")
+        except Exception as e:
+            logger.error(f"注册全局热键失败: {e}")
+
+    def _on_hotkey_pressed(self):
+        """热键被按下时触发"""
+        # 在主线程中显示窗口
+        # 使用 QMetaObject.invokeMethod 从非 Qt 线程安全调用
+        try:
+            QMetaObject.invokeMethod(
+                self.main_window,
+                "show_window",
+                Qt.QueuedConnection
+            )
+        except Exception as e:
+            logger.error(f"热键触发显示窗口失败: {e}")
+
     def _quit(self):
         """退出应用"""
+        # 停止热键监听
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+
         self.clipboard_monitor.stop()
         self.sync_service.stop()
         self.tray_icon.hide()
