@@ -38,9 +38,16 @@ QPushButton {
     background-color: #3c3c3c;
     border: 1px solid #555555;
     border-radius: 6px;
-    padding: 6px 12px;
+    padding: 4px 8px;
     color: #ffffff;
-    min-width: 60px;
+}
+
+QPushButton[text="📌"], QPushButton[text="📍"],
+QPushButton[text="⚙"], QPushButton[text="✕"] {
+    min-width: 28px;
+    max-width: 28px;
+    padding: 2px;
+    font-size: 14px;
 }
 
 QPushButton:hover {

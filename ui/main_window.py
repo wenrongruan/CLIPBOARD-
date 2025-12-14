@@ -148,19 +148,19 @@ class MainWindow(EdgeHiddenWindow):
 
         self.pin_btn = QPushButton("📌")
         self.pin_btn.setToolTip("固定窗口")
-        self.pin_btn.setFixedWidth(36)
+        self.pin_btn.setFixedSize(28, 28)
         self.pin_btn.clicked.connect(self._toggle_pin)
         header_layout.addWidget(self.pin_btn)
 
         self.settings_btn = QPushButton("⚙")
         self.settings_btn.setToolTip("设置")
-        self.settings_btn.setFixedWidth(36)
+        self.settings_btn.setFixedSize(28, 28)
         self.settings_btn.clicked.connect(self._show_settings)
         header_layout.addWidget(self.settings_btn)
 
         self.quit_btn = QPushButton("✕")
         self.quit_btn.setToolTip("退出应用")
-        self.quit_btn.setFixedWidth(36)
+        self.quit_btn.setFixedSize(28, 28)
         self.quit_btn.clicked.connect(self._request_quit)
         header_layout.addWidget(self.quit_btn)
 
