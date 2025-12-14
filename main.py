@@ -7,7 +7,7 @@ import platform
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor
+from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QCursor
 from PySide6.QtCore import Qt
 
 IS_MACOS = platform.system() == "Darwin"
@@ -159,6 +159,9 @@ class ClipboardApp:
             self.sync_service,
         )
 
+        # 连接退出信号
+        self.main_window.quit_requested.connect(self._quit)
+
         # 启动服务
         self.clipboard_monitor.start()
         self.sync_service.start()
@@ -170,7 +173,14 @@ class ClipboardApp:
     def _on_tray_activated(self, reason):
         """托盘图标被点击"""
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self._show_window()
+            if IS_MACOS:
+                # macOS 上左键点击显示菜单
+                self.tray_icon.contextMenu().popup(QCursor.pos())
+            else:
+                self._show_window()
+        elif reason == QSystemTrayIcon.ActivationReason.Context:
+            # 右键点击显示菜单（主要用于 macOS）
+            self.tray_icon.contextMenu().popup(QCursor.pos())
 
     def _toggle_monitoring(self, checked: bool):
         """切换监控状态"""

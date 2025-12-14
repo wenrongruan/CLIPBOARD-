@@ -106,6 +106,8 @@ class SettingsDialog(QDialog):
 
 
 class MainWindow(EdgeHiddenWindow):
+    quit_requested = Signal()  # 退出信号
+
     def __init__(
         self,
         repository: ClipboardRepository,
@@ -155,6 +157,12 @@ class MainWindow(EdgeHiddenWindow):
         self.settings_btn.setFixedWidth(36)
         self.settings_btn.clicked.connect(self._show_settings)
         header_layout.addWidget(self.settings_btn)
+
+        self.quit_btn = QPushButton("✕")
+        self.quit_btn.setToolTip("退出应用")
+        self.quit_btn.setFixedWidth(36)
+        self.quit_btn.clicked.connect(self._request_quit)
+        header_layout.addWidget(self.quit_btn)
 
         layout.addLayout(header_layout)
 
@@ -308,3 +316,7 @@ class MainWindow(EdgeHiddenWindow):
                     "需要重启",
                     "数据库路径已更改，请重启应用程序以生效。",
                 )
+
+    def _request_quit(self):
+        """请求退出应用"""
+        self.quit_requested.emit()
