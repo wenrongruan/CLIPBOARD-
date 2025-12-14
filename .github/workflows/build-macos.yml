@@ -79,9 +79,14 @@ jobs:
 
       - name: Create DMG
         run: |
+          # 清理可能存在的旧文件
+          rm -rf dmg_content 共享剪贴板-macOS.dmg
           mkdir -p dmg_content
-          cp -r "dist/共享剪贴板.app" dmg_content/
+          # 使用 ditto 代替 cp -r 避免资源占用问题
+          ditto "dist/共享剪贴板.app" "dmg_content/共享剪贴板.app"
           ln -s /Applications dmg_content/Applications
+          # 添加短暂延迟确保文件系统同步
+          sleep 2
           hdiutil create -volname "共享剪贴板" \
             -srcfolder dmg_content \
             -ov -format UDZO \
