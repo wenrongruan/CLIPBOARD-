@@ -73,11 +73,24 @@ class SettingsDialog(QDialog):
         layout.addRow(button_box)
 
     def _browse_db_path(self):
+        import platform
+        import os
+
+        # 确定起始目录：优先使用当前路径的目录，否则用默认位置
+        current_path = self.db_path_edit.text()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            start_dir = current_path
+        elif platform.system() == "Darwin" and os.path.exists("/Volumes"):
+            # macOS: 从 /Volumes 开始方便访问网络驱动器
+            start_dir = "/Volumes"
+        else:
+            start_dir = Config.get_database_path()
+
         # 使用非原生对话框以支持网络文件夹
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "选择数据库文件位置",
-            Config.get_database_path(),
+            "选择数据库文件位置（可导航到 /Volumes 访问网络驱动器）",
+            start_dir,
             "SQLite数据库 (*.db)",
             options=QFileDialog.DontUseNativeDialog,
         )
