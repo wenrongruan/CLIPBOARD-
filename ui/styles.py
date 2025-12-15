@@ -43,7 +43,7 @@ QPushButton {
 }
 
 QPushButton[text="📌"], QPushButton[text="📍"],
-QPushButton[text="⚙"], QPushButton[text="✕"] {
+QPushButton[text="⚙"], QPushButton[text="✕"], QPushButton[text="—"] {
     min-width: 28px;
     max-width: 28px;
     padding: 2px;

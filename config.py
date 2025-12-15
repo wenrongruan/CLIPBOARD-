@@ -182,3 +182,14 @@ class Config:
         cls.set_setting("mysql_user", user)
         cls.set_setting("mysql_password", password)
         cls.set_setting("mysql_database", database)
+
+    # ========== 语言配置 ==========
+    @classmethod
+    def get_language(cls) -> str:
+        """获取当前语言设置"""
+        return cls.get_setting("language", "zh_CN")
+
+    @classmethod
+    def set_language(cls, language: str):
+        """设置语言"""
+        cls.set_setting("language", language)

@@ -2,7 +2,7 @@ import platform
 from typing import Optional
 
 from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, QPoint, Slot
-from PySide6.QtGui import QCursor, QScreen
+from PySide6.QtGui import QCursor, QScreen, QMouseEvent
 from PySide6.QtWidgets import QWidget, QApplication
 
 from config import Config
@@ -50,6 +50,11 @@ class EdgeHiddenWindow(QWidget):
         self._is_visible = False
         self._is_pinned = False  # 固定模式，不自动隐藏
         self._show_protection = False  # 显示保护期，防止立即隐藏
+
+        # 拖动支持
+        self._dragging = False
+        self._drag_start_pos = QPoint()
+        self._drag_start_geometry = QRect()
 
         # 鼠标位置检测定时器
         self._mouse_check_timer = QTimer(self)
@@ -293,3 +298,35 @@ class EdgeHiddenWindow(QWidget):
 
         if not window_rect.contains(cursor_pos):
             self._slide_out()
+
+    def mousePressEvent(self, event: QMouseEvent):
+        """鼠标按下事件 - 开始拖动"""
+        if event.button() == Qt.LeftButton:
+            # 只在窗口顶部 40 像素区域允许拖动
+            if event.position().y() <= 40:
+                self._dragging = True
+                self._drag_start_pos = event.globalPosition().toPoint()
+                self._drag_start_geometry = self.geometry()
+                self.setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        """鼠标移动事件 - 拖动窗口"""
+        if self._dragging:
+            delta = event.globalPosition().toPoint() - self._drag_start_pos
+            new_pos = self._drag_start_geometry.topLeft() + delta
+            self.move(new_pos)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        """鼠标释放事件 - 结束拖动"""
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)

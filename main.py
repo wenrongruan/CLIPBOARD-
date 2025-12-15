@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, QMetaObject, Q_ARG
 IS_MACOS = platform.system() == "Darwin"
 
 from config import Config
+from i18n import t, set_language
 from core.db_factory import create_database_manager
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
@@ -35,8 +36,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_default_icon() -> QIcon:
-    """创建一个简单的默认图标"""
+def get_app_icon() -> QIcon:
+    """获取应用图标"""
+    # 尝试加载生成的图标
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 优先使用 ICO 文件（Windows）或 PNG 文件
+    if IS_MACOS:
+        icon_path = os.path.join(base_dir, "icons", "icon_macos.png")
+    else:
+        icon_path = os.path.join(base_dir, "icons", "app.ico")
+
+    if os.path.exists(icon_path):
+        return QIcon(icon_path)
+
+    # 备用：使用 icon.png
+    png_path = os.path.join(base_dir, "icon.png")
+    if os.path.exists(png_path):
+        return QIcon(png_path)
+
+    # 最后备用：生成简单图标
+    return create_fallback_icon()
+
+
+def create_fallback_icon() -> QIcon:
+    """创建备用图标（当图标文件不存在时）"""
     # macOS 菜单栏图标需要较小尺寸，且支持深色/浅色模式
     if IS_MACOS:
         size = 22
@@ -99,10 +124,13 @@ class ClipboardApp:
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)  # 托盘模式
 
+        # 初始化语言设置
+        set_language(Config.get_language())
+
         # macOS 特定设置
         if IS_MACOS:
             # 设置应用名称（显示在菜单栏）
-            self.app.setApplicationName("共享剪贴板")
+            self.app.setApplicationName(t("app_name"))
             # macOS 上隐藏 Dock 图标（作为菜单栏应用运行）
             self.app.setQuitOnLastWindowClosed(False)
 
@@ -127,31 +155,19 @@ class ClipboardApp:
     def _create_tray_icon(self):
         """创建系统托盘图标"""
         self.tray_icon = QSystemTrayIcon(self.app)
-        self.tray_icon.setIcon(create_default_icon())
-        self.tray_icon.setToolTip("共享剪贴板")
+        self.tray_icon.setIcon(get_app_icon())
+        self.tray_icon.setToolTip(t("app_name"))
 
         # 创建托盘菜单
         menu = QMenu()
 
-        # macOS 使用更符合习惯的菜单项名称
-        show_text = "显示共享剪贴板" if IS_MACOS else "显示窗口"
-        show_action = QAction(show_text, menu)
+        show_action = QAction(t("show_window"), menu)
         show_action.triggered.connect(self._show_window)
         menu.addAction(show_action)
 
         menu.addSeparator()
 
-        pause_action = QAction("暂停监控", menu)
-        pause_action.setCheckable(True)
-        pause_action.triggered.connect(self._toggle_monitoring)
-        self.pause_action = pause_action
-        menu.addAction(pause_action)
-
-        menu.addSeparator()
-
-        # macOS 使用 "退出 AppName" 的格式
-        quit_text = "退出共享剪贴板" if IS_MACOS else "退出"
-        quit_action = QAction(quit_text, menu)
+        quit_action = QAction(t("quit"), menu)
         quit_action.triggered.connect(self._quit)
         menu.addAction(quit_action)
 
@@ -192,17 +208,6 @@ class ClipboardApp:
         elif reason == QSystemTrayIcon.ActivationReason.Context:
             # 右键点击显示菜单（主要用于 macOS）
             self.tray_icon.contextMenu().popup(QCursor.pos())
-
-    def _toggle_monitoring(self, checked: bool):
-        """切换监控状态"""
-        if checked:
-            self.clipboard_monitor.stop()
-            self.sync_service.stop()
-            self.pause_action.setText("恢复监控")
-        else:
-            self.clipboard_monitor.start()
-            self.sync_service.start()
-            self.pause_action.setText("暂停监控")
 
     def _init_hotkey(self):
         """初始化全局热键"""

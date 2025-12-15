@@ -28,6 +28,7 @@ from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
 from config import Config
+from i18n import t, set_language, get_language, get_languages, SUPPORTED_LANGUAGES
 from .edge_window import EdgeHiddenWindow
 from .clipboard_item import ClipboardItemWidget
 from .styles import MAIN_STYLE
@@ -36,8 +37,8 @@ from .styles import MAIN_STYLE
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("设置")
-        self.setFixedSize(550, 450)
+        self.setWindowTitle(t("settings"))
+        self.setFixedSize(550, 480)
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
 
@@ -55,35 +56,38 @@ class SettingsDialog(QDialog):
         general_layout = QFormLayout(general_tab)
         general_layout.setSpacing(12)
 
+        # 语言设置
+        self.language_combo = QComboBox()
+        languages = get_languages()
+        self._language_codes = list(languages.keys())
+        self.language_combo.addItems(list(languages.values()))
+        current_lang = Config.get_language()
+        if current_lang in self._language_codes:
+            self.language_combo.setCurrentIndex(self._language_codes.index(current_lang))
+        general_layout.addRow(t("language"), self.language_combo)
+
         # 停靠边缘
         self.dock_combo = QComboBox()
-        self.dock_combo.addItems(["右侧", "左侧", "顶部", "底部"])
+        self.dock_combo.addItems([t("dock_right"), t("dock_left"), t("dock_top"), t("dock_bottom")])
         edge_map = {"right": 0, "left": 1, "top": 2, "bottom": 3}
         current_edge = Config.get_dock_edge()
         self.dock_combo.setCurrentIndex(edge_map.get(current_edge, 0))
-        general_layout.addRow("停靠位置:", self.dock_combo)
+        general_layout.addRow(t("dock_position"), self.dock_combo)
 
         # 热键设置
         hotkey_layout = QHBoxLayout()
         self.hotkey_edit = QLineEdit()
         self.hotkey_edit.setText(Config.get_hotkey())
-        self.hotkey_edit.setPlaceholderText("例如: <cmd>+v")
+        self.hotkey_edit.setPlaceholderText(t("hotkey_placeholder"))
         hotkey_layout.addWidget(self.hotkey_edit)
 
         hotkey_help = QLabel("?")
-        hotkey_help.setToolTip(
-            "热键格式说明:\n"
-            "• <cmd> = Win键(Windows) / Cmd键(macOS)\n"
-            "• <ctrl> = Ctrl键\n"
-            "• <alt> = Alt键\n"
-            "• <shift> = Shift键\n"
-            "• 示例: <cmd>+v, <ctrl>+<shift>+c"
-        )
+        hotkey_help.setToolTip(t("hotkey_help"))
         hotkey_help.setStyleSheet("color: #888; font-weight: bold;")
         hotkey_layout.addWidget(hotkey_help)
-        general_layout.addRow("全局热键:", hotkey_layout)
+        general_layout.addRow(t("global_hotkey"), hotkey_layout)
 
-        tab_widget.addTab(general_tab, "通用")
+        tab_widget.addTab(general_tab, t("general"))
 
         # ========== 数据库设置选项卡 ==========
         db_tab = QWidget()
@@ -93,31 +97,31 @@ class SettingsDialog(QDialog):
         # 数据库类型选择
         db_type_layout = QFormLayout()
         self.db_type_combo = QComboBox()
-        self.db_type_combo.addItems(["SQLite (本地文件)", "MySQL (网络数据库)"])
+        self.db_type_combo.addItems([t("db_sqlite"), t("db_mysql")])
         self.db_type_combo.setCurrentIndex(0 if Config.get_db_type() == "sqlite" else 1)
         self.db_type_combo.currentIndexChanged.connect(self._on_db_type_changed)
-        db_type_layout.addRow("数据库类型:", self.db_type_combo)
+        db_type_layout.addRow(t("db_type"), self.db_type_combo)
         db_layout.addLayout(db_type_layout)
 
         # SQLite 配置组
-        self.sqlite_group = QGroupBox("SQLite 配置")
+        self.sqlite_group = QGroupBox(t("sqlite_config"))
         sqlite_layout = QFormLayout(self.sqlite_group)
 
         path_layout = QHBoxLayout()
         self.db_path_edit = QLineEdit()
         self.db_path_edit.setText(Config.get_database_path())
-        self.db_path_edit.setPlaceholderText("输入路径或点击浏览...")
+        self.db_path_edit.setPlaceholderText(t("path_placeholder"))
         path_layout.addWidget(self.db_path_edit)
 
-        browse_btn = QPushButton("浏览...")
+        browse_btn = QPushButton(t("browse"))
         browse_btn.clicked.connect(self._browse_db_path)
         path_layout.addWidget(browse_btn)
-        sqlite_layout.addRow("数据库路径:", path_layout)
+        sqlite_layout.addRow(t("db_path"), path_layout)
 
         db_layout.addWidget(self.sqlite_group)
 
         # MySQL 配置组
-        self.mysql_group = QGroupBox("MySQL 配置")
+        self.mysql_group = QGroupBox(t("mysql_config"))
         mysql_layout = QFormLayout(self.mysql_group)
 
         mysql_config = Config.get_mysql_config()
@@ -125,32 +129,32 @@ class SettingsDialog(QDialog):
         self.mysql_host_edit = QLineEdit()
         self.mysql_host_edit.setText(mysql_config["host"])
         self.mysql_host_edit.setPlaceholderText("localhost")
-        mysql_layout.addRow("主机:", self.mysql_host_edit)
+        mysql_layout.addRow(t("host"), self.mysql_host_edit)
 
         self.mysql_port_spin = QSpinBox()
         self.mysql_port_spin.setRange(1, 65535)
         self.mysql_port_spin.setValue(mysql_config["port"])
-        mysql_layout.addRow("端口:", self.mysql_port_spin)
+        mysql_layout.addRow(t("port"), self.mysql_port_spin)
 
         self.mysql_user_edit = QLineEdit()
         self.mysql_user_edit.setText(mysql_config["user"])
         self.mysql_user_edit.setPlaceholderText("root")
-        mysql_layout.addRow("用户名:", self.mysql_user_edit)
+        mysql_layout.addRow(t("username"), self.mysql_user_edit)
 
         self.mysql_password_edit = QLineEdit()
         self.mysql_password_edit.setText(mysql_config["password"])
         self.mysql_password_edit.setEchoMode(QLineEdit.Password)
-        self.mysql_password_edit.setPlaceholderText("输入密码")
-        mysql_layout.addRow("密码:", self.mysql_password_edit)
+        self.mysql_password_edit.setPlaceholderText(t("password"))
+        mysql_layout.addRow(t("password"), self.mysql_password_edit)
 
         self.mysql_database_edit = QLineEdit()
         self.mysql_database_edit.setText(mysql_config["database"])
         self.mysql_database_edit.setPlaceholderText("clipboard")
-        mysql_layout.addRow("数据库名:", self.mysql_database_edit)
+        mysql_layout.addRow(t("db_name"), self.mysql_database_edit)
 
         # 测试连接按钮
         test_btn_layout = QHBoxLayout()
-        self.test_connection_btn = QPushButton("测试连接")
+        self.test_connection_btn = QPushButton(t("test_connection"))
         self.test_connection_btn.clicked.connect(self._test_mysql_connection)
         test_btn_layout.addWidget(self.test_connection_btn)
         test_btn_layout.addStretch()
@@ -159,7 +163,7 @@ class SettingsDialog(QDialog):
         db_layout.addWidget(self.mysql_group)
         db_layout.addStretch()
 
-        tab_widget.addTab(db_tab, "数据库")
+        tab_widget.addTab(db_tab, t("database"))
 
         # 根据当前数据库类型显示/隐藏配置组
         self._on_db_type_changed(self.db_type_combo.currentIndex())
@@ -192,9 +196,9 @@ class SettingsDialog(QDialog):
 
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "选择数据库文件位置",
+            t("select_db_file"),
             start_dir,
-            "SQLite数据库 (*.db)",
+            "SQLite (*.db)",
             options=QFileDialog.DontUseNativeDialog,
         )
         if path:
@@ -216,16 +220,16 @@ class SettingsDialog(QDialog):
             )
 
             if success:
-                QMessageBox.information(self, "连接成功", message)
+                QMessageBox.information(self, t("connection_success"), message)
             else:
-                QMessageBox.warning(self, "连接失败", message)
+                QMessageBox.warning(self, t("connection_failed"), message)
         except ImportError:
             QMessageBox.warning(
-                self, "缺少依赖",
-                "pymysql 未安装，请运行:\npip install pymysql"
+                self, t("missing_dependency"),
+                t("pymysql_required")
             )
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"测试连接时出错:\n{str(e)}")
+            QMessageBox.critical(self, t("error"), f"{str(e)}")
 
     def _on_accept(self):
         """确认保存设置前进行验证"""
@@ -247,8 +251,8 @@ class SettingsDialog(QDialog):
                 if not success:
                     reply = QMessageBox.question(
                         self,
-                        "连接失败",
-                        f"{message}\n\n是否仍要保存设置？",
+                        t("connection_failed"),
+                        t("save_anyway", message=message),
                         QMessageBox.Yes | QMessageBox.No,
                         QMessageBox.No,
                     )
@@ -256,8 +260,8 @@ class SettingsDialog(QDialog):
                         return
             except ImportError:
                 QMessageBox.warning(
-                    self, "缺少依赖",
-                    "pymysql 未安装，无法使用 MySQL。\n请运行: pip install pymysql"
+                    self, t("missing_dependency"),
+                    t("pymysql_required")
                 )
                 return
 
@@ -266,8 +270,10 @@ class SettingsDialog(QDialog):
     def get_settings(self) -> dict:
         edge_map = {0: "right", 1: "left", 2: "top", 3: "bottom"}
         db_type = "sqlite" if self.db_type_combo.currentIndex() == 0 else "mysql"
+        language = self._language_codes[self.language_combo.currentIndex()]
 
         return {
+            "language": language,
             "dock_edge": edge_map[self.dock_combo.currentIndex()],
             "hotkey": self.hotkey_edit.text(),
             "db_type": db_type,
@@ -317,24 +323,30 @@ class MainWindow(EdgeHiddenWindow):
         header_layout.setSpacing(8)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索剪贴板...")
+        self.search_input.setPlaceholderText(t("search_placeholder"))
         self.search_input.textChanged.connect(self._on_search_changed)
         header_layout.addWidget(self.search_input, 1)
 
         self.pin_btn = QPushButton("📌")
-        self.pin_btn.setToolTip("固定窗口")
+        self.pin_btn.setToolTip(t("pin_window"))
         self.pin_btn.setFixedSize(28, 28)
         self.pin_btn.clicked.connect(self._toggle_pin)
         header_layout.addWidget(self.pin_btn)
 
         self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setToolTip("设置")
+        self.settings_btn.setToolTip(t("settings"))
         self.settings_btn.setFixedSize(28, 28)
         self.settings_btn.clicked.connect(self._show_settings)
         header_layout.addWidget(self.settings_btn)
 
+        self.minimize_btn = QPushButton("—")
+        self.minimize_btn.setToolTip(t("minimize"))
+        self.minimize_btn.setFixedSize(28, 28)
+        self.minimize_btn.clicked.connect(self._minimize_window)
+        header_layout.addWidget(self.minimize_btn)
+
         self.quit_btn = QPushButton("✕")
-        self.quit_btn.setToolTip("退出应用")
+        self.quit_btn.setToolTip(t("quit_app"))
         self.quit_btn.setFixedSize(28, 28)
         self.quit_btn.clicked.connect(self._request_quit)
         header_layout.addWidget(self.quit_btn)
@@ -352,7 +364,7 @@ class MainWindow(EdgeHiddenWindow):
         pagination_layout = QHBoxLayout()
         pagination_layout.setSpacing(8)
 
-        self.prev_btn = QPushButton("◀ 上一页")
+        self.prev_btn = QPushButton(t("prev_page"))
         self.prev_btn.clicked.connect(self._prev_page)
         pagination_layout.addWidget(self.prev_btn)
 
@@ -361,7 +373,7 @@ class MainWindow(EdgeHiddenWindow):
         self.page_label.setAlignment(Qt.AlignCenter)
         pagination_layout.addWidget(self.page_label, 1)
 
-        self.next_btn = QPushButton("下一页 ▶")
+        self.next_btn = QPushButton(t("next_page"))
         self.next_btn.clicked.connect(self._next_page)
         pagination_layout.addWidget(self.next_btn)
 
@@ -444,8 +456,8 @@ class MainWindow(EdgeHiddenWindow):
     def _on_item_delete(self, item: ClipboardItem):
         reply = QMessageBox.question(
             self,
-            "确认删除",
-            "确定要删除这条记录吗？",
+            t("confirm_delete"),
+            t("delete_confirm_msg"),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -470,13 +482,24 @@ class MainWindow(EdgeHiddenWindow):
     def _toggle_pin(self):
         is_pinned = self.toggle_pin()
         self.pin_btn.setText("📍" if is_pinned else "📌")
-        self.pin_btn.setToolTip("取消固定" if is_pinned else "固定窗口")
+        self.pin_btn.setToolTip(t("unpin_window") if is_pinned else t("pin_window"))
+
+    def _minimize_window(self):
+        """最小化窗口（完全隐藏）"""
+        self.hide_window()
 
     def _show_settings(self):
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
             settings = dialog.get_settings()
             need_restart = False
+
+            # 语言变更
+            new_language = settings["language"]
+            if new_language != Config.get_language():
+                Config.set_language(new_language)
+                set_language(new_language)
+                need_restart = True
 
             # 应用停靠边缘
             new_edge = settings["dock_edge"]
@@ -522,8 +545,8 @@ class MainWindow(EdgeHiddenWindow):
             if need_restart:
                 QMessageBox.information(
                     self,
-                    "需要重启",
-                    "设置已更改，请重启应用程序以生效。",
+                    t("need_restart"),
+                    t("restart_msg"),
                 )
 
     def _request_quit(self):
