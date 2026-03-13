@@ -253,6 +253,9 @@ class ClipboardApp:
         self.clipboard_monitor.stop()
         self.sync_service.stop()
         self.tray_icon.hide()
+        # 关闭持久数据库连接
+        if hasattr(self.db_manager, 'close'):
+            self.db_manager.close()
         self.app.quit()
 
     def run(self) -> int:

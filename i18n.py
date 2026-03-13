@@ -85,9 +85,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[图片]",
         "from_device": "来自: {device}",
 
+        # 图片保存
+        "save_image": "保存图片",
+        "image_load_failed": "无法加载图片数据",
+        "save_failed": "保存失败: {error}",
+
+        # 数据迁移
+        "migrate_data": "迁移数据",
+        "migrate_data_confirm": "是否将现有数据迁移到新数据库？",
+        "migrating": "正在迁移数据...",
+        "migration_complete": "数据迁移完成，共迁移 {count} 条记录。",
+        "migration_failed": "数据迁移失败: {error}",
+
+        # 数据库配置文件
+        "db_profile": "数据库配置:",
+        "add_profile": "添加",
+        "delete_profile": "删除",
+        "profile_name": "配置名称",
+        "enter_profile_name": "请输入新配置名称:",
+        "profile_exists": "配置名称已存在",
+        "cannot_delete_active": "不能删除当前使用的配置",
+        "confirm_delete_profile": "确定要删除配置 \"{name}\" 吗？",
+
         # 提示消息
         "need_restart": "需要重启",
         "restart_msg": "设置已更改，请重启应用程序以生效。",
+
+        # 过滤与存储
+        "filter_storage": "过滤与存储",
+        "content_filter": "内容过滤",
+        "save_text": "保存文本",
+        "save_images": "保存图片",
+        "max_text_length": "最大文本长度:",
+        "max_image_size": "最大图片大小:",
+        "unlimited": "不限",
+        "characters": "字符",
+        "storage_management": "存储管理",
+        "max_items": "最大条目数:",
+        "retention_days": "自动清理天数:",
+        "never_cleanup": "永不清理",
+        "days": "天",
+        "poll_interval": "轮询间隔:",
 
         # 托盘菜单
         "show_window": "显示窗口",
@@ -160,9 +198,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[Image]",
         "from_device": "From: {device}",
 
+        # Image save
+        "save_image": "Save Image",
+        "image_load_failed": "Failed to load image data",
+        "save_failed": "Save failed: {error}",
+
+        # Data migration
+        "migrate_data": "Migrate Data",
+        "migrate_data_confirm": "Migrate existing data to the new database?",
+        "migrating": "Migrating data...",
+        "migration_complete": "Migration complete. {count} items migrated.",
+        "migration_failed": "Migration failed: {error}",
+
+        # Database profiles
+        "db_profile": "Database profile:",
+        "add_profile": "Add",
+        "delete_profile": "Delete",
+        "profile_name": "Profile name",
+        "enter_profile_name": "Enter new profile name:",
+        "profile_exists": "Profile name already exists",
+        "cannot_delete_active": "Cannot delete the active profile",
+        "confirm_delete_profile": "Delete profile \"{name}\"?",
+
         # Messages
         "need_restart": "Restart Required",
         "restart_msg": "Settings have changed. Please restart the application for changes to take effect.",
+
+        # Filter & Storage
+        "filter_storage": "Filter & Storage",
+        "content_filter": "Content Filter",
+        "save_text": "Save text",
+        "save_images": "Save images",
+        "max_text_length": "Max text length:",
+        "max_image_size": "Max image size:",
+        "unlimited": "Unlimited",
+        "characters": "chars",
+        "storage_management": "Storage Management",
+        "max_items": "Max items:",
+        "retention_days": "Auto-cleanup days:",
+        "never_cleanup": "Never",
+        "days": "days",
+        "poll_interval": "Poll interval:",
 
         # Tray menu
         "show_window": "Show Window",
@@ -235,9 +311,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[画像]",
         "from_device": "送信元: {device}",
 
+        # 画像保存
+        "save_image": "画像を保存",
+        "image_load_failed": "画像データの読み込みに失敗しました",
+        "save_failed": "保存に失敗しました: {error}",
+
+        # データ移行
+        "migrate_data": "データ移行",
+        "migrate_data_confirm": "既存のデータを新しいデータベースに移行しますか？",
+        "migrating": "データを移行中...",
+        "migration_complete": "移行完了。{count} 件のアイテムを移行しました。",
+        "migration_failed": "移行に失敗しました: {error}",
+
+        # データベースプロファイル
+        "db_profile": "データベースプロファイル:",
+        "add_profile": "追加",
+        "delete_profile": "削除",
+        "profile_name": "プロファイル名",
+        "enter_profile_name": "新しいプロファイル名を入力してください:",
+        "profile_exists": "プロファイル名は既に存在します",
+        "cannot_delete_active": "使用中のプロファイルは削除できません",
+        "confirm_delete_profile": "プロファイル \"{name}\" を削除しますか？",
+
         # メッセージ
         "need_restart": "再起動が必要",
         "restart_msg": "設定が変更されました。変更を反映するにはアプリケーションを再起動してください。",
+
+        # フィルタとストレージ
+        "filter_storage": "フィルタとストレージ",
+        "content_filter": "コンテンツフィルタ",
+        "save_text": "テキストを保存",
+        "save_images": "画像を保存",
+        "max_text_length": "最大テキスト長:",
+        "max_image_size": "最大画像サイズ:",
+        "unlimited": "無制限",
+        "characters": "文字",
+        "storage_management": "ストレージ管理",
+        "max_items": "最大アイテム数:",
+        "retention_days": "自動クリーンアップ日数:",
+        "never_cleanup": "クリーンアップしない",
+        "days": "日",
+        "poll_interval": "ポーリング間隔:",
 
         # トレイメニュー
         "show_window": "ウィンドウを表示",
@@ -310,9 +424,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[이미지]",
         "from_device": "보낸 기기: {device}",
 
+        # 이미지 저장
+        "save_image": "이미지 저장",
+        "image_load_failed": "이미지 데이터를 불러올 수 없습니다",
+        "save_failed": "저장 실패: {error}",
+
+        # 데이터 마이그레이션
+        "migrate_data": "데이터 마이그레이션",
+        "migrate_data_confirm": "기존 데이터를 새 데이터베이스로 마이그레이션하시겠습니까?",
+        "migrating": "데이터 마이그레이션 중...",
+        "migration_complete": "마이그레이션 완료. {count}개 항목이 마이그레이션되었습니다.",
+        "migration_failed": "마이그레이션 실패: {error}",
+
+        # 데이터베이스 프로필
+        "db_profile": "데이터베이스 프로필:",
+        "add_profile": "추가",
+        "delete_profile": "삭제",
+        "profile_name": "프로필 이름",
+        "enter_profile_name": "새 프로필 이름을 입력하세요:",
+        "profile_exists": "프로필 이름이 이미 존재합니다",
+        "cannot_delete_active": "사용 중인 프로필은 삭제할 수 없습니다",
+        "confirm_delete_profile": "프로필 \"{name}\"을(를) 삭제하시겠습니까?",
+
         # 메시지
         "need_restart": "재시작 필요",
         "restart_msg": "설정이 변경되었습니다. 변경 사항을 적용하려면 응용 프로그램을 다시 시작하세요.",
+
+        # 필터 및 저장소
+        "filter_storage": "필터 및 저장소",
+        "content_filter": "콘텐츠 필터",
+        "save_text": "텍스트 저장",
+        "save_images": "이미지 저장",
+        "max_text_length": "최대 텍스트 길이:",
+        "max_image_size": "최대 이미지 크기:",
+        "unlimited": "무제한",
+        "characters": "자",
+        "storage_management": "저장소 관리",
+        "max_items": "최대 항목 수:",
+        "retention_days": "자동 정리 일수:",
+        "never_cleanup": "정리 안 함",
+        "days": "일",
+        "poll_interval": "폴링 간격:",
 
         # 트레이 메뉴
         "show_window": "창 표시",
@@ -385,9 +537,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[Imagen]",
         "from_device": "Desde: {device}",
 
+        # Guardar imagen
+        "save_image": "Guardar imagen",
+        "image_load_failed": "No se pudieron cargar los datos de la imagen",
+        "save_failed": "Error al guardar: {error}",
+
+        # Migración de datos
+        "migrate_data": "Migrar datos",
+        "migrate_data_confirm": "¿Migrar los datos existentes a la nueva base de datos?",
+        "migrating": "Migrando datos...",
+        "migration_complete": "Migración completada. {count} elementos migrados.",
+        "migration_failed": "Error en la migración: {error}",
+
+        # Perfiles de base de datos
+        "db_profile": "Perfil de base de datos:",
+        "add_profile": "Agregar",
+        "delete_profile": "Eliminar",
+        "profile_name": "Nombre del perfil",
+        "enter_profile_name": "Ingrese el nombre del nuevo perfil:",
+        "profile_exists": "El nombre del perfil ya existe",
+        "cannot_delete_active": "No se puede eliminar el perfil activo",
+        "confirm_delete_profile": "¿Eliminar el perfil \"{name}\"?",
+
         # Mensajes
         "need_restart": "Reinicio requerido",
         "restart_msg": "La configuración ha cambiado. Reinicie la aplicación para que los cambios surtan efecto.",
+
+        # Filtro y almacenamiento
+        "filter_storage": "Filtro y almacenamiento",
+        "content_filter": "Filtro de contenido",
+        "save_text": "Guardar texto",
+        "save_images": "Guardar imágenes",
+        "max_text_length": "Longitud máx. de texto:",
+        "max_image_size": "Tamaño máx. de imagen:",
+        "unlimited": "Sin límite",
+        "characters": "caracteres",
+        "storage_management": "Gestión de almacenamiento",
+        "max_items": "Máx. elementos:",
+        "retention_days": "Días de limpieza automática:",
+        "never_cleanup": "Nunca",
+        "days": "días",
+        "poll_interval": "Intervalo de sondeo:",
 
         # Menú de bandeja
         "show_window": "Mostrar ventana",
@@ -460,9 +650,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[Image]",
         "from_device": "De: {device}",
 
+        # Sauvegarde d'image
+        "save_image": "Enregistrer l'image",
+        "image_load_failed": "Impossible de charger les données de l'image",
+        "save_failed": "Échec de l'enregistrement: {error}",
+
+        # Migration de données
+        "migrate_data": "Migrer les données",
+        "migrate_data_confirm": "Migrer les données existantes vers la nouvelle base de données?",
+        "migrating": "Migration des données en cours...",
+        "migration_complete": "Migration terminée. {count} éléments migrés.",
+        "migration_failed": "Échec de la migration: {error}",
+
+        # Profils de base de données
+        "db_profile": "Profil de base de données:",
+        "add_profile": "Ajouter",
+        "delete_profile": "Supprimer",
+        "profile_name": "Nom du profil",
+        "enter_profile_name": "Entrez le nom du nouveau profil:",
+        "profile_exists": "Le nom du profil existe déjà",
+        "cannot_delete_active": "Impossible de supprimer le profil actif",
+        "confirm_delete_profile": "Supprimer le profil \"{name}\"?",
+
         # Messages
         "need_restart": "Redémarrage requis",
         "restart_msg": "Les paramètres ont été modifiés. Veuillez redémarrer l'application pour que les modifications prennent effet.",
+
+        # Filtre et stockage
+        "filter_storage": "Filtre et stockage",
+        "content_filter": "Filtre de contenu",
+        "save_text": "Enregistrer le texte",
+        "save_images": "Enregistrer les images",
+        "max_text_length": "Longueur max. du texte:",
+        "max_image_size": "Taille max. de l'image:",
+        "unlimited": "Illimité",
+        "characters": "caractères",
+        "storage_management": "Gestion du stockage",
+        "max_items": "Nombre max. d'éléments:",
+        "retention_days": "Jours de nettoyage auto:",
+        "never_cleanup": "Jamais",
+        "days": "jours",
+        "poll_interval": "Intervalle de sondage:",
 
         # Menu de la barre d'état
         "show_window": "Afficher la fenêtre",
@@ -535,9 +763,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[Bild]",
         "from_device": "Von: {device}",
 
+        # Bild speichern
+        "save_image": "Bild speichern",
+        "image_load_failed": "Bilddaten konnten nicht geladen werden",
+        "save_failed": "Speichern fehlgeschlagen: {error}",
+
+        # Datenmigration
+        "migrate_data": "Daten migrieren",
+        "migrate_data_confirm": "Bestehende Daten in die neue Datenbank migrieren?",
+        "migrating": "Daten werden migriert...",
+        "migration_complete": "Migration abgeschlossen. {count} Elemente migriert.",
+        "migration_failed": "Migration fehlgeschlagen: {error}",
+
+        # Datenbankprofile
+        "db_profile": "Datenbankprofil:",
+        "add_profile": "Hinzufügen",
+        "delete_profile": "Löschen",
+        "profile_name": "Profilname",
+        "enter_profile_name": "Neuen Profilnamen eingeben:",
+        "profile_exists": "Profilname existiert bereits",
+        "cannot_delete_active": "Das aktive Profil kann nicht gelöscht werden",
+        "confirm_delete_profile": "Profil \"{name}\" löschen?",
+
         # Nachrichten
         "need_restart": "Neustart erforderlich",
         "restart_msg": "Die Einstellungen wurden geändert. Bitte starten Sie die Anwendung neu, damit die Änderungen wirksam werden.",
+
+        # Filter und Speicher
+        "filter_storage": "Filter und Speicher",
+        "content_filter": "Inhaltsfilter",
+        "save_text": "Text speichern",
+        "save_images": "Bilder speichern",
+        "max_text_length": "Max. Textlänge:",
+        "max_image_size": "Max. Bildgröße:",
+        "unlimited": "Unbegrenzt",
+        "characters": "Zeichen",
+        "storage_management": "Speicherverwaltung",
+        "max_items": "Max. Einträge:",
+        "retention_days": "Auto-Bereinigung Tage:",
+        "never_cleanup": "Nie",
+        "days": "Tage",
+        "poll_interval": "Abfrageintervall:",
 
         # Taskleistenmenü
         "show_window": "Fenster anzeigen",
@@ -610,9 +876,47 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image": "[Изображение]",
         "from_device": "От: {device}",
 
+        # Сохранение изображения
+        "save_image": "Сохранить изображение",
+        "image_load_failed": "Не удалось загрузить данные изображения",
+        "save_failed": "Ошибка сохранения: {error}",
+
+        # Миграция данных
+        "migrate_data": "Миграция данных",
+        "migrate_data_confirm": "Перенести существующие данные в новую базу данных?",
+        "migrating": "Миграция данных...",
+        "migration_complete": "Миграция завершена. Перенесено элементов: {count}.",
+        "migration_failed": "Ошибка миграции: {error}",
+
+        # Профили базы данных
+        "db_profile": "Профиль базы данных:",
+        "add_profile": "Добавить",
+        "delete_profile": "Удалить",
+        "profile_name": "Имя профиля",
+        "enter_profile_name": "Введите имя нового профиля:",
+        "profile_exists": "Имя профиля уже существует",
+        "cannot_delete_active": "Невозможно удалить активный профиль",
+        "confirm_delete_profile": "Удалить профиль \"{name}\"?",
+
         # Сообщения
         "need_restart": "Требуется перезапуск",
         "restart_msg": "Настройки были изменены. Пожалуйста, перезапустите приложение для применения изменений.",
+
+        # Фильтр и хранение
+        "filter_storage": "Фильтр и хранение",
+        "content_filter": "Фильтр содержимого",
+        "save_text": "Сохранять текст",
+        "save_images": "Сохранять изображения",
+        "max_text_length": "Макс. длина текста:",
+        "max_image_size": "Макс. размер изображения:",
+        "unlimited": "Без ограничений",
+        "characters": "символов",
+        "storage_management": "Управление хранилищем",
+        "max_items": "Макс. записей:",
+        "retention_days": "Авто-очистка дней:",
+        "never_cleanup": "Никогда",
+        "days": "дней",
+        "poll_interval": "Интервал опроса:",
 
         # Меню в трее
         "show_window": "Показать окно",

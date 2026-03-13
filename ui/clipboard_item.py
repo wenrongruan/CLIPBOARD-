@@ -12,19 +12,23 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import ClipboardItem
-from .styles import ITEM_WIDGET_STYLE
+
+# 模块级 pixmap 缓存，按 content_hash 缓存已缩放的 QPixmap（上限 200 条）
+_pixmap_cache: dict = {}
+_PIXMAP_CACHE_MAX = 200
 
 
 class ClipboardItemWidget(QWidget):
     clicked = Signal(ClipboardItem)
     delete_clicked = Signal(ClipboardItem)
     star_clicked = Signal(ClipboardItem)
+    save_clicked = Signal(ClipboardItem)
 
     def __init__(self, item: ClipboardItem, parent=None):
         super().__init__(parent)
         self.item = item
         self.setObjectName("itemWidget")
-        self.setStyleSheet(ITEM_WIDGET_STYLE)
+        # 样式已合并到 MAIN_STYLE，由父级 MainWindow 统一设置
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
 
@@ -41,12 +45,24 @@ class ClipboardItemWidget(QWidget):
             # 图片预览
             image_label = QLabel()
             image_label.setObjectName("imageLabel")
-            pixmap = QPixmap()
-            pixmap.loadFromData(self.item.image_thumbnail)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+            cache_key = self.item.content_hash
+            if cache_key in _pixmap_cache:
+                scaled = _pixmap_cache[cache_key]
+            else:
+                pixmap = QPixmap()
+                pixmap.loadFromData(self.item.image_thumbnail)
+                scaled = None
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(
+                        60, 60, Qt.KeepAspectRatio, Qt.FastTransformation
+                    )
+                    if len(_pixmap_cache) >= _PIXMAP_CACHE_MAX:
+                        # 简单淘汰：清空一半
+                        keys = list(_pixmap_cache.keys())
+                        for k in keys[:len(keys) // 2]:
+                            del _pixmap_cache[k]
+                    _pixmap_cache[cache_key] = scaled
+            if scaled:
                 image_label.setPixmap(scaled)
             image_label.setFixedSize(60, 60)
             layout.addWidget(image_label)
@@ -107,6 +123,13 @@ class ClipboardItemWidget(QWidget):
         star_btn.setToolTip("收藏" if not self.item.is_starred else "取消收藏")
         star_btn.clicked.connect(lambda: self.star_clicked.emit(self.item))
         button_layout.addWidget(star_btn)
+
+        if self.item.is_image:
+            save_btn = QPushButton("💾")
+            save_btn.setObjectName("saveButton")
+            save_btn.setToolTip("保存图片")
+            save_btn.clicked.connect(lambda: self.save_clicked.emit(self.item))
+            button_layout.addWidget(save_btn)
 
         delete_btn = QPushButton("×")
         delete_btn.setObjectName("deleteButton")

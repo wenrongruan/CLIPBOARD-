@@ -2,6 +2,7 @@ import sqlite3
 import time
 import random
 import logging
+import threading
 from pathlib import Path
 from typing import Optional, Callable, Any
 from contextlib import contextmanager
@@ -66,6 +67,8 @@ class DatabaseManager:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
         self._ensure_db_directory()
         self._init_database()
 
@@ -77,6 +80,11 @@ class DatabaseManager:
         with self.get_connection() as conn:
             # 创建主表和索引
             conn.executescript(self.CREATE_TABLE_SQL)
+
+            # 添加复合索引用于同步查询优化
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_id_device ON clipboard_items(id, device_id)"
+            )
 
             # 检查是否需要创建FTS表
             cursor = conn.execute(
@@ -91,24 +99,46 @@ class DatabaseManager:
 
             conn.commit()
 
-    @contextmanager
-    def get_connection(self) -> sqlite3.Connection:
+    def _create_connection(self) -> sqlite3.Connection:
+        """创建新连接并配置 PRAGMA"""
         conn = sqlite3.connect(
             self.db_path,
             timeout=30.0,
             isolation_level="DEFERRED",
             check_same_thread=False,
         )
-        try:
-            # 配置WAL模式和其他优化
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA cache_size=-64000")  # 64MB缓存
-            conn.execute("PRAGMA temp_store=MEMORY")
-            yield conn
-        finally:
-            conn.close()
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB缓存
+        conn.execute("PRAGMA temp_store=MEMORY")
+        return conn
+
+    @contextmanager
+    def get_connection(self) -> sqlite3.Connection:
+        """复用持久连接，仅在出错时重建。使用锁保证线程安全。"""
+        with self._lock:
+            if self._conn is None:
+                self._conn = self._create_connection()
+            else:
+                try:
+                    self._conn.execute("SELECT 1")
+                except Exception:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = self._create_connection()
+            yield self._conn
+
+    def close(self):
+        """关闭持久连接，供应用退出时调用"""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def execute_with_retry(
         self,

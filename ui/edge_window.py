@@ -59,7 +59,7 @@ class EdgeHiddenWindow(QWidget):
         # 鼠标位置检测定时器
         self._mouse_check_timer = QTimer(self)
         self._mouse_check_timer.timeout.connect(self._check_mouse_position)
-        self._mouse_check_timer.start(50)
+        self._mouse_check_timer.start(200)  # 初始隐藏状态，低频检测
 
         # 显示保护定时器
         self._protection_timer = QTimer(self)
@@ -240,6 +240,7 @@ class EdgeHiddenWindow(QWidget):
         self._animation.setEndValue(end_geometry)
         self._animation.start()
         self._is_visible = True
+        self._mouse_check_timer.setInterval(50)  # 窗口可见时快速检测
         self.raise_()
         self.activateWindow()
 
@@ -260,6 +261,7 @@ class EdgeHiddenWindow(QWidget):
         self._animation.setEndValue(end_geometry)
         self._animation.start()
         self._is_visible = False
+        self._mouse_check_timer.setInterval(200)  # 窗口隐藏时降低检测频率
 
     @Slot()
     def show_window(self):

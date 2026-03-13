@@ -9,7 +9,7 @@ def create_thumbnail(
     image = Image.open(io.BytesIO(image_data))
 
     # 保持宽高比
-    image.thumbnail(size, Image.Resampling.LANCZOS)
+    image.thumbnail(size, Image.Resampling.BILINEAR)
 
     # 转换为PNG格式
     output = io.BytesIO()

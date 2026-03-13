@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import List, Optional, Tuple, Union, Any
 
 from .database import DatabaseManager
@@ -20,6 +21,22 @@ class ClipboardRepository:
         self.db = db_manager
         # 检测数据库类型以选择正确的占位符
         self._is_mysql = MYSQL_AVAILABLE and isinstance(db_manager, MySQLDatabaseManager)
+        # 检测 FTS5 是否可用
+        self._has_fts = self._detect_fts()
+
+    def _detect_fts(self) -> bool:
+        """检测 FTS5 表是否存在"""
+        if self._is_mysql:
+            return False
+        try:
+            def operation(conn):
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='clipboard_fts'"
+                )
+                return cursor.fetchone() is not None
+            return self.db.execute_read(operation)
+        except Exception:
+            return False
 
     def _execute_query(self, conn, sql: str, params: tuple = ()) -> Any:
         """执行查询，自动适配 SQLite/MySQL"""
@@ -124,6 +141,30 @@ class ClipboardRepository:
 
         return self.db.execute_read(operation)
 
+    def get_items_full(
+        self, page: int = 0, page_size: int = 100
+    ) -> Tuple[List[ClipboardItem], int]:
+        """获取分页数据（包含完整图片数据，用于数据迁移）"""
+        def operation(conn) -> Tuple[List[ClipboardItem], int]:
+            offset = page * page_size
+
+            row = self._fetchone(conn, "SELECT COUNT(*) FROM clipboard_items")
+            total = row[0] if row else 0
+
+            sql = """
+                SELECT id, content_type, text_content, image_data, image_thumbnail,
+                       content_hash, preview, device_id, device_name,
+                       created_at, is_starred
+                FROM clipboard_items
+                ORDER BY created_at ASC
+                LIMIT ? OFFSET ?
+            """
+            rows = self._fetchall(conn, sql, (page_size, offset))
+            items = [ClipboardItem.from_db_row(row) for row in rows]
+            return items, total
+
+        return self.db.execute_read(operation)
+
     def get_item_by_id(self, item_id: int) -> Optional[ClipboardItem]:
         def operation(conn) -> Optional[ClipboardItem]:
             sql = """
@@ -145,27 +186,50 @@ class ClipboardRepository:
     ) -> Tuple[List[ClipboardItem], int]:
         def operation(conn) -> Tuple[List[ClipboardItem], int]:
             offset = page * page_size
-            like_query = f"%{query}%"
 
-            # 获取总数
-            count_sql = """
-                SELECT COUNT(*) FROM clipboard_items
-                WHERE text_content LIKE ? OR preview LIKE ?
-            """
-            row = self._fetchone(conn, count_sql, (like_query, like_query))
-            total = row[0] if row else 0
+            if self._has_fts and not self._is_mysql:
+                # 使用 FTS5 全文搜索（更快），包装为短语避免特殊字符注入
+                fts_query = '"' + query.replace('"', '""') + '"'
 
-            # 获取分页数据
-            sql = """
-                SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                       content_hash, preview, device_id, device_name,
-                       created_at, is_starred
-                FROM clipboard_items
-                WHERE text_content LIKE ? OR preview LIKE ?
-                ORDER BY created_at DESC
-                LIMIT ? OFFSET ?
-            """
-            rows = self._fetchall(conn, sql, (like_query, like_query, page_size, offset))
+                count_sql = """
+                    SELECT COUNT(*) FROM clipboard_items
+                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)
+                """
+                row = self._fetchone(conn, count_sql, (fts_query,))
+                total = row[0] if row else 0
+
+                sql = """
+                    SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
+                           content_hash, preview, device_id, device_name,
+                           created_at, is_starred
+                    FROM clipboard_items
+                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                """
+                rows = self._fetchall(conn, sql, (fts_query, page_size, offset))
+            else:
+                # FTS5 不可用，回退到 LIKE
+                like_query = f"%{query}%"
+
+                count_sql = """
+                    SELECT COUNT(*) FROM clipboard_items
+                    WHERE text_content LIKE ? OR preview LIKE ?
+                """
+                row = self._fetchone(conn, count_sql, (like_query, like_query))
+                total = row[0] if row else 0
+
+                sql = """
+                    SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
+                           content_hash, preview, device_id, device_name,
+                           created_at, is_starred
+                    FROM clipboard_items
+                    WHERE text_content LIKE ? OR preview LIKE ?
+                    ORDER BY created_at DESC
+                    LIMIT ? OFFSET ?
+                """
+                rows = self._fetchall(conn, sql, (like_query, like_query, page_size, offset))
+
             items = [ClipboardItem.from_db_row(row) for row in rows]
             return items, total
 
@@ -208,7 +272,7 @@ class ClipboardRepository:
     ) -> List[ClipboardItem]:
         def operation(conn) -> List[ClipboardItem]:
             sql = """
-                SELECT id, content_type, text_content, image_data, image_thumbnail,
+                SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
                        content_hash, preview, device_id, device_name,
                        created_at, is_starred
                 FROM clipboard_items
@@ -259,6 +323,27 @@ class ClipboardRepository:
                 deleted = cursor.rowcount
 
             logger.info(f"清理了 {deleted} 条旧记录")
+            return deleted
+
+        return self.db.execute_with_retry(operation)
+
+    def cleanup_expired_items(self, retention_days: int) -> int:
+        """删除超过保留天数的非收藏记录"""
+        cutoff_ms = int((time.time() - retention_days * 86400) * 1000)
+
+        def operation(conn) -> int:
+            sql = "DELETE FROM clipboard_items WHERE is_starred = 0 AND created_at < ?"
+            if self._is_mysql:
+                sql = sql.replace("?", "%s")
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, (cutoff_ms,))
+                    deleted = cursor.rowcount
+            else:
+                cursor = conn.execute(sql, (cutoff_ms,))
+                deleted = cursor.rowcount
+
+            if deleted > 0:
+                logger.info(f"清理了 {deleted} 条过期记录 (超过 {retention_days} 天)")
             return deleted
 
         return self.db.execute_with_retry(operation)

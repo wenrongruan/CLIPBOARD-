@@ -21,7 +21,9 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QSpinBox,
     QTabWidget,
+    QCheckBox,
 )
+from PySide6.QtWidgets import QButtonGroup, QProgressDialog, QInputDialog
 
 from core.models import ClipboardItem
 from core.repository import ClipboardRepository
@@ -38,7 +40,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("settings"))
-        self.setFixedSize(550, 480)
+        self.setFixedSize(580, 560)
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
 
@@ -94,14 +96,63 @@ class SettingsDialog(QDialog):
         db_layout = QVBoxLayout(db_tab)
         db_layout.setSpacing(12)
 
+        # Profile 选择
+        profile_layout = QHBoxLayout()
+        profile_layout.setSpacing(8)
+        profile_label = QLabel(t("db_profile"))
+        profile_layout.addWidget(profile_label)
+
+        self.profile_combo = QComboBox()
+        self.profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        profiles = Config.get_db_profiles()
+        active = Config.get_active_profile()
+        for name in profiles:
+            self.profile_combo.addItem(name)
+        if active in profiles:
+            self.profile_combo.setCurrentText(active)
+        self.profile_combo.currentTextChanged.connect(self._on_profile_changed)
+        profile_layout.addWidget(self.profile_combo)
+
+        add_profile_btn = QPushButton(t("add_profile"))
+        add_profile_btn.clicked.connect(self._add_profile)
+        profile_layout.addWidget(add_profile_btn)
+
+        del_profile_btn = QPushButton(t("delete_profile"))
+        del_profile_btn.clicked.connect(self._delete_profile)
+        profile_layout.addWidget(del_profile_btn)
+
+        db_layout.addLayout(profile_layout)
+
         # 数据库类型选择
-        db_type_layout = QFormLayout()
-        self.db_type_combo = QComboBox()
-        self.db_type_combo.addItems([t("db_sqlite"), t("db_mysql")])
-        self.db_type_combo.setCurrentIndex(0 if Config.get_db_type() == "sqlite" else 1)
-        self.db_type_combo.currentIndexChanged.connect(self._on_db_type_changed)
-        db_type_layout.addRow(t("db_type"), self.db_type_combo)
-        db_layout.addLayout(db_type_layout)
+        db_type_label = QLabel(t("db_type"))
+        db_type_label.setObjectName("sectionTitle")
+        db_layout.addWidget(db_type_label)
+
+        db_card_layout = QHBoxLayout()
+        db_card_layout.setSpacing(12)
+
+        self.sqlite_card = QPushButton(t("db_sqlite"))
+        self.sqlite_card.setObjectName("dbTypeCard")
+        self.sqlite_card.setCheckable(True)
+        self.sqlite_card.setMinimumHeight(48)
+        db_card_layout.addWidget(self.sqlite_card)
+
+        self.mysql_card = QPushButton(t("db_mysql"))
+        self.mysql_card.setObjectName("dbTypeCard")
+        self.mysql_card.setCheckable(True)
+        self.mysql_card.setMinimumHeight(48)
+        db_card_layout.addWidget(self.mysql_card)
+
+        self.db_type_group = QButtonGroup(self)
+        self.db_type_group.setExclusive(True)
+        self.db_type_group.addButton(self.sqlite_card, 0)
+        self.db_type_group.addButton(self.mysql_card, 1)
+
+        current_db_index = 0 if Config.get_db_type() == "sqlite" else 1
+        self.db_type_group.button(current_db_index).setChecked(True)
+        self.db_type_group.idClicked.connect(self._on_db_type_changed)
+
+        db_layout.addLayout(db_card_layout)
 
         # SQLite 配置组
         self.sqlite_group = QGroupBox(t("sqlite_config"))
@@ -166,12 +217,78 @@ class SettingsDialog(QDialog):
         tab_widget.addTab(db_tab, t("database"))
 
         # 根据当前数据库类型显示/隐藏配置组
-        self._on_db_type_changed(self.db_type_combo.currentIndex())
+        self._on_db_type_changed(self.db_type_group.checkedId())
+
+        # ========== 过滤与存储选项卡 ==========
+        filter_tab = QWidget()
+        filter_layout = QVBoxLayout(filter_tab)
+        filter_layout.setSpacing(12)
+
+        # 内容过滤组
+        filter_group = QGroupBox(t("content_filter"))
+        filter_group_layout = QFormLayout(filter_group)
+        filter_group_layout.setSpacing(8)
+
+        self.save_text_check = QCheckBox(t("save_text"))
+        self.save_text_check.setChecked(Config.get_save_text())
+        filter_group_layout.addRow(self.save_text_check)
+
+        self.save_images_check = QCheckBox(t("save_images"))
+        self.save_images_check.setChecked(Config.get_save_images())
+        filter_group_layout.addRow(self.save_images_check)
+
+        self.max_text_length_spin = QSpinBox()
+        self.max_text_length_spin.setRange(0, 10000000)
+        self.max_text_length_spin.setValue(Config.get_max_text_length())
+        self.max_text_length_spin.setSpecialValueText(t("unlimited"))
+        self.max_text_length_spin.setSuffix(f" {t('characters')}")
+        filter_group_layout.addRow(t("max_text_length"), self.max_text_length_spin)
+
+        self.max_image_size_spin = QSpinBox()
+        self.max_image_size_spin.setRange(0, 102400)
+        self.max_image_size_spin.setValue(Config.get_max_image_size_kb())
+        self.max_image_size_spin.setSpecialValueText(t("unlimited"))
+        self.max_image_size_spin.setSuffix(" KB")
+        filter_group_layout.addRow(t("max_image_size"), self.max_image_size_spin)
+
+        filter_layout.addWidget(filter_group)
+
+        # 存储管理组
+        storage_group = QGroupBox(t("storage_management"))
+        storage_group_layout = QFormLayout(storage_group)
+        storage_group_layout.setSpacing(8)
+
+        self.max_items_spin = QSpinBox()
+        self.max_items_spin.setRange(100, 100000)
+        self.max_items_spin.setValue(Config.get_max_items())
+        storage_group_layout.addRow(t("max_items"), self.max_items_spin)
+
+        self.retention_days_spin = QSpinBox()
+        self.retention_days_spin.setRange(0, 3650)
+        self.retention_days_spin.setValue(Config.get_retention_days())
+        self.retention_days_spin.setSpecialValueText(t("never_cleanup"))
+        self.retention_days_spin.setSuffix(f" {t('days')}")
+        storage_group_layout.addRow(t("retention_days"), self.retention_days_spin)
+
+        self.poll_interval_spin = QSpinBox()
+        self.poll_interval_spin.setRange(100, 5000)
+        self.poll_interval_spin.setSingleStep(100)
+        self.poll_interval_spin.setValue(Config.get_poll_interval_ms())
+        self.poll_interval_spin.setSuffix(" ms")
+        storage_group_layout.addRow(t("poll_interval"), self.poll_interval_spin)
+
+        filter_layout.addWidget(storage_group)
+        filter_layout.addStretch()
+
+        tab_widget.addTab(filter_tab, t("filter_storage"))
 
         # ========== 按钮 ==========
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
+        ok_btn = button_box.button(QDialogButtonBox.Ok)
+        if ok_btn:
+            ok_btn.setObjectName("okButton")
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
@@ -231,10 +348,74 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, t("error"), f"{str(e)}")
 
+    def _on_profile_changed(self, name: str):
+        """切换 profile 时自动填充对应配置"""
+        profiles = Config.get_db_profiles()
+        profile = profiles.get(name)
+        if not profile:
+            return
+        # 填充 UI
+        db_type = profile.get("db_type", "sqlite")
+        self.db_type_group.button(0 if db_type == "sqlite" else 1).setChecked(True)
+        self._on_db_type_changed(0 if db_type == "sqlite" else 1)
+        self.db_path_edit.setText(profile.get("database_path", ""))
+        self.mysql_host_edit.setText(profile.get("mysql_host", "localhost"))
+        self.mysql_port_spin.setValue(profile.get("mysql_port", 3306))
+        self.mysql_user_edit.setText(profile.get("mysql_user", ""))
+        self.mysql_password_edit.setText(profile.get("mysql_password", ""))
+        self.mysql_database_edit.setText(profile.get("mysql_database", "clipboard"))
+
+    def _add_profile(self):
+        """添加新 profile"""
+        name, ok = QInputDialog.getText(self, t("profile_name"), t("enter_profile_name"))
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        profiles = Config.get_db_profiles()
+        if name in profiles:
+            QMessageBox.warning(self, t("warning"), t("profile_exists"))
+            return
+        # 用当前 UI 值作为新 profile 的初始配置
+        profiles[name] = self._current_db_settings()
+        Config.set_db_profiles(profiles)
+        self.profile_combo.addItem(name)
+        self.profile_combo.setCurrentText(name)
+
+    def _delete_profile(self):
+        """删除当前选中的 profile"""
+        name = self.profile_combo.currentText()
+        profiles = Config.get_db_profiles()
+        if len(profiles) <= 1:
+            return
+        if name == Config.get_active_profile():
+            QMessageBox.warning(self, t("warning"), t("cannot_delete_active"))
+            return
+        reply = QMessageBox.question(
+            self, t("confirm_delete"), t("confirm_delete_profile", name=name),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            del profiles[name]
+            Config.set_db_profiles(profiles)
+            self.profile_combo.removeItem(self.profile_combo.currentIndex())
+
+    def _current_db_settings(self) -> dict:
+        """从 UI 中读取当前数据库配置"""
+        db_type = "sqlite" if self.db_type_group.checkedId() == 0 else "mysql"
+        return {
+            "db_type": db_type,
+            "database_path": self.db_path_edit.text(),
+            "mysql_host": self.mysql_host_edit.text() or "localhost",
+            "mysql_port": self.mysql_port_spin.value(),
+            "mysql_user": self.mysql_user_edit.text(),
+            "mysql_password": self.mysql_password_edit.text(),
+            "mysql_database": self.mysql_database_edit.text() or "clipboard",
+        }
+
     def _on_accept(self):
         """确认保存设置前进行验证"""
         # 如果选择了 MySQL，验证连接
-        if self.db_type_combo.currentIndex() == 1:
+        if self.db_type_group.checkedId() == 1:
             try:
                 from core.mysql_database import MySQLDatabaseManager
 
@@ -269,21 +450,30 @@ class SettingsDialog(QDialog):
 
     def get_settings(self) -> dict:
         edge_map = {0: "right", 1: "left", 2: "top", 3: "bottom"}
-        db_type = "sqlite" if self.db_type_combo.currentIndex() == 0 else "mysql"
+        db_settings = self._current_db_settings()
         language = self._language_codes[self.language_combo.currentIndex()]
 
-        return {
+        # 保存当前 profile
+        profile_name = self.profile_combo.currentText()
+        profiles = Config.get_db_profiles()
+        profiles[profile_name] = db_settings
+        Config.set_db_profiles(profiles)
+
+        result = {
             "language": language,
             "dock_edge": edge_map[self.dock_combo.currentIndex()],
             "hotkey": self.hotkey_edit.text(),
-            "db_type": db_type,
-            "database_path": self.db_path_edit.text(),
-            "mysql_host": self.mysql_host_edit.text() or "localhost",
-            "mysql_port": self.mysql_port_spin.value(),
-            "mysql_user": self.mysql_user_edit.text(),
-            "mysql_password": self.mysql_password_edit.text(),
-            "mysql_database": self.mysql_database_edit.text() or "clipboard",
+            "active_profile": profile_name,
+            "save_text": self.save_text_check.isChecked(),
+            "save_images": self.save_images_check.isChecked(),
+            "max_text_length": self.max_text_length_spin.value(),
+            "max_image_size_kb": self.max_image_size_spin.value(),
+            "max_items": self.max_items_spin.value(),
+            "retention_days": self.retention_days_spin.value(),
+            "poll_interval_ms": self.poll_interval_spin.value(),
         }
+        result.update(db_settings)
+        return result
 
 
 class MainWindow(EdgeHiddenWindow):
@@ -414,6 +604,7 @@ class MainWindow(EdgeHiddenWindow):
             widget.clicked.connect(self._on_item_clicked)
             widget.delete_clicked.connect(self._on_item_delete)
             widget.star_clicked.connect(self._on_item_star)
+            widget.save_clicked.connect(self._on_item_save)
 
             list_item = QListWidgetItem(self.list_widget)
             list_item.setSizeHint(widget.sizeHint())
@@ -469,6 +660,26 @@ class MainWindow(EdgeHiddenWindow):
         self.repository.toggle_star(item.id)
         self._load_items()
 
+    def _on_item_save(self, item: ClipboardItem):
+        """保存图片到本地文件"""
+        full_item = self.repository.get_item_by_id(item.id)
+        if not full_item or not full_item.image_data:
+            QMessageBox.warning(self, t("error"), t("image_load_failed"))
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            t("save_image"),
+            "",
+            "PNG (*.png);;JPEG (*.jpg);;All Files (*)",
+        )
+        if path:
+            try:
+                with open(path, "wb") as f:
+                    f.write(full_item.image_data)
+            except Exception as e:
+                QMessageBox.critical(self, t("error"), t("save_failed", error=str(e)))
+
     def _on_item_added(self, item: ClipboardItem):
         # 如果在第一页且没有搜索，刷新列表
         if self._current_page == 0 and not self._search_query:
@@ -512,35 +723,57 @@ class MainWindow(EdgeHiddenWindow):
                 Config.set_hotkey(new_hotkey)
                 need_restart = True
 
-            # 数据库类型变更
+            # 过滤与存储设置（批量更新，只写一次磁盘）
+            new_poll_interval = settings["poll_interval_ms"]
+            poll_changed = new_poll_interval != Config.get_poll_interval_ms()
+
+            current_settings = Config.load_settings()
+            for key in ("save_text", "save_images", "max_text_length",
+                        "max_image_size_kb", "max_items", "retention_days",
+                        "poll_interval_ms"):
+                current_settings[key] = settings[key]
+            Config.save_settings(current_settings)
+
+            if poll_changed:
+                self.clipboard_monitor.update_poll_interval(new_poll_interval)
+
+            # Profile / 数据库变更检测
+            new_profile = settings.get("active_profile", "")
             new_db_type = settings["db_type"]
-            if new_db_type != Config.get_db_type():
-                Config.set_db_type(new_db_type)
-                need_restart = True
+            db_changed = False
 
-            # SQLite 路径变更
-            if new_db_type == "sqlite":
-                new_db_path = settings["database_path"]
-                if new_db_path != Config.get_database_path():
-                    Config.set_database_path(new_db_path)
-                    need_restart = True
-
-            # MySQL 配置变更
-            if new_db_type == "mysql":
+            if new_profile != Config.get_active_profile():
+                db_changed = True
+            elif new_db_type != Config.get_db_type():
+                db_changed = True
+            elif new_db_type == "sqlite" and settings["database_path"] != Config.get_database_path():
+                db_changed = True
+            elif new_db_type == "mysql":
                 mysql_config = Config.get_mysql_config()
                 if (settings["mysql_host"] != mysql_config["host"] or
                     settings["mysql_port"] != mysql_config["port"] or
                     settings["mysql_user"] != mysql_config["user"] or
                     settings["mysql_password"] != mysql_config["password"] or
                     settings["mysql_database"] != mysql_config["database"]):
-                    Config.set_mysql_config(
-                        settings["mysql_host"],
-                        settings["mysql_port"],
-                        settings["mysql_user"],
-                        settings["mysql_password"],
-                        settings["mysql_database"],
-                    )
-                    need_restart = True
+                    db_changed = True
+
+            if db_changed:
+                # 询问是否迁移数据
+                migrate = QMessageBox.question(
+                    self,
+                    t("migrate_data"),
+                    t("migrate_data_confirm"),
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                ) == QMessageBox.Yes
+
+                # 应用 profile 并保存配置
+                Config.apply_profile(new_profile)
+
+                if migrate:
+                    self._do_migration()
+
+                need_restart = True
 
             if need_restart:
                 QMessageBox.information(
@@ -548,6 +781,84 @@ class MainWindow(EdgeHiddenWindow):
                     t("need_restart"),
                     t("restart_msg"),
                 )
+
+    def _do_migration(self):
+        """在工作线程中执行数据库迁移，避免阻塞 UI"""
+        from core.migration import DatabaseMigrator
+        from core.database import DatabaseManager
+        from core.repository import ClipboardRepository
+        from PySide6.QtCore import QThread, Signal as QSignal
+
+        # 创建目标库连接
+        try:
+            db_type = Config.get_db_type()
+            if db_type == "sqlite":
+                target_db = DatabaseManager(Config.get_database_path())
+                target_repo = ClipboardRepository(target_db)
+            else:
+                from core.mysql_database import MySQLDatabaseManager
+                mysql_config = Config.get_mysql_config()
+                target_db = MySQLDatabaseManager(
+                    mysql_config["host"], mysql_config["port"],
+                    mysql_config["user"], mysql_config["password"],
+                    mysql_config["database"],
+                )
+                target_repo = ClipboardRepository(target_db)
+        except Exception as e:
+            QMessageBox.critical(
+                self, t("error"), t("migration_failed", error=str(e))
+            )
+            return
+
+        class MigrationWorker(QThread):
+            progress = QSignal(int, int)
+            finished_ok = QSignal(int)
+            finished_err = QSignal(str)
+
+            def __init__(self, migrator):
+                super().__init__()
+                self._migrator = migrator
+
+            def run(self):
+                try:
+                    count = self._migrator.migrate(
+                        progress_callback=lambda cur, tot: self.progress.emit(cur, tot)
+                    )
+                    self.finished_ok.emit(count)
+                except Exception as e:
+                    self.finished_err.emit(str(e))
+
+        migrator = DatabaseMigrator(self.repository, target_repo)
+
+        progress_dlg = QProgressDialog(t("migrating"), None, 0, 100, self)
+        progress_dlg.setWindowTitle(t("migrate_data"))
+        progress_dlg.setMinimumDuration(0)
+        progress_dlg.setStyleSheet(MAIN_STYLE)
+
+        worker = MigrationWorker(migrator)
+
+        def on_progress(current, total):
+            if total > 0:
+                progress_dlg.setValue(int(current * 100 / total))
+
+        def on_success(count):
+            progress_dlg.close()
+            QMessageBox.information(
+                self, t("success"), t("migration_complete", count=count)
+            )
+
+        def on_error(err):
+            progress_dlg.close()
+            QMessageBox.critical(
+                self, t("error"), t("migration_failed", error=err)
+            )
+
+        worker.progress.connect(on_progress)
+        worker.finished_ok.connect(on_success)
+        worker.finished_err.connect(on_error)
+        # 防止 worker 被 GC 回收
+        self._migration_worker = worker
+        worker.start()
 
     def _request_quit(self):
         """请求退出应用"""

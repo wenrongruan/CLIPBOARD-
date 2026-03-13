@@ -153,9 +153,7 @@ QToolTip {
     border-radius: 4px;
     padding: 4px 8px;
 }
-"""
 
-ITEM_WIDGET_STYLE = """
 QWidget#itemWidget {
     background-color: transparent;
 }
@@ -196,4 +194,134 @@ QPushButton#deleteButton:hover {
     background-color: rgba(255, 107, 107, 0.2);
     border-radius: 4px;
 }
+
+QPushButton#saveButton {
+    background-color: transparent;
+    border: none;
+    padding: 4px;
+    min-width: 24px;
+    max-width: 24px;
+    color: #4fc3f7;
+}
+
+QPushButton#saveButton:hover {
+    background-color: rgba(79, 195, 247, 0.2);
+    border-radius: 4px;
+}
+
+QTabWidget::pane {
+    border: 1px solid #555555;
+    border-radius: 6px;
+    background-color: #2b2b2b;
+}
+
+QTabBar::tab {
+    background-color: #3c3c3c;
+    color: #888888;
+    padding: 8px 20px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+
+QTabBar::tab:selected {
+    background-color: #2b2b2b;
+    color: #ffffff;
+    border-bottom: 2px solid #0078d4;
+}
+
+QTabBar::tab:hover {
+    background-color: #4a4a4a;
+}
+
+QComboBox {
+    background-color: #3c3c3c;
+    border: 1px solid #555555;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #ffffff;
+}
+
+QComboBox:hover {
+    border-color: #0078d4;
+}
+
+QComboBox::drop-down {
+    width: 24px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #3c3c3c;
+    border: 1px solid #555555;
+    color: #ffffff;
+    selection-background-color: #0078d4;
+}
+
+QGroupBox {
+    border: 1px solid #555555;
+    border-radius: 6px;
+    margin-top: 16px;
+    padding-top: 16px;
+}
+
+QGroupBox::title {
+    color: #0078d4;
+    background-color: #2b2b2b;
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 6px;
+}
+
+QSpinBox {
+    background-color: #3c3c3c;
+    border: 1px solid #555555;
+    border-radius: 6px;
+    padding: 4px 8px;
+    color: #ffffff;
+}
+
+QSpinBox:focus {
+    border-color: #0078d4;
+}
+
+QSpinBox::up-button, QSpinBox::down-button {
+    background-color: #4a4a4a;
+    border: none;
+    width: 16px;
+}
+
+QPushButton#dbTypeCard {
+    background-color: #3c3c3c;
+    border: 2px solid #555555;
+    border-radius: 8px;
+    padding: 12px;
+    color: #ffffff;
+}
+
+QPushButton#dbTypeCard:hover {
+    border-color: #0078d4;
+}
+
+QPushButton#dbTypeCard:checked {
+    background-color: rgba(0, 120, 212, 0.15);
+    border-color: #0078d4;
+}
+
+QPushButton#okButton {
+    background-color: #0078d4;
+    border: none;
+    color: #ffffff;
+}
+
+QPushButton#okButton:hover {
+    background-color: #1a8ae8;
+}
+
+QLabel#sectionTitle {
+    color: #0078d4;
+    font-size: 14px;
+    font-weight: bold;
+}
 """
+
+# 保留兼容性引用（样式已合并到 MAIN_STYLE）
+ITEM_WIDGET_STYLE = ""

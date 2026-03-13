@@ -14,12 +14,18 @@ class SyncService(QObject):
     new_items_available = Signal(list)  # List[ClipboardItem]
     sync_error = Signal(str)
 
+    # 自适应轮询参数
+    _MIN_INTERVAL_MS = 1000   # 有新数据时重置到 1s
+    _MAX_INTERVAL_MS = 10000  # 无新数据时最大间隔 10s
+    _INTERVAL_STEP_MS = 1000  # 每次无数据增加 1s
+
     def __init__(self, repository: ClipboardRepository, parent=None):
         super().__init__(parent)
         self.repository = repository
         self._last_sync_id = Config.get_last_sync_id()
         self._device_id = Config.get_device_id()
         self._running = False
+        self._current_interval = self._MIN_INTERVAL_MS
 
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._check_for_updates)
@@ -64,6 +70,20 @@ class SyncService(QObject):
 
                 logger.debug(f"发现 {len(new_items)} 条来自其他设备的新记录")
                 self.new_items_available.emit(new_items)
+
+                # 有新数据，重置为最短间隔
+                if self._current_interval != self._MIN_INTERVAL_MS:
+                    self._current_interval = self._MIN_INTERVAL_MS
+                    self._sync_timer.setInterval(self._current_interval)
+            else:
+                # 无新数据，逐步增加间隔
+                new_interval = min(
+                    self._current_interval + self._INTERVAL_STEP_MS,
+                    self._MAX_INTERVAL_MS,
+                )
+                if new_interval != self._current_interval:
+                    self._current_interval = new_interval
+                    self._sync_timer.setInterval(self._current_interval)
 
         except Exception as e:
             logger.error(f"同步检查失败: {e}")

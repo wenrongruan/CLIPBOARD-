@@ -183,6 +183,90 @@ class Config:
         cls.set_setting("mysql_password", password)
         cls.set_setting("mysql_database", database)
 
+    # ========== 数据库 Profiles ==========
+    @classmethod
+    def _ensure_default_profile(cls):
+        """确保至少有一个 Default profile（从现有设置自动生成）"""
+        settings = cls.load_settings()
+        if "db_profiles" not in settings:
+            default_profile = {
+                "db_type": settings.get("db_type", "sqlite"),
+                "database_path": settings.get("database_path", ""),
+                "mysql_host": settings.get("mysql_host", "localhost"),
+                "mysql_port": settings.get("mysql_port", 3306),
+                "mysql_user": settings.get("mysql_user", ""),
+                "mysql_password": settings.get("mysql_password", ""),
+                "mysql_database": settings.get("mysql_database", "clipboard"),
+            }
+            settings["db_profiles"] = {"Default": default_profile}
+            settings["active_profile"] = "Default"
+            cls.save_settings(settings)
+
+    @classmethod
+    def get_db_profiles(cls) -> dict:
+        cls._ensure_default_profile()
+        return cls.get_setting("db_profiles", {})
+
+    @classmethod
+    def set_db_profiles(cls, profiles: dict):
+        cls.set_setting("db_profiles", profiles)
+
+    @classmethod
+    def get_active_profile(cls) -> str:
+        cls._ensure_default_profile()
+        return cls.get_setting("active_profile", "Default")
+
+    @classmethod
+    def set_active_profile(cls, name: str):
+        cls.set_setting("active_profile", name)
+
+    @classmethod
+    def apply_profile(cls, name: str):
+        """将指定 profile 的配置写入顶级设置"""
+        profiles = cls.get_db_profiles()
+        profile = profiles.get(name)
+        if not profile:
+            return
+        settings = cls.load_settings()
+        for key in ("db_type", "database_path", "mysql_host", "mysql_port",
+                     "mysql_user", "mysql_password", "mysql_database"):
+            if key in profile:
+                settings[key] = profile[key]
+        settings["active_profile"] = name
+        cls.save_settings(settings)
+
+    # ========== 过滤与存储配置 ==========
+    @classmethod
+    def get_save_text(cls) -> bool:
+        return cls.get_setting("save_text", True)
+
+    @classmethod
+    def get_save_images(cls) -> bool:
+        return cls.get_setting("save_images", True)
+
+    @classmethod
+    def get_max_text_length(cls) -> int:
+        """最大文本长度（字符），0=不限"""
+        return cls.get_setting("max_text_length", 0)
+
+    @classmethod
+    def get_max_image_size_kb(cls) -> int:
+        """最大图片大小（KB），0=不限"""
+        return cls.get_setting("max_image_size_kb", 0)
+
+    @classmethod
+    def get_max_items(cls) -> int:
+        return cls.get_setting("max_items", 10000)
+
+    @classmethod
+    def get_retention_days(cls) -> int:
+        """自动清理天数，0=永不清理"""
+        return cls.get_setting("retention_days", 0)
+
+    @classmethod
+    def get_poll_interval_ms(cls) -> int:
+        return cls.get_setting("poll_interval_ms", 500)
+
     # ========== 语言配置 ==========
     @classmethod
     def get_language(cls) -> str:

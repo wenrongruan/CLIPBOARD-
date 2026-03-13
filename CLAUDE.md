@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 语言要求
+
+请始终使用中文与用户对话。所有回复、解释和沟通都应使用中文。
+
 ## Project Overview
 
 SharedClipboard (共享剪贴板) is a Windows desktop application for clipboard history management and cross-device synchronization. Built with PySide6 (Qt for Python), it runs as a system tray application with an edge-docking slide-out window.
