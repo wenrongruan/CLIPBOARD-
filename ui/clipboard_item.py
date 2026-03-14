@@ -73,6 +73,7 @@ class ClipboardItemWidget(QWidget):
 
             preview_label = QLabel(self.item.preview)
             preview_label.setObjectName("previewLabel")
+            preview_label.setMinimumWidth(0)
             info_layout.addWidget(preview_label)
 
             time_label = QLabel(self._format_time(self.item.created_at))
@@ -93,6 +94,7 @@ class ClipboardItemWidget(QWidget):
             preview_label = QLabel(preview_text)
             preview_label.setObjectName("previewLabel")
             preview_label.setWordWrap(True)
+            preview_label.setMinimumWidth(0)
             preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             content_layout.addWidget(preview_label)
 
