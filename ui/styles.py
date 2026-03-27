@@ -71,18 +71,21 @@ QListWidget {
 }
 
 QListWidget::item {
-    background-color: #3c3c3c;
+    background-color: #333333;
     border-radius: 8px;
-    margin: 4px 0px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    margin: 3px 2px;
     padding: 0px;
 }
 
 QListWidget::item:hover {
-    background-color: #4a4a4a;
+    background-color: #3a3a3a;
+    border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 QListWidget::item:selected {
-    background-color: #0078d4;
+    background-color: rgba(0, 120, 212, 0.25);
+    border: 1px solid rgba(0, 120, 212, 0.4);
 }
 
 QScrollBar:vertical {
@@ -120,14 +123,18 @@ QLabel#pageLabel {
     font-size: 12px;
 }
 
-QLabel#deviceLabel {
-    color: #888888;
-    font-size: 11px;
+QLabel#copyFeedbackSuccess {
+    color: #4ade80;
+    background: rgba(34, 197, 94, 0.15);
+    border-radius: 4px;
+    padding: 4px 8px;
 }
 
-QLabel#timeLabel {
-    color: #666666;
-    font-size: 11px;
+QLabel#copyFeedbackError {
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.15);
+    border-radius: 4px;
+    padding: 4px 8px;
 }
 
 QMenu {
@@ -159,13 +166,19 @@ QWidget#itemWidget {
 }
 
 QLabel#previewLabel {
-    color: #ffffff;
+    color: #e8e8e8;
     font-size: """ + _FONT_SIZE + """;
+    line-height: 1.4;
+}
+
+QLabel#metaLabel {
+    color: #777777;
+    font-size: 11px;
 }
 
 QLabel#imageLabel {
     background-color: #1e1e1e;
-    border-radius: 4px;
+    border-radius: 6px;
 }
 
 QPushButton#starButton {
@@ -322,6 +335,3 @@ QLabel#sectionTitle {
     font-weight: bold;
 }
 """
-
-# 保留兼容性引用（样式已合并到 MAIN_STYLE）
-ITEM_WIDGET_STYLE = ""

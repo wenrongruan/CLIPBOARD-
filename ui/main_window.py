@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer, QSize
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -495,6 +495,7 @@ class MainWindow(EdgeHiddenWindow):
         self._total_pages = 1
         self._page_size = Config.PAGE_SIZE
         self._search_query = ""
+        self._starred_only = False
         self._items: List[ClipboardItem] = []
 
         self.setStyleSheet(MAIN_STYLE)
@@ -516,6 +517,12 @@ class MainWindow(EdgeHiddenWindow):
         self.search_input.setPlaceholderText(t("search_placeholder"))
         self.search_input.textChanged.connect(self._on_search_changed)
         header_layout.addWidget(self.search_input, 1)
+
+        self.star_filter_btn = QPushButton("☆")
+        self.star_filter_btn.setToolTip(t("show_starred_only"))
+        self.star_filter_btn.setFixedSize(28, 28)
+        self.star_filter_btn.clicked.connect(self._toggle_starred_filter)
+        header_layout.addWidget(self.star_filter_btn)
 
         self.pin_btn = QPushButton("📌")
         self.pin_btn.setToolTip(t("pin_window"))
@@ -547,8 +554,14 @@ class MainWindow(EdgeHiddenWindow):
         self.list_widget = QListWidget()
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list_widget.setSpacing(2)
+        self.list_widget.setSpacing(1)
         layout.addWidget(self.list_widget, 1)
+
+        # 复制反馈标签
+        self.copy_feedback_label = QLabel()
+        self.copy_feedback_label.setAlignment(Qt.AlignCenter)
+        self.copy_feedback_label.hide()
+        layout.addWidget(self.copy_feedback_label)
 
         # 底部：分页
         pagination_layout = QHBoxLayout()
@@ -574,6 +587,11 @@ class MainWindow(EdgeHiddenWindow):
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self._do_search)
 
+        # 复制反馈定时器（复用同一个避免快速复制时提前隐藏）
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.setSingleShot(True)
+        self._feedback_timer.timeout.connect(self.copy_feedback_label.hide)
+
     def _connect_signals(self):
         # 剪贴板监控信号
         self.clipboard_monitor.item_added.connect(self._on_item_added)
@@ -581,14 +599,22 @@ class MainWindow(EdgeHiddenWindow):
         # 同步服务信号
         self.sync_service.new_items_available.connect(self._on_new_items)
 
+    def _toggle_starred_filter(self):
+        self._starred_only = not self._starred_only
+        self.star_filter_btn.setText("★" if self._starred_only else "☆")
+        self._current_page = 0
+        self._load_items()
+
     def _load_items(self):
         if self._search_query:
             items, total = self.repository.search(
-                self._search_query, self._current_page, self._page_size
+                self._search_query, self._current_page, self._page_size,
+                starred_only=self._starred_only
             )
         else:
             items, total = self.repository.get_items(
-                self._current_page, self._page_size
+                self._current_page, self._page_size,
+                starred_only=self._starred_only
             )
 
         self._items = items
@@ -607,7 +633,9 @@ class MainWindow(EdgeHiddenWindow):
             widget.save_clicked.connect(self._on_item_save)
 
             list_item = QListWidgetItem(self.list_widget)
-            list_item.setSizeHint(widget.sizeHint())
+            hint = widget.sizeHint()
+            min_h = 92 if item.is_image else 76
+            list_item.setSizeHint(QSize(hint.width(), max(hint.height(), min_h)))
             self.list_widget.addItem(list_item)
             self.list_widget.setItemWidget(list_item, widget)
 
@@ -642,7 +670,16 @@ class MainWindow(EdgeHiddenWindow):
             if full_item:
                 item = full_item
 
-        self.clipboard_monitor.copy_to_clipboard(item)
+        success = self.clipboard_monitor.copy_to_clipboard(item)
+        if success:
+            self.copy_feedback_label.setText(t("copied_to_clipboard"))
+            self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
+        else:
+            self.copy_feedback_label.setText(t("copy_failed"))
+            self.copy_feedback_label.setObjectName("copyFeedbackError")
+        self.copy_feedback_label.style().polish(self.copy_feedback_label)
+        self.copy_feedback_label.show()
+        self._feedback_timer.start(2000)
 
     def _on_item_delete(self, item: ClipboardItem):
         reply = QMessageBox.question(

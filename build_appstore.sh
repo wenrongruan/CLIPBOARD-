@@ -1,0 +1,184 @@
+#!/bin/bash
+# =============================================================================
+# SharedClipboard — Mac App Store 构建脚本
+# =============================================================================
+#
+# 使用前请先设置以下变量：
+#
+#   TEAM_ID         Apple Developer Team ID（在 developer.apple.com 查看）
+#   APPLE_ID        Apple ID 邮箱（用于上传）
+#   APP_PASSWORD    App 专用密码（在 appleid.apple.com 生成）
+#
+# 用法:
+#   chmod +x build_appstore.sh
+#   ./build_appstore.sh
+#
+# 前提条件：
+#   - macOS 12+
+#   - Xcode Command Line Tools: xcode-select --install
+#   - Python 3.11+（推荐通过 Homebrew 安装）
+#   - 已安装 Mac App Store 发布证书：
+#       "3rd Party Mac Developer Application: <名字> (<TEAM_ID>)"
+#       "3rd Party Mac Developer Installer: <名字> (<TEAM_ID>)"
+# =============================================================================
+
+set -e  # 任何命令失败立即退出
+
+# ─── 请修改以下变量 ────────────────────────────────────────────────────────────
+TEAM_ID="YOUR_TEAM_ID"          # 例: ABC1234567
+APPLE_ID="your@email.com"       # Apple ID
+APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"  # App 专用密码
+# ──────────────────────────────────────────────────────────────────────────────
+
+APP_NAME="共享剪贴板"
+BUNDLE_ID="com.sharedclipboard.app"
+APP_SIGN_CERT="3rd Party Mac Developer Application: $(security find-identity -v -p codesigning 2>/dev/null | grep "3rd Party Mac Developer Application" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo "YOUR_CERT_NAME")"
+PKG_SIGN_CERT="3rd Party Mac Developer Installer: $(security find-identity -v -p codesigning 2>/dev/null | grep "3rd Party Mac Developer Installer" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo "YOUR_CERT_NAME")"
+
+APP_BUNDLE="dist/${APP_NAME}.app"
+PKG_OUTPUT="SharedClipboard_appstore.pkg"
+ENTITLEMENTS="Entitlements.plist"
+VENV_DIR=".venv_appstore"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+step() { echo -e "\n${GREEN}[$1/7]${NC} $2"; }
+warn() { echo -e "${YELLOW}警告: $*${NC}"; }
+fail() { echo -e "${RED}错误: $*${NC}"; exit 1; }
+
+# ─── [1/7] 检查环境 ────────────────────────────────────────────────────────────
+step 1 "检查环境"
+
+[ "$(uname)" = "Darwin" ] || fail "此脚本只能在 macOS 上运行"
+xcode-select -p &>/dev/null || fail "未找到 Xcode Command Line Tools，请运行: xcode-select --install"
+
+PYTHON=$(command -v python3.11 || command -v python3 || fail "未找到 Python 3")
+PY_VER=$($PYTHON --version 2>&1)
+echo "Python: $PY_VER"
+
+[ "$TEAM_ID" = "YOUR_TEAM_ID" ] && warn "TEAM_ID 未设置，签名步骤将跳过"
+[ -f "$ENTITLEMENTS" ] || fail "找不到 Entitlements.plist"
+[ -f "main.py" ] || fail "请在项目根目录运行此脚本"
+
+echo "应用名称: ${APP_NAME}"
+echo "Bundle ID: ${BUNDLE_ID}"
+
+# ─── [2/7] 创建虚拟环境并安装依赖 ───────────────────────────────────────────────
+step 2 "创建虚拟环境并安装依赖"
+
+$PYTHON -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
+pip install --quiet --upgrade pip
+pip install --quiet -r requirements.txt
+pip install --quiet pyinstaller
+echo "依赖安装完成"
+
+# ─── [3/7] 生成 AppIcon.icns ──────────────────────────────────────────────────
+step 3 "生成 AppIcon.icns"
+
+if [ -f "icons/AppIcon.icns" ]; then
+    echo "icons/AppIcon.icns 已存在，跳过生成"
+else
+    python create_icns.py || warn "图标生成失败，将使用默认图标继续"
+fi
+
+# ─── [4/7] PyInstaller 打包 ───────────────────────────────────────────────────
+step 4 "PyInstaller 打包应用"
+
+rm -rf dist build
+
+ICON_ARG=""
+[ -f "icons/AppIcon.icns" ] && ICON_ARG="--icon=icons/AppIcon.icns"
+
+pyinstaller \
+    --name "${APP_NAME}" \
+    --windowed \
+    --noconfirm \
+    $ICON_ARG \
+    --add-data "icons:icons" \
+    --add-data "core:core" \
+    --add-data "ui:ui" \
+    --add-data "utils:utils" \
+    --add-data "Info.plist:." \
+    --hidden-import "PySide6.QtCore" \
+    --hidden-import "PySide6.QtGui" \
+    --hidden-import "PySide6.QtWidgets" \
+    --hidden-import "PIL" \
+    --hidden-import "pynput.keyboard._darwin" \
+    --hidden-import "pynput.mouse._darwin" \
+    --hidden-import "pymysql" \
+    --osx-bundle-identifier "$BUNDLE_ID" \
+    main.py
+
+[ -d "$APP_BUNDLE" ] || fail "打包失败，未找到 ${APP_BUNDLE}"
+echo "打包成功: ${APP_BUNDLE}"
+
+# ─── [5/7] 深度代码签名 ───────────────────────────────────────────────────────
+step 5 "代码签名（App Sandbox + Hardened Runtime）"
+
+if [ "$TEAM_ID" = "YOUR_TEAM_ID" ]; then
+    warn "TEAM_ID 未设置，使用 ad-hoc 签名（仅用于本地测试，无法上传 App Store）"
+    codesign --force --deep --sign - "$APP_BUNDLE"
+else
+    # 对所有 .so 和 .dylib 单独签名（PyInstaller 打包的 Python 扩展）
+    find "$APP_BUNDLE" \( -name "*.so" -o -name "*.dylib" \) | while read lib; do
+        codesign --force --sign "$APP_SIGN_CERT" \
+            --entitlements "$ENTITLEMENTS" \
+            --options runtime "$lib" 2>/dev/null || true
+    done
+
+    # 签名主 App Bundle
+    codesign --force --deep \
+        --sign "$APP_SIGN_CERT" \
+        --entitlements "$ENTITLEMENTS" \
+        --options runtime \
+        "$APP_BUNDLE"
+
+    # 验证签名
+    codesign --verify --deep --strict "$APP_BUNDLE" \
+        && echo "签名验证通过" \
+        || fail "签名验证失败"
+fi
+
+# ─── [6/7] 创建 .pkg 安装包 ───────────────────────────────────────────────────
+step 6 "创建 .pkg 安装包"
+
+if [ "$TEAM_ID" = "YOUR_TEAM_ID" ]; then
+    warn "跳过 .pkg 创建（需要有效的 Installer 证书）"
+else
+    productbuild \
+        --component "$APP_BUNDLE" /Applications \
+        --sign "$PKG_SIGN_CERT" \
+        "$PKG_OUTPUT"
+
+    pkgutil --check-signature "$PKG_OUTPUT" \
+        && echo "pkg 签名验证通过: ${PKG_OUTPUT}" \
+        || fail "pkg 签名验证失败"
+fi
+
+# ─── [7/7] 验证与提交提示 ─────────────────────────────────────────────────────
+step 7 "完成"
+
+echo ""
+echo "构建产物:"
+[ -d "$APP_BUNDLE" ] && echo "  App Bundle : ${APP_BUNDLE}"
+[ -f "$PKG_OUTPUT" ] && echo "  安装包     : ${PKG_OUTPUT}"
+
+echo ""
+echo "下一步 — 提交到 App Store Connect:"
+echo ""
+echo "  方式一：Transporter（推荐，图形界面）"
+echo "    从 Mac App Store 安装 Transporter，拖入 ${PKG_OUTPUT} 上传"
+echo ""
+echo "  方式二：命令行上传"
+echo "    xcrun altool --upload-app \\"
+echo "        -f ${PKG_OUTPUT} -t macos \\"
+echo "        -u \"${APPLE_ID}\" \\"
+echo "        --apiKey YOUR_API_KEY --apiIssuer YOUR_ISSUER_ID"
+echo ""
+echo "  上传前请确认已在 App Store Connect 中完成："
+echo "    1. 注册 Bundle ID: ${BUNDLE_ID}"
+echo "    2. 创建 App 条目（分类: 实用工具）"
+echo "    3. 准备截图（1280×800 或 2560×1600，至少 1 张）"
+echo "    4. 填写应用描述、隐私政策 URL"
+
+deactivate

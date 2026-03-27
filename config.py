@@ -44,7 +44,9 @@ class Config:
         if cls._config_dir is None:
             if platform.system() == "Windows":
                 base = Path(os.environ.get("APPDATA", Path.home()))
-            else:  # macOS / Linux
+            elif platform.system() == "Darwin":
+                base = Path.home() / "Library" / "Application Support"
+            else:  # Linux
                 base = Path.home() / ".config"
             cls._config_dir = base / cls.APP_NAME
             cls._config_dir.mkdir(parents=True, exist_ok=True)
@@ -93,9 +95,8 @@ class Config:
         path = cls.get_setting("database_path")
         if path:
             return path
-        # 默认路径（项目文件夹）
-        project_dir = Path(__file__).parent
-        return str(project_dir / "clipboard.db")
+        # 默认路径：放在配置目录，符合 App Sandbox 要求
+        return str(cls.get_config_dir() / "clipboard.db")
 
     @classmethod
     def set_database_path(cls, path: str):

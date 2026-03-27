@@ -23,7 +23,11 @@
       "Bash(git commit -m \"$(cat <<''EOF''\nfix: 添加 ad-hoc 签名解决 macOS Gatekeeper \"已损坏\" 问题\n\n- 构建后使用 codesign 进行 ad-hoc 签名\n- 移除隔离属性避免安全提示\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")",
       "Bash(git commit -m \"$(cat <<''EOF''\nfeat: 数据库路径支持手动输入\n\n- 移除只读限制，允许直接输入网络路径\n- 添加占位符提示支持网络路径格式\n- 加宽设置对话框以便显示长路径\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")",
       "Bash(git commit -m \"$(cat <<''EOF''\nfix: 文件浏览器支持网络驱动器\n\n- macOS 默认从 /Volumes 开始便于访问网络驱动器\n- 更新对话框标题提示可导航到网络位置\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")",
-      "Bash(gh run view:*)"
+      "Bash(gh run view:*)",
+      "Bash(cd \"E:/python/共享剪贴板/CLIPBOARD-\" && pyinstaller SharedClipboard.spec --clean 2>&1)",
+      "Bash(cd \"E:/python/共享剪贴板/CLIPBOARD-\" && pyinstaller SharedClipboard.spec --clean -y)",
+      "Bash(pyinstaller SharedClipboard.spec --clean)",
+      "Bash(cmd //c \"taskkill /IM SharedClipboard.exe /F\")"
     ]
   }
 }

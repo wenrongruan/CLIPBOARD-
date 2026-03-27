@@ -77,18 +77,40 @@ The application supports both Windows and macOS:
 - **edge_window.py**: Uses `availableGeometry()` to respect macOS menu bar and Dock
 - **main.py**: macOS menu bar icon with template image support for dark mode
 
-### Building for macOS
+### Building / Packaging
 
-Using py2app:
+#### Windows — 打包为单文件 exe
+
+项目已有 `SharedClipboard.spec`，直接使用：
+
+```bash
+pip install pyinstaller   # 如未安装
+pyinstaller SharedClipboard.spec --clean
+```
+
+产物：`dist/SharedClipboard.exe`（约 66MB，含所有依赖和 icons 资源）
+
+spec 文件要点：
+- 入口：`main.py`
+- 数据文件：`('icons', 'icons')` — 打包 icons 目录
+- hiddenimports：`pynput.keyboard._win32`, `pynput.mouse._win32`, `pymysql`
+- 图标：`icons/app.ico`
+- `console=False` — 无控制台窗口
+- `upx=True` — 启用 UPX 压缩
+
+如需修改打包配置（如添加新的 hiddenimport 或数据文件），直接编辑 `SharedClipboard.spec`。
+
+#### macOS — 打包为 .app
+
+使用 py2app：
 ```bash
 pip install py2app
 python build_macos.py py2app
 ```
 
-The built app will be in `dist/共享剪贴板.app`
+产物：`dist/共享剪贴板.app`
 
-Using PyInstaller (cross-platform):
+也可用 PyInstaller：
 ```bash
-pip install pyinstaller
 pyinstaller --onefile --windowed --name "SharedClipboard" main.py
 ```

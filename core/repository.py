@@ -117,21 +117,26 @@ class ClipboardRepository:
         return self.db.execute_read(operation)
 
     def get_items(
-        self, page: int = 0, page_size: int = 10
+        self, page: int = 0, page_size: int = 10, starred_only: bool = False
     ) -> Tuple[List[ClipboardItem], int]:
         def operation(conn) -> Tuple[List[ClipboardItem], int]:
             offset = page * page_size
 
             # 获取总数
-            row = self._fetchone(conn, "SELECT COUNT(*) FROM clipboard_items")
+            count_sql = "SELECT COUNT(*) FROM clipboard_items"
+            if starred_only:
+                count_sql += " WHERE is_starred = 1"
+            row = self._fetchone(conn, count_sql)
             total = row[0] if row else 0
 
             # 获取分页数据（不加载完整图片数据以提高性能）
-            sql = """
+            where_clause = "WHERE is_starred = 1" if starred_only else ""
+            sql = f"""
                 SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
                        content_hash, preview, device_id, device_name,
                        created_at, is_starred
                 FROM clipboard_items
+                {where_clause}
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
             """
@@ -182,28 +187,29 @@ class ClipboardRepository:
         return self.db.execute_read(operation)
 
     def search(
-        self, query: str, page: int = 0, page_size: int = 10
+        self, query: str, page: int = 0, page_size: int = 10, starred_only: bool = False
     ) -> Tuple[List[ClipboardItem], int]:
         def operation(conn) -> Tuple[List[ClipboardItem], int]:
             offset = page * page_size
+            star_filter = " AND is_starred = 1" if starred_only else ""
 
             if self._has_fts and not self._is_mysql:
                 # 使用 FTS5 全文搜索（更快），包装为短语避免特殊字符注入
                 fts_query = '"' + query.replace('"', '""') + '"'
 
-                count_sql = """
+                count_sql = f"""
                     SELECT COUNT(*) FROM clipboard_items
-                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)
+                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?){star_filter}
                 """
                 row = self._fetchone(conn, count_sql, (fts_query,))
                 total = row[0] if row else 0
 
-                sql = """
+                sql = f"""
                     SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
                            content_hash, preview, device_id, device_name,
                            created_at, is_starred
                     FROM clipboard_items
-                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)
+                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?){star_filter}
                     ORDER BY created_at DESC
                     LIMIT ? OFFSET ?
                 """
@@ -212,19 +218,19 @@ class ClipboardRepository:
                 # FTS5 不可用，回退到 LIKE
                 like_query = f"%{query}%"
 
-                count_sql = """
+                count_sql = f"""
                     SELECT COUNT(*) FROM clipboard_items
-                    WHERE text_content LIKE ? OR preview LIKE ?
+                    WHERE (text_content LIKE ? OR preview LIKE ?){star_filter}
                 """
                 row = self._fetchone(conn, count_sql, (like_query, like_query))
                 total = row[0] if row else 0
 
-                sql = """
+                sql = f"""
                     SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
                            content_hash, preview, device_id, device_name,
                            created_at, is_starred
                     FROM clipboard_items
-                    WHERE text_content LIKE ? OR preview LIKE ?
+                    WHERE (text_content LIKE ? OR preview LIKE ?){star_filter}
                     ORDER BY created_at DESC
                     LIMIT ? OFFSET ?
                 """

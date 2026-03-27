@@ -130,6 +130,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # 托盘菜单
         "show_window": "显示窗口",
         "quit": "退出",
+
+        # 复制反馈
+        "copied_to_clipboard": "已复制到剪贴板 ✓",
+        "copy_failed": "复制失败",
+
+        # 收藏筛选
+        "show_starred_only": "只看收藏",
     },
 
     # ========== English ==========
@@ -243,6 +250,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Tray menu
         "show_window": "Show Window",
         "quit": "Quit",
+
+        # Copy feedback
+        "copied_to_clipboard": "Copied to clipboard ✓",
+        "copy_failed": "Copy failed",
+
+        # Star filter
+        "show_starred_only": "Starred only",
     },
 
     # ========== 日本語 ==========
@@ -356,6 +370,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # トレイメニュー
         "show_window": "ウィンドウを表示",
         "quit": "終了",
+
+        # コピーフィードバック
+        "copied_to_clipboard": "クリップボードにコピーしました ✓",
+        "copy_failed": "コピーに失敗しました",
+
+        # スターフィルター
+        "show_starred_only": "スター付きのみ",
     },
 
     # ========== 한국어 ==========
@@ -469,6 +490,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # 트레이 메뉴
         "show_window": "창 표시",
         "quit": "종료",
+
+        # 복사 피드백
+        "copied_to_clipboard": "클립보드에 복사됨 ✓",
+        "copy_failed": "복사 실패",
+
+        # 즐겨찾기 필터
+        "show_starred_only": "즐겨찾기만",
     },
 
     # ========== Español ==========
@@ -582,6 +610,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Menú de bandeja
         "show_window": "Mostrar ventana",
         "quit": "Salir",
+
+        # Retroalimentación de copia
+        "copied_to_clipboard": "Copiado al portapapeles ✓",
+        "copy_failed": "Error al copiar",
+
+        # Filtro de favoritos
+        "show_starred_only": "Solo favoritos",
     },
 
     # ========== Français ==========
@@ -695,6 +730,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Menu de la barre d'état
         "show_window": "Afficher la fenêtre",
         "quit": "Quitter",
+
+        # Retour de copie
+        "copied_to_clipboard": "Copié dans le presse-papiers ✓",
+        "copy_failed": "Échec de la copie",
+
+        # Filtre favoris
+        "show_starred_only": "Favoris uniquement",
     },
 
     # ========== Deutsch ==========
@@ -808,6 +850,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Taskleistenmenü
         "show_window": "Fenster anzeigen",
         "quit": "Beenden",
+
+        # Kopier-Feedback
+        "copied_to_clipboard": "In Zwischenablage kopiert ✓",
+        "copy_failed": "Kopieren fehlgeschlagen",
+
+        # Favoriten-Filter
+        "show_starred_only": "Nur Favoriten",
     },
 
     # ========== Русский ==========
@@ -921,6 +970,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         # Меню в трее
         "show_window": "Показать окно",
         "quit": "Выход",
+
+        # Обратная связь при копировании
+        "copied_to_clipboard": "Скопировано в буфер обмена ✓",
+        "copy_failed": "Ошибка копирования",
+
+        # Фильтр избранного
+        "show_starred_only": "Только избранное",
     },
 }
 

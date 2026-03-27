@@ -108,19 +108,15 @@ class ClipboardMonitor(QObject):
             return
 
         # 创建新记录
-        preview = text[:100].replace("\n", " ").strip()
-        if len(text) > 100:
-            preview += "..."
-
         item = ClipboardItem(
             content_type=ContentType.TEXT,
             text_content=text,
             content_hash=content_hash,
-            preview=preview,
             device_id=Config.get_device_id(),
             device_name=Config.get_device_name(),
             created_at=int(time.time() * 1000),
         )
+        item.preview = item.get_display_preview()
 
         try:
             item_id = self.repository.add_item(item)
@@ -212,12 +208,15 @@ class ClipboardMonitor(QObject):
             logger.error(f"保存图片失败: {e}")
             self.error_occurred.emit(f"保存失败: {e}")
 
-    def copy_to_clipboard(self, item: ClipboardItem):
+    def copy_to_clipboard(self, item: ClipboardItem) -> bool:
         if item.is_text and item.text_content:
             self._last_text = item.text_content
             self.clipboard.setText(item.text_content)
+            return True
         elif item.is_image and item.image_data:
             self._last_image_hash = item.content_hash
             image = QImage()
             image.loadFromData(item.image_data)
             self.clipboard.setImage(image)
+            return True
+        return False

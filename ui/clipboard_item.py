@@ -34,12 +34,12 @@ class ClipboardItemWidget(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(14, 10, 10, 10)
         layout.setSpacing(10)
 
         # 左侧：内容预览
         content_layout = QVBoxLayout()
-        content_layout.setSpacing(4)
+        content_layout.setSpacing(6)
 
         if self.item.is_image and self.item.image_thumbnail:
             # 图片预览
@@ -54,70 +54,57 @@ class ClipboardItemWidget(QWidget):
                 scaled = None
                 if not pixmap.isNull():
                     scaled = pixmap.scaled(
-                        60, 60, Qt.KeepAspectRatio, Qt.FastTransformation
+                        56, 56, Qt.KeepAspectRatio, Qt.SmoothTransformation
                     )
                     if len(_pixmap_cache) >= _PIXMAP_CACHE_MAX:
-                        # 简单淘汰：清空一半
                         keys = list(_pixmap_cache.keys())
                         for k in keys[:len(keys) // 2]:
                             del _pixmap_cache[k]
                     _pixmap_cache[cache_key] = scaled
             if scaled:
                 image_label.setPixmap(scaled)
-            image_label.setFixedSize(60, 60)
+            image_label.setFixedSize(56, 56)
             layout.addWidget(image_label)
 
             # 图片信息
             info_layout = QVBoxLayout()
-            info_layout.setSpacing(2)
+            info_layout.setSpacing(3)
 
             preview_label = QLabel(self.item.preview)
             preview_label.setObjectName("previewLabel")
             preview_label.setMinimumWidth(0)
+            preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             info_layout.addWidget(preview_label)
 
-            time_label = QLabel(self._format_time(self.item.created_at))
-            time_label.setObjectName("timeLabel")
-            info_layout.addWidget(time_label)
-
-            if self.item.device_name:
-                device_label = QLabel(self.item.device_name)
-                device_label.setObjectName("deviceLabel")
-                info_layout.addWidget(device_label)
+            meta_label = self._make_meta_label()
+            info_layout.addWidget(meta_label)
 
             info_layout.addStretch()
             layout.addLayout(info_layout, 1)
 
         else:
-            # 文本预览
-            preview_text = self.item.get_display_preview(80)
+            # 文本预览 - 保留换行显示，最多3行
+            preview_text = self._get_multiline_preview(self.item, max_lines=3, max_chars=120)
             preview_label = QLabel(preview_text)
             preview_label.setObjectName("previewLabel")
             preview_label.setWordWrap(True)
             preview_label.setMinimumWidth(0)
-            preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            preview_label.setMaximumHeight(54)
+            preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             content_layout.addWidget(preview_label)
 
-            # 时间和设备
-            meta_layout = QHBoxLayout()
-            meta_layout.setSpacing(8)
+            content_layout.addStretch()
 
-            time_label = QLabel(self._format_time(self.item.created_at))
-            time_label.setObjectName("timeLabel")
-            meta_layout.addWidget(time_label)
-
-            if self.item.device_name:
-                device_label = QLabel(self.item.device_name)
-                device_label.setObjectName("deviceLabel")
-                meta_layout.addWidget(device_label)
-
-            meta_layout.addStretch()
-            content_layout.addLayout(meta_layout)
+            meta_label = self._make_meta_label()
+            content_layout.addWidget(meta_label)
 
             layout.addLayout(content_layout, 1)
 
-        # 右侧：操作按钮
-        button_layout = QVBoxLayout()
+        # 右侧：操作按钮 - 用 QWidget 包裹确保固定宽度
+        button_container = QWidget()
+        button_container.setFixedWidth(28)
+        button_layout = QVBoxLayout(button_container)
+        button_layout.setContentsMargins(0, 0, 0, 0)
         button_layout.setSpacing(4)
 
         star_btn = QPushButton("★" if self.item.is_starred else "☆")
@@ -140,7 +127,44 @@ class ClipboardItemWidget(QWidget):
         button_layout.addWidget(delete_btn)
 
         button_layout.addStretch()
-        layout.addLayout(button_layout)
+        layout.addWidget(button_container)
+
+    def _make_meta_label(self) -> QLabel:
+        meta_text = self._format_time(self.item.created_at)
+        if self.item.device_name:
+            meta_text += "  ·  " + self.item.device_name
+        label = QLabel(meta_text)
+        label.setObjectName("metaLabel")
+        label.setMinimumWidth(0)
+        return label
+
+    @staticmethod
+    def _get_multiline_preview(item: ClipboardItem, max_lines: int = 3, max_chars: int = 120) -> str:
+        """保留原始换行结构，取前几行，更自然地展示内容"""
+        if not item.is_text or not item.text_content:
+            return item.preview or ""
+        text = item.text_content
+        result_lines: list[str] = []
+        total_chars = 0
+        start = 0
+        while start < len(text) and len(result_lines) < max_lines and total_chars < max_chars:
+            end = text.find("\n", start)
+            if end == -1:
+                end = len(text)
+            stripped = text[start:end].strip()
+            start = end + 1
+            if not stripped and not result_lines:
+                continue
+            remaining = max_chars - total_chars
+            if len(stripped) > remaining:
+                stripped = stripped[:remaining] + "…"
+            result_lines.append(stripped)
+            total_chars += len(stripped)
+        result = "\n".join(result_lines)
+        if total_chars < len(text.strip()):
+            if not result.endswith("…"):
+                result += " …"
+        return result or item.preview or ""
 
     def _format_time(self, timestamp_ms: int) -> str:
         dt = datetime.fromtimestamp(timestamp_ms / 1000)

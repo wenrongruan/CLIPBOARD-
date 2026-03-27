@@ -7,9 +7,10 @@ import threading
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QCursor
-from PySide6.QtCore import Qt, QMetaObject, Q_ARG
+from PySide6.QtCore import Qt, QMetaObject, Q_ARG, QUrl
+from PySide6.QtGui import QDesktopServices
 
 IS_MACOS = platform.system() == "Darwin"
 
@@ -230,6 +231,27 @@ class ClipboardApp:
             logger.info(f"全局热键已注册: {hotkey}")
         except Exception as e:
             logger.error(f"注册全局热键失败: {e}")
+            if IS_MACOS:
+                self._prompt_input_monitoring_permission()
+
+    def _prompt_input_monitoring_permission(self):
+        """macOS: 引导用户授权输入监控权限"""
+        msg = QMessageBox()
+        msg.setWindowTitle("需要「输入监控」权限")
+        msg.setText(
+            "共享剪贴板需要「输入监控」权限才能使用全局快捷键唤出剪贴板面板。\n\n"
+            "请前往：系统设置 → 隐私与安全性 → 输入监控\n"
+            "将「共享剪贴板」添加到允许列表，然后重启应用。"
+        )
+        msg.setInformativeText("如果暂时跳过，仍可通过点击菜单栏图标使用。")
+        msg.setIcon(QMessageBox.Icon.Information)
+        open_btn = msg.addButton("打开系统设置", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton("暂时跳过", QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if msg.clickedButton() == open_btn:
+            QDesktopServices.openUrl(QUrl(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+            ))
 
     def _on_hotkey_pressed(self):
         """热键被按下时触发"""
