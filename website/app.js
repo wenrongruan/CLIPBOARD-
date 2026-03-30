@@ -7,7 +7,7 @@
  */
 
 const APP_VERSION = '1.1.0';
-const GITHUB_REPO = 'YOUR_USERNAME/SharedClipboard'; // <-- 替换为你的 GitHub 仓库地址
+const GITHUB_REPO = 'wenrongruan/CLIPBOARD-';
 
 // Download URLs — derived from GITHUB_REPO + APP_VERSION
 const DOWNLOADS = {
