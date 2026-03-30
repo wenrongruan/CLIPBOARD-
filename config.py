@@ -10,7 +10,7 @@ from pathlib import Path
 class Config:
     # 应用信息
     APP_NAME = "SharedClipboard"
-    APP_VERSION = "1.0.0"
+    APP_VERSION = "1.1.0"
 
     # 平台检测
     IS_WINDOWS = platform.system() == "Windows"
