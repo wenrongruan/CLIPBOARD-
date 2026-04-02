@@ -58,6 +58,12 @@ python main.py
 - SQLite (WAL 模式)
 - Pillow
 
+## 相关链接
+
+- **官方网站**: [www.jlike.com](https://www.jlike.com)
+- **GitHub 仓库**: [github.com/wenrongruan/CLIPBOARD-](https://github.com/wenrongruan/CLIPBOARD-)
+- **软件下载**: [GitHub Releases](https://github.com/wenrongruan/CLIPBOARD-/releases)
+
 ## 许可证
 
 MIT License

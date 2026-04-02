@@ -137,6 +137,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # 收藏筛选
         "show_starred_only": "只看收藏",
+
+        # 关于
+        "about": "关于",
+        "about_description": "一款跨设备剪贴板历史管理与同步工具",
+        "official_website": "官方网站:",
+        "github_repo": "GitHub 仓库:",
+        "download_page": "软件下载:",
     },
 
     # ========== English ==========
@@ -257,6 +264,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Star filter
         "show_starred_only": "Starred only",
+
+        # About
+        "about": "About",
+        "about_description": "A cross-device clipboard history management and sync tool",
+        "official_website": "Official Website:",
+        "github_repo": "GitHub Repository:",
+        "download_page": "Download:",
     },
 
     # ========== 日本語 ==========
@@ -377,6 +391,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # スターフィルター
         "show_starred_only": "スター付きのみ",
+
+        # アバウト
+        "about": "について",
+        "about_description": "クロスデバイスのクリップボード履歴管理と同期ツール",
+        "official_website": "公式サイト:",
+        "github_repo": "GitHub リポジトリ:",
+        "download_page": "ダウンロード:",
     },
 
     # ========== 한국어 ==========
@@ -497,6 +518,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # 즐겨찾기 필터
         "show_starred_only": "즐겨찾기만",
+
+        # 정보
+        "about": "정보",
+        "about_description": "크로스 디바이스 클립보드 기록 관리 및 동기화 도구",
+        "official_website": "공식 웹사이트:",
+        "github_repo": "GitHub 저장소:",
+        "download_page": "다운로드:",
     },
 
     # ========== Español ==========
@@ -617,6 +645,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Filtro de favoritos
         "show_starred_only": "Solo favoritos",
+
+        # Acerca de
+        "about": "Acerca de",
+        "about_description": "Herramienta de gestión y sincronización del historial del portapapeles entre dispositivos",
+        "official_website": "Sitio web oficial:",
+        "github_repo": "Repositorio GitHub:",
+        "download_page": "Descargar:",
     },
 
     # ========== Français ==========
@@ -737,6 +772,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Filtre favoris
         "show_starred_only": "Favoris uniquement",
+
+        # À propos
+        "about": "À propos",
+        "about_description": "Outil de gestion et de synchronisation de l'historique du presse-papiers entre appareils",
+        "official_website": "Site officiel:",
+        "github_repo": "Dépôt GitHub:",
+        "download_page": "Télécharger:",
     },
 
     # ========== Deutsch ==========
@@ -857,6 +899,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Favoriten-Filter
         "show_starred_only": "Nur Favoriten",
+
+        # Über
+        "about": "Über",
+        "about_description": "Ein geräteübergreifendes Tool zur Verwaltung und Synchronisierung der Zwischenablage",
+        "official_website": "Offizielle Website:",
+        "github_repo": "GitHub-Repository:",
+        "download_page": "Herunterladen:",
     },
 
     # ========== Русский ==========
@@ -977,6 +1026,13 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # Фильтр избранного
         "show_starred_only": "Только избранное",
+
+        # О программе
+        "about": "О программе",
+        "about_description": "Инструмент управления и синхронизации истории буфера обмена между устройствами",
+        "official_website": "Официальный сайт:",
+        "github_repo": "Репозиторий GitHub:",
+        "download_page": "Скачать:",
     },
 }
 

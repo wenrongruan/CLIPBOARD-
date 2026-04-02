@@ -282,6 +282,48 @@ class SettingsDialog(QDialog):
 
         tab_widget.addTab(filter_tab, t("filter_storage"))
 
+        # ========== 关于选项卡 ==========
+        about_tab = QWidget()
+        about_layout = QVBoxLayout(about_tab)
+        about_layout.setSpacing(16)
+        about_layout.setContentsMargins(20, 20, 20, 20)
+
+        # 应用名称和描述
+        app_name_label = QLabel(t("app_name"))
+        app_name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        app_name_label.setAlignment(Qt.AlignCenter)
+        about_layout.addWidget(app_name_label)
+
+        desc_label = QLabel(t("about_description"))
+        desc_label.setStyleSheet("color: #aaaaaa; font-size: 13px;")
+        desc_label.setAlignment(Qt.AlignCenter)
+        about_layout.addWidget(desc_label)
+
+        about_layout.addSpacing(10)
+
+        # 链接信息
+        link_style = "color: #58a6ff; text-decoration: none;"
+        links_group = QGroupBox("")
+        links_layout = QFormLayout(links_group)
+        links_layout.setSpacing(12)
+
+        website_label = QLabel(f'<a href="https://www.jlike.com" style="{link_style}">www.jlike.com</a>')
+        website_label.setOpenExternalLinks(True)
+        links_layout.addRow(t("official_website"), website_label)
+
+        github_label = QLabel(f'<a href="https://github.com/wenrongruan/CLIPBOARD-" style="{link_style}">github.com/wenrongruan/CLIPBOARD-</a>')
+        github_label.setOpenExternalLinks(True)
+        links_layout.addRow(t("github_repo"), github_label)
+
+        download_label = QLabel(f'<a href="https://github.com/wenrongruan/CLIPBOARD-/releases" style="{link_style}">GitHub Releases</a>')
+        download_label.setOpenExternalLinks(True)
+        links_layout.addRow(t("download_page"), download_label)
+
+        about_layout.addWidget(links_group)
+        about_layout.addStretch()
+
+        tab_widget.addTab(about_tab, t("about"))
+
         # ========== 按钮 ==========
         button_box = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
