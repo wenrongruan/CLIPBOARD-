@@ -43,6 +43,7 @@ class PluginResult:
     image_data: Optional[bytes] = None
     action: PluginResultAction = PluginResultAction.COPY
     error_message: Optional[str] = None
+    cancelled: bool = False
 
     def __post_init__(self):
         if self.success and self.text_content is None and self.image_data is None:

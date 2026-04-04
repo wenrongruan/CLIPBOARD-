@@ -1,5 +1,4 @@
 import os
-import subprocess
 import sys
 from typing import List, Optional
 
@@ -603,13 +602,9 @@ class SettingsDialog(QDialog):
         Config.set_plugin_enabled(plugin_id, enabled)
 
     def _open_plugins_dir(self):
-        plugins_dir = str(Config.get_user_plugins_dir())
-        if sys.platform == "win32":
-            os.startfile(plugins_dir)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", plugins_dir])
-        else:
-            subprocess.Popen(["xdg-open", plugins_dir])
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Config.get_user_plugins_dir())))
 
     def _reload_plugins(self):
         if hasattr(self, '_plugin_manager') and self._plugin_manager:
@@ -617,14 +612,11 @@ class SettingsDialog(QDialog):
             self._refresh_plugin_list()
 
     def _open_plugin_logs(self):
-        log_dir = str(Config.get_config_dir() / "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(log_dir)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", log_dir])
-        else:
-            subprocess.Popen(["xdg-open", log_dir])
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        log_dir = Config.get_config_dir() / "logs"
+        log_dir.mkdir(exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
 
     def _open_plugin_dev_docs(self):
         from PySide6.QtGui import QDesktopServices
@@ -634,8 +626,7 @@ class SettingsDialog(QDialog):
     def _open_plugin_config(self, plugin_id: str):
         schema = self._plugin_manager.get_config_schema(plugin_id)
         current_config = self._plugin_manager.get_plugin_config(plugin_id)
-        manifest = self._plugin_manager._manifests.get(plugin_id, {})
-        plugin_name = manifest.get("name", plugin_id)
+        plugin_name = self._plugin_manager.get_plugin_name(plugin_id)
 
         dialog = PluginConfigDialog(plugin_name, schema, current_config, self)
         if dialog.exec() == QDialog.Accepted:
@@ -1327,11 +1318,7 @@ class MainWindow(EdgeHiddenWindow):
             return  # 被拒绝（已有任务在执行）
 
         # 显示进度
-        plugin_name = ""
-        for p in self.plugin_manager.get_loaded_plugins():
-            if p["id"] == plugin_id:
-                plugin_name = p["name"]
-                break
+        plugin_name = self.plugin_manager.get_plugin_name(plugin_id)
         self._show_plugin_feedback(
             t("plugin_executing", name=plugin_name, percent=0),
             "pluginProgress",
@@ -1344,12 +1331,11 @@ class MainWindow(EdgeHiddenWindow):
 
     def _on_plugin_finished(self, result: PluginResult, original_item: ClipboardItem):
         if not result.success:
-            # 用户主动取消时静默隐藏反馈
-            if result.error_message == "已取消":
+            if result.cancelled:
                 self.copy_feedback_label.hide()
                 return
             self._show_plugin_feedback(
-                f"❌ {result.error_message or '执行失败'}", "copyFeedbackError"
+                f"❌ {result.error_message or t('plugin_exec_failed')}", "copyFeedbackError"
             )
             return
 

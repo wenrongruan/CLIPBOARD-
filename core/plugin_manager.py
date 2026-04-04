@@ -60,7 +60,7 @@ class PluginWorker(QThread):
             )
             if self._cancelled:
                 # 取消后仍需发射信号，确保 _cleanup_worker 被调用
-                self.finished.emit(PluginResult(success=False, error_message="已取消"))
+                self.finished.emit(PluginResult(success=False, cancelled=True))
                 return
             self.finished.emit(result)
         except Exception as e:
@@ -68,7 +68,7 @@ class PluginWorker(QThread):
                 f"Plugin execution failed: {self._action_id}"
             )
             if self._cancelled:
-                self.finished.emit(PluginResult(success=False, error_message="已取消"))
+                self.finished.emit(PluginResult(success=False, cancelled=True))
             else:
                 self.error.emit(f"{self._plugin.get_name()}: {str(e)}")
 
@@ -221,6 +221,11 @@ class PluginManager(QObject):
                 plugin.on_unload()
             except Exception:
                 logger.exception(f"Error unloading plugin {plugin_id}")
+            # 关闭 logger handler 防止文件句柄泄漏
+            plugin_logger = logging.getLogger(f"plugin.{plugin_id}")
+            for handler in plugin_logger.handlers[:]:
+                handler.close()
+                plugin_logger.removeHandler(handler)
         self._plugins.clear()
         self._manifests.clear()
         self._plugin_status.clear()
@@ -257,19 +262,12 @@ class PluginManager(QObject):
     def is_plugin_enabled(self, plugin_id: str) -> bool:
         return Config.is_plugin_enabled(plugin_id)
 
-    def get_actions_for_item(self, item: ClipboardItem) -> List[Tuple[str, PluginAction]]:
-        """返回当前条目可用的插件动作列表"""
-        actions = []
-        for plugin_id, plugin in self._plugins.items():
-            if not Config.is_plugin_enabled(plugin_id):
-                continue
-            try:
-                for action in plugin.get_actions():
-                    if item.content_type in action.supported_types:
-                        actions.append((plugin_id, action))
-            except Exception:
-                logger.exception(f"Error getting actions from {plugin_id}")
-        return actions
+    def get_plugin_name(self, plugin_id: str) -> str:
+        """返回插件显示名称"""
+        manifest = self._manifests.get(plugin_id)
+        if manifest:
+            return manifest.get("name", plugin_id)
+        return plugin_id
 
     def get_plugin_actions_grouped(self, item: ClipboardItem) -> List[dict]:
         """返回按插件分组的动作列表（用于构建菜单）
@@ -300,12 +298,12 @@ class PluginManager(QObject):
     def run_action(self, plugin_id: str, action_id: str, item: ClipboardItem) -> bool:
         """在工作线程中执行插件动作。返回 True 表示已启动，False 表示被拒绝。"""
         if self._active_worker is not None:
-            self.action_error.emit("有插件正在执行，请等待完成")
+            self.action_error.emit(t("plugin_busy"))
             return False
 
         plugin = self._plugins.get(plugin_id)
         if not plugin:
-            self.action_error.emit(f"插件未加载: {plugin_id}")
+            self.action_error.emit(t("plugin_not_loaded", id=plugin_id))
             return False
 
         # 创建 worker

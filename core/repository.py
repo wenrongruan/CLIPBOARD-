@@ -38,17 +38,16 @@ class ClipboardRepository:
         except Exception:
             return False
 
-    def _execute_query(self, conn, sql: str, params: tuple = ()) -> Any:
-        """执行查询，自动适配 SQLite/MySQL"""
+    def _execute_write(self, conn, sql: str, params: tuple = ()) -> tuple:
+        """执行写操作，返回 (rowcount, lastrowid)"""
         if self._is_mysql:
-            # MySQL 使用 %s 占位符
             sql = sql.replace("?", "%s")
             with conn.cursor() as cursor:
                 cursor.execute(sql, params)
-                return cursor
+                return cursor.rowcount, cursor.lastrowid
         else:
-            # SQLite 使用 ? 占位符
-            return conn.execute(sql, params)
+            cursor = conn.execute(sql, params)
+            return cursor.rowcount, cursor.lastrowid
 
     def _fetchone(self, conn, sql: str, params: tuple = ()) -> Optional[tuple]:
         """获取单行结果"""
@@ -87,16 +86,8 @@ class ClipboardRepository:
                     created_at, is_starred
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
-            params = item.to_db_tuple()
-
-            if self._is_mysql:
-                sql = sql.replace("?", "%s")
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, params)
-                    return cursor.lastrowid
-            else:
-                cursor = conn.execute(sql, params)
-                return cursor.lastrowid
+            _, lastrowid = self._execute_write(conn, sql, item.to_db_tuple())
+            return lastrowid
 
         return self.db.execute_with_retry(operation)
 
@@ -244,14 +235,8 @@ class ClipboardRepository:
     def delete_item(self, item_id: int) -> bool:
         def operation(conn) -> bool:
             sql = "DELETE FROM clipboard_items WHERE id = ?"
-            if self._is_mysql:
-                sql = sql.replace("?", "%s")
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, (item_id,))
-                    return cursor.rowcount > 0
-            else:
-                cursor = conn.execute(sql, (item_id,))
-                return cursor.rowcount > 0
+            rowcount, _ = self._execute_write(conn, sql, (item_id,))
+            return rowcount > 0
 
         return self.db.execute_with_retry(operation)
 
@@ -262,14 +247,8 @@ class ClipboardRepository:
                 SET is_starred = CASE WHEN is_starred = 1 THEN 0 ELSE 1 END
                 WHERE id = ?
             """
-            if self._is_mysql:
-                sql = sql.replace("?", "%s")
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, (item_id,))
-                    return cursor.rowcount > 0
-            else:
-                cursor = conn.execute(sql, (item_id,))
-                return cursor.rowcount > 0
+            rowcount, _ = self._execute_write(conn, sql, (item_id,))
+            return rowcount > 0
 
         return self.db.execute_with_retry(operation)
 
@@ -339,15 +318,7 @@ class ClipboardRepository:
 
         def operation(conn) -> int:
             sql = "DELETE FROM clipboard_items WHERE is_starred = 0 AND created_at < ?"
-            if self._is_mysql:
-                sql = sql.replace("?", "%s")
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, (cutoff_ms,))
-                    deleted = cursor.rowcount
-            else:
-                cursor = conn.execute(sql, (cutoff_ms,))
-                deleted = cursor.rowcount
-
+            deleted, _ = self._execute_write(conn, sql, (cutoff_ms,))
             if deleted > 0:
                 logger.info(f"清理了 {deleted} 条过期记录 (超过 {retention_days} 天)")
             return deleted
@@ -386,14 +357,8 @@ class ClipboardRepository:
                 return False
             params.append(item_id)
             sql = f"UPDATE clipboard_items SET {', '.join(fields)} WHERE id = ?"
-            if self._is_mysql:
-                sql = sql.replace("?", "%s")
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, tuple(params))
-                    return cursor.rowcount > 0
-            else:
-                cursor = conn.execute(sql, tuple(params))
-                return cursor.rowcount > 0
+            rowcount, _ = self._execute_write(conn, sql, tuple(params))
+            return rowcount > 0
 
         return self.db.execute_with_retry(operation)
 
