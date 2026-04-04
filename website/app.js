@@ -6,7 +6,7 @@
  * To update GitHub repo: change GITHUB_REPO below.
  */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '2.0.0';
 const GITHUB_REPO = 'wenrongruan/CLIPBOARD-';
 
 // Download URLs — derived from GITHUB_REPO + APP_VERSION
@@ -119,6 +119,12 @@ function setDownloadLinks() {
 
   // Version badges
   ['versionBadge', 'footerVersion'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = `v${APP_VERSION}`;
+  });
+
+  // Download card version tags
+  ['dlVerWin', 'dlVerMac', 'dlVerLinux'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.textContent = `v${APP_VERSION}`;
   });

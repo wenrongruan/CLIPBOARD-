@@ -20,6 +20,7 @@ from core.db_factory import create_database_manager
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
+from core.plugin_manager import PluginManager
 from ui.main_window import MainWindow
 
 # 全局热键支持
@@ -181,10 +182,15 @@ class ClipboardApp:
         self.clipboard_monitor = ClipboardMonitor(self.repository)
         self.sync_service = SyncService(self.repository)
 
+        # 初始化插件管理器
+        self.plugin_manager = PluginManager()
+        self.plugin_manager.load_plugins()
+
         self.main_window = MainWindow(
             self.repository,
             self.clipboard_monitor,
             self.sync_service,
+            plugin_manager=self.plugin_manager,
         )
 
         # 连接退出信号
@@ -271,6 +277,10 @@ class ClipboardApp:
         # 停止热键监听
         if self.hotkey_listener:
             self.hotkey_listener.stop()
+
+        # 卸载插件
+        if hasattr(self, 'plugin_manager'):
+            self.plugin_manager.unload_all()
 
         self.clipboard_monitor.stop()
         self.sync_service.stop()

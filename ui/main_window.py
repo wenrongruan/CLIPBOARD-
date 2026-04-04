@@ -1,6 +1,10 @@
+import os
+import subprocess
+import sys
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
+from PySide6.QtGui import QAction, QCursor
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -22,13 +26,15 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTabWidget,
     QCheckBox,
+    QScrollArea,
 )
 from PySide6.QtWidgets import QButtonGroup, QProgressDialog, QInputDialog
 
-from core.models import ClipboardItem
+from core.models import ClipboardItem, ContentType
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
+from core.plugin_api import PluginResult, PluginResultAction
 from config import Config
 from i18n import t, set_language, get_language, get_languages, SUPPORTED_LANGUAGES
 from .edge_window import EdgeHiddenWindow
@@ -36,9 +42,121 @@ from .clipboard_item import ClipboardItemWidget
 from .styles import MAIN_STYLE
 
 
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
+class PluginConfigDialog(QDialog):
+    """根据 config_schema 自动生成的插件配置对话框"""
+
+    def __init__(self, plugin_name: str, schema: dict, current_config: dict, parent=None):
         super().__init__(parent)
+        self.setWindowTitle(t("plugin_config_title", name=plugin_name))
+        self.setFixedWidth(420)
+        self.setStyleSheet(MAIN_STYLE)
+        self._schema = schema
+        self._widgets = {}
+        self._setup_ui(current_config)
+
+    def _setup_ui(self, current_config: dict):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        for key, spec in self._schema.items():
+            field_type = spec.get("type", "string")
+            label_text = spec.get("label", key)
+            if spec.get("required"):
+                label_text += " *"
+            description = spec.get("description", "")
+            default = spec.get("default", "")
+            value = current_config.get(key, default)
+
+            if field_type == "string":
+                widget = QLineEdit()
+                widget.setText(str(value) if value is not None else "")
+                widget.setPlaceholderText(description)
+                if spec.get("secret"):
+                    widget.setEchoMode(QLineEdit.Password)
+                self._widgets[key] = widget
+                form.addRow(label_text, widget)
+
+            elif field_type == "number":
+                widget = QSpinBox()
+                widget.setRange(spec.get("min", 0), spec.get("max", 999999))
+                widget.setSingleStep(spec.get("step", 1))
+                widget.setValue(int(value) if value is not None else 0)
+                self._widgets[key] = widget
+                form.addRow(label_text, widget)
+
+            elif field_type == "boolean":
+                widget = QCheckBox()
+                widget.setChecked(bool(value))
+                self._widgets[key] = widget
+                form.addRow(label_text, widget)
+
+            elif field_type == "select":
+                widget = QComboBox()
+                options = spec.get("options", [])
+                widget.addItems([str(o) for o in options])
+                if value in options:
+                    widget.setCurrentText(str(value))
+                self._widgets[key] = widget
+                form.addRow(label_text, widget)
+
+        layout.addLayout(form)
+        layout.addStretch()
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton(t("plugin_cancel"))
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        save_btn = QPushButton(t("plugin_save"))
+        save_btn.setObjectName("okButton")
+        save_btn.clicked.connect(self._on_save)
+        btn_layout.addWidget(save_btn)
+        layout.addLayout(btn_layout)
+
+    def _on_save(self):
+        # 检查必填项
+        for key, spec in self._schema.items():
+            if spec.get("required"):
+                widget = self._widgets.get(key)
+                if widget is None:
+                    continue
+                empty = False
+                if isinstance(widget, QLineEdit):
+                    empty = not widget.text().strip()
+                elif isinstance(widget, QComboBox):
+                    empty = not widget.currentText()
+                if empty:
+                    QMessageBox.warning(self, "", t("plugin_config_required"))
+                    return
+        self.accept()
+
+    def get_config(self) -> dict:
+        config = {}
+        for key, spec in self._schema.items():
+            widget = self._widgets.get(key)
+            if widget is None:
+                continue
+            field_type = spec.get("type", "string")
+            if field_type == "string":
+                config[key] = widget.text()
+            elif field_type == "number":
+                config[key] = widget.value()
+            elif field_type == "boolean":
+                config[key] = widget.isChecked()
+            elif field_type == "select":
+                config[key] = widget.currentText()
+        return config
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None, plugin_manager=None):
+        super().__init__(parent)
+        self._plugin_manager = plugin_manager
         self.setWindowTitle(t("settings"))
         self.setFixedSize(580, 560)
         self.setStyleSheet(MAIN_STYLE)
@@ -282,6 +400,9 @@ class SettingsDialog(QDialog):
 
         tab_widget.addTab(filter_tab, t("filter_storage"))
 
+        # ========== 插件选项卡 ==========
+        self._setup_plugin_tab(tab_widget)
+
         # ========== 关于选项卡 ==========
         about_tab = QWidget()
         about_layout = QVBoxLayout(about_tab)
@@ -334,6 +455,192 @@ class SettingsDialog(QDialog):
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+
+    def _setup_plugin_tab(self, tab_widget):
+        """构建插件选项卡"""
+        plugin_tab = QWidget()
+        plugin_layout = QVBoxLayout(plugin_tab)
+        plugin_layout.setSpacing(10)
+
+        # 标题
+        title = QLabel(t("installed_plugins"))
+        title.setObjectName("sectionTitle")
+        plugin_layout.addWidget(title)
+
+        # 插件列表（滚动区域）
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll_content = QWidget()
+        self._plugin_list_layout = QVBoxLayout(scroll_content)
+        self._plugin_list_layout.setSpacing(6)
+        self._plugin_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._plugin_list_layout.addStretch()
+        scroll.setWidget(scroll_content)
+        plugin_layout.addWidget(scroll, 1)
+
+        # 底部按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+
+        open_dir_btn = QPushButton(t("open_plugins_dir"))
+        open_dir_btn.clicked.connect(self._open_plugins_dir)
+        btn_layout.addWidget(open_dir_btn)
+
+        reload_btn = QPushButton(t("reload_plugins"))
+        reload_btn.clicked.connect(self._reload_plugins)
+        btn_layout.addWidget(reload_btn)
+
+        logs_btn = QPushButton(t("view_plugin_logs"))
+        logs_btn.clicked.connect(self._open_plugin_logs)
+        btn_layout.addWidget(logs_btn)
+
+        dev_docs_btn = QPushButton(t("plugin_dev_docs"))
+        dev_docs_btn.clicked.connect(self._open_plugin_dev_docs)
+        btn_layout.addWidget(dev_docs_btn)
+
+        btn_layout.addStretch()
+        plugin_layout.addLayout(btn_layout)
+
+        tab_widget.addTab(plugin_tab, t("plugins"))
+
+        # 填充插件列表
+        self._refresh_plugin_list()
+
+    def _refresh_plugin_list(self):
+        """刷新插件列表 UI"""
+        # 清空旧内容（保留 stretch）
+        while self._plugin_list_layout.count() > 1:
+            item = self._plugin_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not hasattr(self, '_plugin_manager') or self._plugin_manager is None:
+            return
+
+        plugins = self._plugin_manager.get_loaded_plugins()
+        if not plugins:
+            empty_label = QLabel("没有找到插件")
+            empty_label.setStyleSheet("color: #888888; padding: 20px;")
+            empty_label.setAlignment(Qt.AlignCenter)
+            self._plugin_list_layout.insertWidget(0, empty_label)
+            return
+
+        for i, info in enumerate(plugins):
+            row = self._create_plugin_row(info)
+            self._plugin_list_layout.insertWidget(i, row)
+
+    def _create_plugin_row(self, info: dict) -> QWidget:
+        """创建单个插件行"""
+        row = QWidget()
+        row.setObjectName("pluginItem")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(10, 8, 10, 8)
+        row_layout.setSpacing(10)
+
+        # 启用复选框
+        cb = QCheckBox()
+        cb.setChecked(info["enabled"])
+        plugin_id = info["id"]
+        cb.toggled.connect(lambda checked, pid=plugin_id: self._toggle_plugin(pid, checked))
+        row_layout.addWidget(cb)
+
+        # 信息区域
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+
+        name_label = QLabel(f"{info['name']} v{info['version']}")
+        name_label.setStyleSheet("font-weight: bold;")
+        info_layout.addWidget(name_label)
+
+        desc_label = QLabel(info["description"])
+        desc_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        desc_label.setWordWrap(True)
+        info_layout.addWidget(desc_label)
+
+        # 状态信息
+        status = info["status"]
+        if status == "missing_deps":
+            status_label = QLabel(t("plugin_missing_deps", deps=", ".join(info["missing_deps"])))
+            status_label.setStyleSheet("color: #f0ad4e; font-size: 11px;")
+            info_layout.addWidget(status_label)
+        elif status == "incompatible":
+            status_label = QLabel(t("plugin_incompatible"))
+            status_label.setStyleSheet("color: #f87171; font-size: 11px;")
+            info_layout.addWidget(status_label)
+        elif status == "error":
+            status_label = QLabel(f"{t('plugin_error')}: {info['status_message']}")
+            status_label.setStyleSheet("color: #f87171; font-size: 11px;")
+            info_layout.addWidget(status_label)
+
+        # 权限标签
+        perms = info.get("permissions", [])
+        perm_map = {
+            "network": t("plugin_perm_network"),
+            "file_read": t("plugin_perm_file_read"),
+            "file_write": t("plugin_perm_file_write"),
+        }
+        sensitive = [perm_map[p] for p in perms if p in perm_map]
+        if sensitive:
+            perm_label = QLabel("  ".join(f"⚠ {s}" for s in sensitive))
+            perm_label.setObjectName("permissionTag")
+            info_layout.addWidget(perm_label)
+
+        row_layout.addLayout(info_layout, 1)
+
+        # 设置按钮（仅有 config_schema 的插件）
+        if info.get("has_config") and status == "loaded":
+            config_btn = QPushButton(t("plugin_settings"))
+            config_btn.setObjectName("pluginConfigBtn")
+            config_btn.clicked.connect(
+                lambda checked=False, pid=plugin_id: self._open_plugin_config(pid)
+            )
+            row_layout.addWidget(config_btn)
+
+        return row
+
+    def _toggle_plugin(self, plugin_id: str, enabled: bool):
+        Config.set_plugin_enabled(plugin_id, enabled)
+
+    def _open_plugins_dir(self):
+        plugins_dir = str(Config.get_user_plugins_dir())
+        if sys.platform == "win32":
+            os.startfile(plugins_dir)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", plugins_dir])
+        else:
+            subprocess.Popen(["xdg-open", plugins_dir])
+
+    def _reload_plugins(self):
+        if hasattr(self, '_plugin_manager') and self._plugin_manager:
+            self._plugin_manager.reload_plugins()
+            self._refresh_plugin_list()
+
+    def _open_plugin_logs(self):
+        log_dir = str(Config.get_config_dir() / "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(log_dir)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", log_dir])
+        else:
+            subprocess.Popen(["xdg-open", log_dir])
+
+    def _open_plugin_dev_docs(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl("https://www.jlike.com#dev-docs"))
+
+    def _open_plugin_config(self, plugin_id: str):
+        schema = self._plugin_manager.get_config_schema(plugin_id)
+        current_config = self._plugin_manager.get_plugin_config(plugin_id)
+        manifest = self._plugin_manager._manifests.get(plugin_id, {})
+        plugin_name = manifest.get("name", plugin_id)
+
+        dialog = PluginConfigDialog(plugin_name, schema, current_config, self)
+        if dialog.exec() == QDialog.Accepted:
+            new_config = dialog.get_config()
+            self._plugin_manager.save_plugin_config(plugin_id, new_config)
 
     def _on_db_type_changed(self, index: int):
         """数据库类型切换时显示/隐藏对应配置"""
@@ -526,12 +833,14 @@ class MainWindow(EdgeHiddenWindow):
         repository: ClipboardRepository,
         clipboard_monitor: ClipboardMonitor,
         sync_service: SyncService,
+        plugin_manager=None,
         parent=None,
     ):
         super().__init__(parent)
         self.repository = repository
         self.clipboard_monitor = clipboard_monitor
         self.sync_service = sync_service
+        self.plugin_manager = plugin_manager
 
         self._current_page = 0
         self._total_pages = 1
@@ -597,6 +906,8 @@ class MainWindow(EdgeHiddenWindow):
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.setSpacing(1)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
         layout.addWidget(self.list_widget, 1)
 
         # 复制反馈标签
@@ -640,6 +951,12 @@ class MainWindow(EdgeHiddenWindow):
 
         # 同步服务信号
         self.sync_service.new_items_available.connect(self._on_new_items)
+
+        # 插件信号
+        if self.plugin_manager:
+            self.plugin_manager.action_progress.connect(self._on_plugin_progress)
+            self.plugin_manager.action_finished.connect(self._on_plugin_finished)
+            self.plugin_manager.action_error.connect(self._on_plugin_error)
 
     def _toggle_starred_filter(self):
         self._starred_only = not self._starred_only
@@ -779,7 +1096,7 @@ class MainWindow(EdgeHiddenWindow):
         self.hide_window()
 
     def _show_settings(self):
-        dialog = SettingsDialog(self)
+        dialog = SettingsDialog(self, plugin_manager=self.plugin_manager)
         if dialog.exec() == QDialog.Accepted:
             settings = dialog.get_settings()
             need_restart = False
@@ -938,6 +1255,168 @@ class MainWindow(EdgeHiddenWindow):
         # 防止 worker 被 GC 回收
         self._migration_worker = worker
         worker.start()
+
+    # ========== 右键菜单 ==========
+
+    def _show_context_menu(self, pos):
+        """显示右键上下文菜单"""
+        list_item = self.list_widget.itemAt(pos)
+        if not list_item:
+            return
+        row = self.list_widget.row(list_item)
+        if row < 0 or row >= len(self._items):
+            return
+
+        item = self._items[row]
+        menu = QMenu(self)
+
+        # 内置操作
+        copy_action = menu.addAction(f"📋 {t('ctx_copy')}")
+        copy_action.triggered.connect(lambda: self._on_item_clicked(item))
+
+        if item.is_starred:
+            star_action = menu.addAction(f"★ {t('ctx_unstar')}")
+        else:
+            star_action = menu.addAction(f"☆ {t('ctx_star')}")
+        star_action.triggered.connect(lambda: self._on_item_star(item))
+
+        delete_action = menu.addAction(f"🗑 {t('ctx_delete')}")
+        delete_action.triggered.connect(lambda: self._on_item_delete(item))
+
+        # 插件操作
+        if self.plugin_manager:
+            groups = self.plugin_manager.get_plugin_actions_grouped(item)
+            if groups:
+                menu.addSeparator()
+                for group in groups:
+                    actions = group["actions"]
+                    if len(actions) == 1:
+                        # 单动作插件直接作为菜单项
+                        a = actions[0]
+                        act = menu.addAction(f"{a.icon} {a.label}")
+                        act.triggered.connect(
+                            lambda checked=False, pid=group["plugin_id"], aid=a.action_id:
+                                self._run_plugin_action(pid, aid, item)
+                        )
+                    else:
+                        # 多动作插件使用子菜单
+                        sub = menu.addMenu(f"{actions[0].icon} {group['plugin_name']}")
+                        for a in actions:
+                            act = sub.addAction(a.label)
+                            act.triggered.connect(
+                                lambda checked=False, pid=group["plugin_id"], aid=a.action_id:
+                                    self._run_plugin_action(pid, aid, item)
+                            )
+
+        menu.exec(self.list_widget.mapToGlobal(pos))
+
+    # ========== 插件执行 ==========
+
+    def _run_plugin_action(self, plugin_id: str, action_id: str, item: ClipboardItem):
+        """执行插件动作"""
+        # 获取完整数据（图片需要从数据库加载）
+        if item.is_image:
+            full_item = self.repository.get_item_by_id(item.id)
+            if full_item and full_item.image_data:
+                item = full_item
+            else:
+                self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
+                return
+
+        if not self.plugin_manager.run_action(plugin_id, action_id, item):
+            return  # 被拒绝（已有任务在执行）
+
+        # 显示进度
+        plugin_name = ""
+        for p in self.plugin_manager.get_loaded_plugins():
+            if p["id"] == plugin_id:
+                plugin_name = p["name"]
+                break
+        self._show_plugin_feedback(
+            t("plugin_executing", name=plugin_name, percent=0),
+            "pluginProgress",
+            show_cancel=True,
+        )
+
+    def _on_plugin_progress(self, percent: int, message: str):
+        text = message if message else f"{percent}%"
+        self._show_plugin_feedback(text, "pluginProgress", show_cancel=True)
+
+    def _on_plugin_finished(self, result: PluginResult, original_item: ClipboardItem):
+        if not result.success:
+            # 用户主动取消时静默隐藏反馈
+            if result.error_message == "已取消":
+                self.copy_feedback_label.hide()
+                return
+            self._show_plugin_feedback(
+                f"❌ {result.error_message or '执行失败'}", "copyFeedbackError"
+            )
+            return
+
+        # 根据 action 处理结果
+        if result.action == PluginResultAction.COPY:
+            # 复制到剪贴板
+            temp_item = ClipboardItem(
+                content_type=result.content_type,
+                text_content=result.text_content,
+                image_data=result.image_data,
+            )
+            self.clipboard_monitor.copy_to_clipboard(temp_item)
+            self._show_plugin_feedback(t("copied_to_clipboard"), "copyFeedbackSuccess")
+
+        elif result.action == PluginResultAction.SAVE:
+            # 保存为新条目
+            from utils.hash_utils import compute_content_hash
+            new_item = ClipboardItem(
+                content_type=result.content_type,
+                text_content=result.text_content,
+                image_data=result.image_data,
+                content_hash=compute_content_hash(
+                    result.text_content or result.image_data or ""
+                ),
+                preview=(result.text_content or "")[:100],
+                device_id=Config.get_device_id(),
+                device_name=Config.get_device_name(),
+            )
+            self.repository.add_item(new_item)
+            self._load_items()
+            self._show_plugin_feedback(t("plugin_saved_entry"), "copyFeedbackSuccess")
+
+        elif result.action == PluginResultAction.REPLACE:
+            # 替换原条目
+            if original_item and original_item.id:
+                success = self.repository.update_item_content(
+                    original_item.id,
+                    text_content=result.text_content,
+                    image_data=result.image_data,
+                    content_type=result.content_type.value if result.content_type else None,
+                )
+                if success:
+                    self._load_items()
+                    self._show_plugin_feedback(t("plugin_replaced_entry"), "copyFeedbackSuccess")
+                else:
+                    self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
+
+    def _on_plugin_error(self, message: str):
+        self._show_plugin_feedback(f"❌ {message}", "copyFeedbackError")
+
+    def _show_plugin_feedback(self, text: str, object_name: str, show_cancel: bool = False):
+        """显示插件反馈信息"""
+        if show_cancel:
+            self.copy_feedback_label.setText(f"{text}  [✕]")
+            self.copy_feedback_label.mousePressEvent = lambda e: self._cancel_plugin()
+        else:
+            self.copy_feedback_label.setText(text)
+            self.copy_feedback_label.mousePressEvent = lambda e: None
+            self._feedback_timer.start(3000)
+        self.copy_feedback_label.setObjectName(object_name)
+        self.copy_feedback_label.style().polish(self.copy_feedback_label)
+        self.copy_feedback_label.show()
+
+    def _cancel_plugin(self):
+        if self.plugin_manager:
+            self.plugin_manager.cancel_action()
+        self.copy_feedback_label.hide()
 
     def _request_quit(self):
         """请求退出应用"""

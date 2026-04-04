@@ -1,0 +1,105 @@
+:root {
+            --nav-bg: #0b1f3a;
+            --accent: #1f8f62;
+            --accent-hover: #178556;
+            --warning: #ff6b35;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: "Noto Sans JP","Hiragino Sans","Segoe UI",Arial,sans-serif; background:#f4f6fb; color:#1c2430; line-height: 1.6; }
+
+        /* Header */
+        header { background: var(--nav-bg); color: #fff; padding: 14px 24px; position: sticky; top: 0; z-index: 100; }
+        .nav { display: flex; align-items: center; justify-content: space-between; max-width: 1200px; margin: 0 auto; }
+        .brand { font-weight: 700; font-size: 16px; text-decoration: none; color: #fff; }
+        .nav-links { display: flex; gap: 8px; align-items: center; }
+        .nav-links a { color: #e8edf7; padding: 8px 14px; text-decoration: none; font-size: 14px; border-radius: 6px; transition: all 0.2s; }
+        .nav-links a:hover { background: rgba(255,255,255,0.1); }
+
+        /* Progress Steps */
+        .progress-bar { background: #fff; padding: 20px 24px; border-bottom: 1px solid #e5e9ef; }
+        .progress-steps { display: flex; justify-content: center; gap: 0; max-width: 600px; margin: 0 auto; }
+        .progress-step { flex: 1; text-align: center; position: relative; }
+        .progress-step::after { content: ''; position: absolute; top: 15px; left: 50%; width: 100%; height: 2px; background: #e5e9ef; z-index: 0; }
+        .progress-step:last-child::after { display: none; }
+        .step-circle { width: 32px; height: 32px; border-radius: 50%; background: #e5e9ef; color: #6b7684; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 14px; position: relative; z-index: 1; }
+        .progress-step.active .step-circle { background: var(--accent); color: #fff; }
+        .progress-step.completed .step-circle { background: var(--accent); color: #fff; }
+        .progress-step.completed::after { background: var(--accent); }
+        .step-label { font-size: 12px; color: #6b7684; margin-top: 8px; }
+        .progress-step.active .step-label { color: var(--accent); font-weight: 600; }
+
+        .container { max-width: 800px; margin: 32px auto 60px; padding: 0 18px; }
+        .card { background:#fff; border-radius:14px; box-shadow:0 8px 30px rgba(0,0,0,0.08); padding:32px; }
+        h1 { margin-bottom: 8px; font-size: 26px; color: var(--nav-bg); }
+        .subtitle { color: #6b7684; margin-bottom: 24px; }
+
+        /* Plan Box */
+        .plan-box { display:flex; justify-content:space-between; align-items:center; background: linear-gradient(135deg, #0f2342, #1a3a5c); color:#fff; padding:20px 24px; border-radius:12px; margin-bottom:24px; flex-wrap: wrap; gap: 12px; }
+        .plan-box .plan-info { }
+        .plan-box .plan-label { font-size:13px; opacity:0.8; margin-bottom: 4px; }
+        .plan-box .plan-name { font-size:20px; font-weight:700; }
+        .plan-box .price-section { text-align: right; }
+        .plan-box .original-price { font-size: 14px; color: #a0aec0; text-decoration: line-through; }
+        .plan-box .discount-badge { display: inline-block; background: var(--warning); color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; margin-left: 8px; }
+        .plan-box .price { font-size:28px; font-weight:800; color:#5ef3af; }
+        .plan-box .price-note { font-size: 12px; color: #a0aec0; margin-top: 4px; }
+
+        /* Change Plan Link */
+        .change-plan { text-align: right; margin-bottom: 20px; }
+        .change-plan a { color: var(--accent); font-size: 14px; text-decoration: none; }
+        .change-plan a:hover { text-decoration: underline; }
+
+        /* Form Styles */
+        .form-group { margin-bottom: 20px; }
+        label { display:block; font-weight:600; margin-bottom:8px; font-size: 14px; color: #1c2430; }
+        label .required { color: #e53e3e; margin-left: 4px; }
+        input, textarea, select { width:100%; padding:12px 16px; border:2px solid #e5e9ef; border-radius:8px; font-size:15px; transition: border-color 0.2s, box-shadow 0.2s; }
+        input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(31, 143, 98, 0.1); }
+        input::placeholder, textarea::placeholder { color: #a0aec0; }
+        textarea { resize: vertical; min-height: 100px; }
+        .form-hint { font-size: 12px; color: #6b7684; margin-top: 6px; }
+
+        /* Radio Group */
+        .radio-group { display:flex; gap:12px; margin-top:8px; flex-wrap: wrap; }
+        .radio-option { flex: 1; min-width: 140px; }
+        .radio-option input[type="radio"] { display: none; }
+        .radio-option label { display: flex; align-items: center; justify-content: center; padding: 14px 20px; border: 2px solid #e5e9ef; border-radius: 8px; cursor: pointer; transition: all 0.2s; font-weight: 500; }
+        .radio-option input[type="radio"]:checked + label { border-color: var(--accent); background: #e8f5f0; color: var(--accent); }
+        .radio-option label:hover { border-color: #c5d0db; }
+
+        /* Button */
+        .btn { display:inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top:24px; padding:16px 24px; background:var(--accent); color:#fff; text-decoration:none; border:none; border-radius:8px; font-weight:700; font-size: 16px; cursor:pointer; transition: all 0.25s; box-shadow: 0 4px 14px rgba(31, 143, 98, 0.3); }
+        .btn:hover { background: var(--accent-hover); transform: translateY(-2px); box-shadow: 0 6px 20px rgba(31, 143, 98, 0.4); }
+
+        /* Errors */
+        .errors { background:#fff5f5; color:#c53030; border:1px solid #feb2b2; padding:16px; border-radius:10px; margin-bottom:20px; }
+        .errors div { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+        .errors div::before { content: '⚠'; }
+
+        /* Trust Badges */
+        .trust-badges { display: flex; justify-content: center; gap: 24px; margin-top: 24px; padding-top: 24px; border-top: 1px solid #e5e9ef; }
+        .trust-badge { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #6b7684; }
+        .trust-badge span { font-size: 18px; }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .nav-links { display: none; }
+            .container { margin-top: 24px; }
+            .card { padding: 24px 20px; }
+            h1 { font-size: 22px; }
+            .plan-box { flex-direction: column; align-items: flex-start; }
+            .plan-box .price-section { text-align: left; width: 100%; margin-top: 8px; }
+            .progress-steps { gap: 0; }
+            .step-label { font-size: 10px; }
+            .radio-group { flex-direction: column; }
+            .radio-option { min-width: 100%; }
+        }
+
+        @media (max-width: 480px) {
+            header { padding: 12px 16px; }
+            .brand { font-size: 14px; }
+            .container { padding: 0 14px; }
+            .card { padding: 20px 16px; border-radius: 12px; }
+            .plan-box { padding: 16px; }
+            .trust-badges { flex-direction: column; gap: 12px; align-items: center; }
+        }

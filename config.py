@@ -10,7 +10,7 @@ from pathlib import Path
 class Config:
     # 应用信息
     APP_NAME = "SharedClipboard"
-    APP_VERSION = "1.1.0"
+    APP_VERSION = "2.0.0"
 
     # 平台检测
     IS_WINDOWS = platform.system() == "Windows"
@@ -278,3 +278,27 @@ class Config:
     def set_language(cls, language: str):
         """设置语言"""
         cls.set_setting("language", language)
+
+    # ========== 插件配置 ==========
+    @classmethod
+    def get_user_plugins_dir(cls) -> Path:
+        """获取用户插件目录"""
+        plugins_dir = cls.get_config_dir() / "plugins"
+        plugins_dir.mkdir(exist_ok=True)
+        return plugins_dir
+
+    @classmethod
+    def is_plugin_enabled(cls, plugin_id: str) -> bool:
+        """检查插件是否启用（默认启用）"""
+        disabled = cls.get_setting("disabled_plugins", [])
+        return plugin_id not in disabled
+
+    @classmethod
+    def set_plugin_enabled(cls, plugin_id: str, enabled: bool):
+        """设置插件启用/禁用"""
+        disabled = cls.get_setting("disabled_plugins", [])
+        if enabled and plugin_id in disabled:
+            disabled.remove(plugin_id)
+        elif not enabled and plugin_id not in disabled:
+            disabled.append(plugin_id)
+        cls.set_setting("disabled_plugins", disabled)

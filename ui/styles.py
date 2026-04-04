@@ -334,4 +334,54 @@ QLabel#sectionTitle {
     font-size: 14px;
     font-weight: bold;
 }
+
+QMenu::separator {
+    height: 1px;
+    background-color: #555555;
+    margin: 4px 8px;
+}
+
+QLabel#pluginProgress {
+    color: #58a6ff;
+    background: rgba(88, 166, 255, 0.12);
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+QLabel#pluginTimeout {
+    color: #f0ad4e;
+    background: rgba(240, 173, 78, 0.15);
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+QLabel#permissionTag {
+    color: #f0ad4e;
+    font-size: 11px;
+}
+
+QWidget#pluginItem {
+    background-color: #333333;
+    border: 1px solid #444444;
+    border-radius: 6px;
+    padding: 8px;
+}
+
+QWidget#pluginItem:hover {
+    border-color: #0078d4;
+}
+
+QPushButton#pluginConfigBtn {
+    background-color: transparent;
+    border: 1px solid #555555;
+    border-radius: 4px;
+    padding: 4px 10px;
+    color: #aaaaaa;
+    font-size: 12px;
+}
+
+QPushButton#pluginConfigBtn:hover {
+    border-color: #0078d4;
+    color: #ffffff;
+}
 """

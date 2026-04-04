@@ -1,0 +1,9 @@
+{
+    "id": "example_uppercase",
+    "name": "文本转大写",
+    "version": "1.0.0",
+    "description": "将文本内容转换为大写字母",
+    "author": "SharedClipboard",
+    "entry_point": "plugin.py",
+    "min_app_version": "1.1.0"
+}

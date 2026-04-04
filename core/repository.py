@@ -354,6 +354,49 @@ class ClipboardRepository:
 
         return self.db.execute_with_retry(operation)
 
+    def update_item_content(
+        self, item_id: int, text_content: Optional[str] = None,
+        image_data: Optional[bytes] = None, content_type: Optional[str] = None,
+    ) -> bool:
+        """更新条目内容（用于插件 REPLACE 操作）"""
+        from utils.hash_utils import compute_content_hash
+
+        def operation(conn) -> bool:
+            # 构建动态 UPDATE
+            fields = []
+            params = []
+            hash_source = None
+            if text_content is not None:
+                fields.append("text_content = ?")
+                params.append(text_content)
+                fields.append("preview = ?")
+                params.append(text_content[:100] if text_content else "")
+                hash_source = text_content
+            if image_data is not None:
+                fields.append("image_data = ?")
+                params.append(image_data)
+                hash_source = image_data
+            if content_type is not None:
+                fields.append("content_type = ?")
+                params.append(content_type)
+            if hash_source is not None:
+                fields.append("content_hash = ?")
+                params.append(compute_content_hash(hash_source))
+            if not fields:
+                return False
+            params.append(item_id)
+            sql = f"UPDATE clipboard_items SET {', '.join(fields)} WHERE id = ?"
+            if self._is_mysql:
+                sql = sql.replace("?", "%s")
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, tuple(params))
+                    return cursor.rowcount > 0
+            else:
+                cursor = conn.execute(sql, tuple(params))
+                return cursor.rowcount > 0
+
+        return self.db.execute_with_retry(operation)
+
     def get_latest_id(self) -> int:
         def operation(conn) -> int:
             row = self._fetchone(conn, "SELECT MAX(id) FROM clipboard_items")
