@@ -154,6 +154,59 @@ class Config:
     def set_hotkey(cls, hotkey: str):
         cls.set_setting("hotkey", hotkey)
 
+    # ========== 同步模式配置 ==========
+    @classmethod
+    def get_sync_mode(cls) -> str:
+        """获取同步模式: local, mysql, cloud"""
+        return cls.get_setting("sync_mode", "local")
+
+    @classmethod
+    def set_sync_mode(cls, mode: str):
+        if mode in ("local", "mysql", "cloud"):
+            cls.set_setting("sync_mode", mode)
+
+    # ========== 云端配置 ==========
+    @classmethod
+    def get_cloud_api_url(cls) -> str:
+        """获取云端 API 地址"""
+        return cls.get_setting("cloud_api_url", "https://api.jlike.com")
+
+    @classmethod
+    def set_cloud_api_url(cls, url: str):
+        cls.set_setting("cloud_api_url", url)
+
+    @classmethod
+    def get_cloud_access_token(cls) -> str:
+        return cls.get_setting("cloud_access_token", "")
+
+    @classmethod
+    def set_cloud_access_token(cls, token: str):
+        cls.set_setting("cloud_access_token", token)
+
+    @classmethod
+    def get_cloud_refresh_token(cls) -> str:
+        return cls.get_setting("cloud_refresh_token", "")
+
+    @classmethod
+    def set_cloud_refresh_token(cls, token: str):
+        cls.set_setting("cloud_refresh_token", token)
+
+    @classmethod
+    def get_cloud_user_email(cls) -> str:
+        return cls.get_setting("cloud_user_email", "")
+
+    @classmethod
+    def set_cloud_user_email(cls, email: str):
+        cls.set_setting("cloud_user_email", email)
+
+    @classmethod
+    def get_cloud_last_sync_id(cls) -> int:
+        return cls.get_setting("cloud_last_sync_id", 0)
+
+    @classmethod
+    def set_cloud_last_sync_id(cls, sync_id: int):
+        cls.set_setting("cloud_last_sync_id", sync_id)
+
     # ========== 数据库类型配置 ==========
     @classmethod
     def get_db_type(cls) -> str:

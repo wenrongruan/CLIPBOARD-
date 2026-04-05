@@ -180,7 +180,32 @@ class ClipboardApp:
     def _create_main_window(self):
         """创建主窗口"""
         self.clipboard_monitor = ClipboardMonitor(self.repository)
-        self.sync_service = SyncService(self.repository)
+
+        # 根据同步模式选择同步服务
+        self.cloud_api = None
+        sync_mode = Config.get_sync_mode()
+
+        if sync_mode == "cloud":
+            try:
+                from core.cloud_sync_service import CloudSyncService
+                from core.cloud_api import CloudAPIClient
+
+                self.cloud_api = CloudAPIClient(Config.get_cloud_api_url())
+                self.cloud_api.set_tokens(
+                    Config.get_cloud_access_token(),
+                    Config.get_cloud_refresh_token(),
+                )
+                self.sync_service = CloudSyncService(self.repository, self.cloud_api)
+
+                # 监听剪贴板新增条目，自动加入云端上传队列
+                self.clipboard_monitor.item_added.connect(self._on_new_item_for_cloud)
+
+                logger.info("已启用云端同步模式")
+            except ImportError as e:
+                logger.warning(f"云端同步模块加载失败，回退到本地模式: {e}")
+                self.sync_service = SyncService(self.repository)
+        else:
+            self.sync_service = SyncService(self.repository)
 
         # 初始化插件管理器
         self.plugin_manager = PluginManager()
@@ -199,6 +224,10 @@ class ClipboardApp:
         # 启动服务
         self.clipboard_monitor.start()
         self.sync_service.start()
+
+    def _on_new_item_for_cloud(self, item):
+        """剪贴板新条目回调 — 加入云端上传队列"""
+        self.sync_service.enqueue_upload(item)
 
     def _show_window(self):
         """显示主窗口"""
@@ -285,6 +314,9 @@ class ClipboardApp:
         self.clipboard_monitor.stop()
         self.sync_service.stop()
         self.tray_icon.hide()
+        # 关闭云端 API 客户端
+        if self.cloud_api is not None:
+            self.cloud_api.close()
         # 关闭持久数据库连接
         if hasattr(self.db_manager, 'close'):
             self.db_manager.close()

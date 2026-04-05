@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>定价方案 — 共享剪贴板</title>
+  <meta name="description" content="共享剪贴板定价方案，所有方案均支持跨设备同步和图片自动压缩。" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ===== NAV ===== -->
+<nav class="nav" id="nav">
+  <div class="nav-inner container">
+    <a class="nav-logo" href="index.html">
+      <span class="nav-logo-icon">📋</span>
+      <span data-i18n="hero_title">共享剪贴板</span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="index.html#features" data-i18n="nav_features">功能</a></li>
+      <li><a href="index.html#download" data-i18n="nav_download">下载</a></li>
+      <li><a href="pricing.html"        data-i18n="nav_pricing">定价</a></li>
+      <li><a href="account.html"        data-i18n="nav_account">账户</a></li>
+      <li><a href="index.html#faq"      data-i18n="nav_faq">FAQ</a></li>
+    </ul>
+    <div class="nav-right">
+      <div class="lang-switcher" id="langSwitcher">
+        <button class="lang-btn" id="langBtn" aria-label="Switch language">
+          <span id="langCurrent">简体中文</span>
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><path d="M6 8L1 3h10z"/></svg>
+        </button>
+        <ul class="lang-menu" id="langMenu" role="menu">
+          <li role="menuitem" data-lang="zh_CN">简体中文</li>
+          <li role="menuitem" data-lang="en_US">English</li>
+          <li role="menuitem" data-lang="ja_JP">日本語</li>
+          <li role="menuitem" data-lang="ko_KR">한국어</li>
+          <li role="menuitem" data-lang="es_ES">Español</li>
+          <li role="menuitem" data-lang="fr_FR">Français</li>
+          <li role="menuitem" data-lang="de_DE">Deutsch</li>
+          <li role="menuitem" data-lang="ru_RU">Русский</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<!-- ===== PRICING HERO ===== -->
+<section class="pricing-hero section">
+  <!-- 背景光晕 -->
+  <div class="hero-glow hero-glow-a" aria-hidden="true"></div>
+  <div class="hero-glow hero-glow-b" aria-hidden="true"></div>
+
+  <div class="container" style="text-align:center">
+    <span class="badge" data-i18n="pricing_badge">灵活定价</span>
+    <h1 class="hero-title" style="font-size:clamp(2rem,4.5vw,3.2rem);margin:0 auto 16px" data-i18n="pricing_hero_title">选择适合你的方案</h1>
+    <p class="section-subtitle" style="margin-bottom:0" data-i18n="pricing_hero_subtitle">所有方案均支持跨设备同步，图片自动压缩</p>
+  </div>
+</section>
+
+<!-- ===== PRICING CARDS ===== -->
+<section class="pricing-cards-section section" style="padding-top:0">
+  <div class="container">
+    <div class="pricing-grid">
+
+      <!-- Free -->
+      <div class="pricing-card">
+        <div class="pricing-card-header">
+          <h3 class="pricing-plan-name" data-i18n="pricing_free_name">Free</h3>
+          <div class="pricing-price">
+            <span class="pricing-amount">$0</span>
+          </div>
+        </div>
+        <ul class="pricing-features">
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_records">云端记录</span>
+            <span class="pricing-feature-value" data-i18n="pricing_free_records">30 条</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_devices">设备数量</span>
+            <span class="pricing-feature-value" data-i18n="pricing_free_devices">2 台</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_image">图片同步</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_free_image">自动压缩</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_retention">记录保留</span>
+            <span class="pricing-feature-value" data-i18n="pricing_free_retention">7 天</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_search">全文搜索</span>
+            <span class="pricing-feature-value" data-i18n="pricing_free_search">基础</span>
+          </li>
+        </ul>
+        <a href="index.html#download" class="btn btn-secondary pricing-btn" data-i18n="pricing_free_cta">免费开始</a>
+      </div>
+
+      <!-- Basic -->
+      <div class="pricing-card">
+        <div class="pricing-card-header">
+          <h3 class="pricing-plan-name" data-i18n="pricing_basic_name">Basic</h3>
+          <div class="pricing-price">
+            <span class="pricing-amount">$1</span>
+            <span class="pricing-period" data-i18n="pricing_per_month">/月</span>
+          </div>
+        </div>
+        <ul class="pricing-features">
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_records">云端记录</span>
+            <span class="pricing-feature-value" data-i18n="pricing_basic_records">200 条</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_devices">设备数量</span>
+            <span class="pricing-feature-value" data-i18n="pricing_basic_devices">3 台</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_image">图片同步</span>
+            <span class="pricing-feature-value pricing-check">✓</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_retention">记录保留</span>
+            <span class="pricing-feature-value" data-i18n="pricing_basic_retention">30 天</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_search">全文搜索</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_basic_search">全文</span>
+          </li>
+        </ul>
+        <a href="#" class="btn btn-secondary pricing-btn" data-i18n="pricing_subscribe">订阅</a>
+      </div>
+
+      <!-- Super (最受欢迎) -->
+      <div class="pricing-card pricing-card-popular">
+        <div class="pricing-popular-badge" data-i18n="pricing_popular">最受欢迎</div>
+        <div class="pricing-card-header">
+          <h3 class="pricing-plan-name" data-i18n="pricing_super_name">Super</h3>
+          <div class="pricing-price">
+            <span class="pricing-amount">$5</span>
+            <span class="pricing-period" data-i18n="pricing_per_month">/月</span>
+          </div>
+        </div>
+        <ul class="pricing-features">
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_records">云端记录</span>
+            <span class="pricing-feature-value" data-i18n="pricing_super_records">500 条</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_devices">设备数量</span>
+            <span class="pricing-feature-value" data-i18n="pricing_super_devices">5 台</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_image">图片同步</span>
+            <span class="pricing-feature-value pricing-check">✓</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_retention">记录保留</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_super_retention">不限</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_search">全文搜索</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_super_search">全文</span>
+          </li>
+        </ul>
+        <a href="#" class="btn btn-primary pricing-btn" data-i18n="pricing_subscribe">订阅</a>
+      </div>
+
+      <!-- Ultimate -->
+      <div class="pricing-card">
+        <div class="pricing-card-header">
+          <h3 class="pricing-plan-name" data-i18n="pricing_ultimate_name">Ultimate</h3>
+          <div class="pricing-price">
+            <span class="pricing-amount">$10</span>
+            <span class="pricing-period" data-i18n="pricing_per_month">/月</span>
+          </div>
+        </div>
+        <ul class="pricing-features">
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_records">云端记录</span>
+            <span class="pricing-feature-value" data-i18n="pricing_ultimate_records">1,000 条</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_devices">设备数量</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_ultimate_devices">不限</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_image">图片同步</span>
+            <span class="pricing-feature-value pricing-check">✓</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_retention">记录保留</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_ultimate_retention">不限</span>
+          </li>
+          <li>
+            <span class="pricing-feature-label" data-i18n="pricing_feat_search">全文搜索</span>
+            <span class="pricing-feature-value pricing-check" data-i18n="pricing_ultimate_search">全文</span>
+          </li>
+        </ul>
+        <a href="#" class="btn btn-secondary pricing-btn" data-i18n="pricing_subscribe">订阅</a>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===== FAQ ===== -->
+<section class="faq section" id="faq">
+  <div class="container">
+    <h2 class="section-title reveal" data-i18n="pricing_faq_title">常见问题</h2>
+    <div class="faq-list" id="faqList" style="margin-top:48px">
+      <div class="faq-item">
+        <button class="faq-q" aria-expanded="false">
+          <span data-i18n="pricing_faq1_q">可以随时取消吗？</span>
+          <svg class="faq-arrow" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 10.5L2 4.5h12z"/></svg>
+        </button>
+        <div class="faq-a-wrap"><p class="faq-a" data-i18n="pricing_faq1_a">是的，你可以随时取消订阅，取消后当前计费周期结束前仍可使用付费功能。</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q" aria-expanded="false">
+          <span data-i18n="pricing_faq2_q">支持哪些支付方式？</span>
+          <svg class="faq-arrow" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 10.5L2 4.5h12z"/></svg>
+        </button>
+        <div class="faq-a-wrap"><p class="faq-a" data-i18n="pricing_faq2_a">支持信用卡和 PayPal，通过 Lemon Squeezy 安全处理支付。</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q" aria-expanded="false">
+          <span data-i18n="pricing_faq3_q">免费版有什么限制？</span>
+          <svg class="faq-arrow" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 10.5L2 4.5h12z"/></svg>
+        </button>
+        <div class="faq-a-wrap"><p class="faq-a" data-i18n="pricing_faq3_a">免费版支持最多 30 条云端记录、2 台设备、7 天记录保留。本地功能不受限制。</p></div>
+      </div>
+      <div class="faq-item">
+        <button class="faq-q" aria-expanded="false">
+          <span data-i18n="pricing_faq4_q">图片如何处理？</span>
+          <svg class="faq-arrow" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 10.5L2 4.5h12z"/></svg>
+        </button>
+        <div class="faq-a-wrap"><p class="faq-a" data-i18n="pricing_faq4_a">图片会自动压缩为 JPG 格式，长边不超过 2K 像素，以节省存储空间和传输流量。</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="footer-left">
+      <span class="footer-logo">📋 <span data-i18n="hero_title">共享剪贴板</span></span>
+      <p class="footer-copyright" data-i18n="footer_copyright">© 2024 共享剪贴板. All rights reserved.</p>
+    </div>
+    <div class="footer-right">
+      <a href="#" id="footerGithub" target="_blank" rel="noopener" data-i18n="footer_github">GitHub 源码</a>
+      <a href="#" id="footerPrivacy" data-i18n="footer_privacy">隐私政策</a>
+      <span class="footer-version"><span data-i18n="footer_version">版本</span> <span id="footerVersion"></span></span>
+    </div>
+  </div>
+</footer>
+
+<!-- ===== Privacy Modal ===== -->
+<div class="modal-overlay" id="privacyModal" role="dialog" aria-modal="true" aria-hidden="true">
+  <div class="modal">
+    <button class="modal-close" id="modalClose" aria-label="Close">✕</button>
+    <h2 data-i18n="privacy_title">隐私政策</h2>
+    <p data-i18n="privacy_content"></p>
+  </div>
+</div>
+
+<!-- 滚动显示动画 -->
+<script>
+(function () {
+  var obs = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) {
+        e.target.classList.add('revealed');
+        obs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach(function (el) { obs.observe(el); });
+})();
+</script>
+
+<script src="app.js"></script>
+</body>
+</html>

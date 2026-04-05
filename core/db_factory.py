@@ -10,10 +10,14 @@ def create_database_manager():
     """
     根据配置创建数据库管理器
     返回 DatabaseManager 或 MySQLDatabaseManager 实例
+
+    云端模式 (cloud) 仍返回本地 SQLite DatabaseManager 作为本地缓存，
+    云端同步由 CloudSyncService 单独负责。
     """
     db_type = Config.get_db_type()
+    sync_mode = Config.get_sync_mode()
 
-    if db_type == "mysql":
+    if db_type == "mysql" and sync_mode != "cloud":
         from .mysql_database import MySQLDatabaseManager
 
         mysql_config = Config.get_mysql_config()
@@ -30,6 +34,9 @@ def create_database_manager():
         from .database import DatabaseManager
 
         db_path = Config.get_database_path()
-        logger.info(f"使用 SQLite 数据库: {db_path}")
+        if sync_mode == "cloud":
+            logger.info(f"云端模式 — 使用本地 SQLite 作为缓存: {db_path}")
+        else:
+            logger.info(f"使用 SQLite 数据库: {db_path}")
 
         return DatabaseManager(db_path)

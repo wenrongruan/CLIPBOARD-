@@ -30,3 +30,25 @@ def bytes_to_image(data: bytes) -> Image.Image:
 def get_image_size(image_data: bytes) -> Tuple[int, int]:
     image = Image.open(io.BytesIO(image_data))
     return image.size
+
+
+def compress_for_cloud(image_data: bytes, max_dimension: int = 2048) -> bytes:
+    """
+    压缩图片用于云端上传：
+    - 长边不超过 max_dimension 像素
+    - 转换为 JPEG 格式（质量 85）
+    - RGBA/P/LA 模式转 RGB
+    """
+    img = bytes_to_image(image_data)
+    w, h = img.size
+
+    if max(w, h) > max_dimension:
+        ratio = max_dimension / max(w, h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
+    if img.mode in ('RGBA', 'P', 'LA'):
+        img = img.convert('RGB')
+
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85, optimize=True)
+    return buf.getvalue()

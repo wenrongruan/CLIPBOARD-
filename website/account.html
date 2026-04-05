@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>账户管理 — 共享剪贴板</title>
+  <meta name="description" content="共享剪贴板账户管理，查看订阅状态、设备管理和个人信息。" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ===== NAV ===== -->
+<nav class="nav" id="nav">
+  <div class="nav-inner container">
+    <a class="nav-logo" href="index.html">
+      <span class="nav-logo-icon">📋</span>
+      <span data-i18n="hero_title">共享剪贴板</span>
+    </a>
+    <ul class="nav-links">
+      <li><a href="index.html#features" data-i18n="nav_features">功能</a></li>
+      <li><a href="index.html#download" data-i18n="nav_download">下载</a></li>
+      <li><a href="pricing.html"        data-i18n="nav_pricing">定价</a></li>
+      <li><a href="account.html"        data-i18n="nav_account">账户</a></li>
+      <li><a href="index.html#faq"      data-i18n="nav_faq">FAQ</a></li>
+    </ul>
+    <div class="nav-right">
+      <div class="lang-switcher" id="langSwitcher">
+        <button class="lang-btn" id="langBtn" aria-label="Switch language">
+          <span id="langCurrent">简体中文</span>
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><path d="M6 8L1 3h10z"/></svg>
+        </button>
+        <ul class="lang-menu" id="langMenu" role="menu">
+          <li role="menuitem" data-lang="zh_CN">简体中文</li>
+          <li role="menuitem" data-lang="en_US">English</li>
+          <li role="menuitem" data-lang="ja_JP">日本語</li>
+          <li role="menuitem" data-lang="ko_KR">한국어</li>
+          <li role="menuitem" data-lang="es_ES">Español</li>
+          <li role="menuitem" data-lang="fr_FR">Français</li>
+          <li role="menuitem" data-lang="de_DE">Deutsch</li>
+          <li role="menuitem" data-lang="ru_RU">Русский</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<!-- ===== 账户页主体 ===== -->
+<section class="account-section section">
+  <div class="hero-glow hero-glow-a" aria-hidden="true"></div>
+  <div class="container">
+
+    <!-- ===== 登录区域（未登录时显示） ===== -->
+    <div class="account-auth" id="authPanel">
+      <div class="account-auth-card">
+        <h2 class="section-title" data-i18n="account_login_title" id="authTitle">登录</h2>
+        <p class="section-subtitle" style="margin-bottom:32px" data-i18n="account_login_subtitle" id="authSubtitle">登录以管理你的订阅和设备</p>
+
+        <!-- 注册时显示的名称字段 -->
+        <div class="account-field" id="nameField" style="display:none">
+          <label for="inputName" data-i18n="account_display_name">显示名称</label>
+          <input type="text" id="inputName" placeholder="Your Name" autocomplete="name" />
+        </div>
+
+        <div class="account-field">
+          <label for="inputEmail" data-i18n="account_email">邮箱</label>
+          <input type="email" id="inputEmail" placeholder="you@example.com" autocomplete="email" />
+        </div>
+
+        <div class="account-field">
+          <label for="inputPassword" data-i18n="account_password">密码</label>
+          <input type="password" id="inputPassword" placeholder="••••••••" autocomplete="current-password" />
+        </div>
+
+        <div class="account-error" id="authError" style="display:none"></div>
+
+        <button class="btn btn-primary account-submit" id="authSubmitBtn" data-i18n="account_login_btn">登录</button>
+
+        <p class="account-switch">
+          <span data-i18n="account_no_account" id="switchHint">还没有账户？</span>
+          <a href="#" id="switchAuthMode" data-i18n="account_register_link">注册</a>
+        </p>
+      </div>
+    </div>
+
+    <!-- ===== 账户面板（登录后显示） ===== -->
+    <div class="account-dashboard" id="dashboardPanel" style="display:none">
+
+      <!-- 个人信息卡片 -->
+      <div class="account-card">
+        <div class="account-card-header">
+          <span class="account-card-icon">👤</span>
+          <h3 data-i18n="account_profile_title">个人信息</h3>
+        </div>
+        <div class="account-card-body">
+          <div class="account-info-row">
+            <span class="account-info-label" data-i18n="account_email">邮箱</span>
+            <span class="account-info-value" id="profileEmail">—</span>
+          </div>
+          <div class="account-info-row">
+            <span class="account-info-label" data-i18n="account_display_name">显示名称</span>
+            <span class="account-info-value" id="profileName">—</span>
+          </div>
+          <div class="account-info-row">
+            <span class="account-info-label" data-i18n="account_registered_at">注册时间</span>
+            <span class="account-info-value" id="profileCreatedAt">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 订阅状态卡片 -->
+      <div class="account-card">
+        <div class="account-card-header">
+          <span class="account-card-icon">💎</span>
+          <h3 data-i18n="account_subscription_title">订阅状态</h3>
+        </div>
+        <div class="account-card-body">
+          <div class="account-plan-row">
+            <span class="account-plan-name" id="planName">Free</span>
+            <span class="account-plan-badge" id="planBadge">Free</span>
+          </div>
+
+          <!-- 用量进度条 -->
+          <div class="account-usage">
+            <div class="account-usage-header">
+              <span data-i18n="account_usage_records">云端记录</span>
+              <span id="usageText">0 / 30</span>
+            </div>
+            <div class="account-progress-bar">
+              <div class="account-progress-fill" id="usageBar" style="width:0%"></div>
+            </div>
+          </div>
+
+          <!-- 设备数 -->
+          <div class="account-usage">
+            <div class="account-usage-header">
+              <span data-i18n="account_usage_devices">已注册设备</span>
+              <span id="deviceCountText">0 / 2</span>
+            </div>
+            <div class="account-progress-bar">
+              <div class="account-progress-fill" id="deviceBar" style="width:0%"></div>
+            </div>
+          </div>
+
+          <!-- 到期时间 -->
+          <div class="account-info-row" id="expiryRow" style="display:none">
+            <span class="account-info-label" data-i18n="account_expiry">到期时间</span>
+            <span class="account-info-value" id="planExpiry">—</span>
+          </div>
+
+          <div class="account-plan-actions">
+            <a href="pricing.html" class="btn btn-primary" data-i18n="account_upgrade">升级套餐</a>
+            <a href="#" class="btn btn-secondary" id="manageSubBtn" data-i18n="account_manage_subscription">管理订阅</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 设备管理卡片 -->
+      <div class="account-card">
+        <div class="account-card-header">
+          <span class="account-card-icon">📱</span>
+          <h3 data-i18n="account_devices_title">设备管理</h3>
+        </div>
+        <div class="account-card-body">
+          <div class="account-device-list" id="deviceList">
+            <!-- 设备列表由 JS 动态渲染 -->
+            <div class="account-loading" id="deviceLoading">
+              <div class="account-spinner"></div>
+              <span data-i18n="account_loading">加载中...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 退出登录 -->
+      <div style="text-align:center;margin-top:32px">
+        <button class="btn btn-secondary" id="logoutBtn" data-i18n="account_logout">退出登录</button>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===== FOOTER ===== -->
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="footer-left">
+      <span class="footer-logo">📋 <span data-i18n="hero_title">共享剪贴板</span></span>
+      <p class="footer-copyright" data-i18n="footer_copyright">© 2024 共享剪贴板. All rights reserved.</p>
+    </div>
+    <div class="footer-right">
+      <a href="#" id="footerGithub" target="_blank" rel="noopener" data-i18n="footer_github">GitHub 源码</a>
+      <a href="#" id="footerPrivacy" data-i18n="footer_privacy">隐私政策</a>
+      <span class="footer-version"><span data-i18n="footer_version">版本</span> <span id="footerVersion"></span></span>
+    </div>
+  </div>
+</footer>
+
+<!-- ===== Privacy Modal ===== -->
+<div class="modal-overlay" id="privacyModal" role="dialog" aria-modal="true" aria-hidden="true">
+  <div class="modal">
+    <button class="modal-close" id="modalClose" aria-label="Close">✕</button>
+    <h2 data-i18n="privacy_title">隐私政策</h2>
+    <p data-i18n="privacy_content"></p>
+  </div>
+</div>
+
+<!-- 滚动显示动画 -->
+<script>
+(function () {
+  var obs = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) {
+        e.target.classList.add('revealed');
+        obs.unobserve(e.target);
+      }
+    });
+  }, { threshold: 0.12 });
+  document.querySelectorAll('.reveal').forEach(function (el) { obs.observe(el); });
+})();
+</script>
+
+<script src="app.js"></script>
+<script src="account.js"></script>
+</body>
+</html>

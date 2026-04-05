@@ -1,0 +1,275 @@
+"""云端 API 客户端，封装所有与云端服务器的 HTTP 通信"""
+
+import logging
+from typing import Optional
+
+import httpx
+
+from config import Config
+
+logger = logging.getLogger(__name__)
+
+
+class CloudAPIError(Exception):
+    """云端 API 异常"""
+
+    def __init__(self, message: str, status_code: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class CloudAPIClient:
+    """云端 API 客户端，处理认证和所有 HTTP 请求"""
+
+    def __init__(self, base_url: str):
+        self._base_url = base_url.rstrip("/")
+        self._access_token: Optional[str] = None
+        self._refresh_token_str: Optional[str] = None
+        self._client = httpx.Client(base_url=self._base_url, timeout=30.0)
+
+    # ========== Token 管理 ==========
+
+    def set_tokens(self, access_token: str, refresh_token: str):
+        """从外部设置 tokens（如从配置文件加载）"""
+        self._access_token = access_token if access_token else None
+        self._refresh_token_str = refresh_token if refresh_token else None
+
+    @property
+    def is_authenticated(self) -> bool:
+        """是否已认证（至少有 access_token）"""
+        return bool(self._access_token)
+
+    def _save_tokens(self, access_token: str, refresh_token: str):
+        """持久化 tokens 到配置"""
+        self._access_token = access_token
+        self._refresh_token_str = refresh_token
+        Config.set_cloud_access_token(access_token)
+        Config.set_cloud_refresh_token(refresh_token)
+
+    # ========== 统一请求方法 ==========
+
+    def _request(self, method: str, path: str, auth_required: bool = True, **kwargs) -> httpx.Response:
+        """
+        统一请求方法，自动处理认证和 token 刷新。
+
+        - 自动在 header 中加 Authorization
+        - 收到 401 时自动刷新 token 重试一次
+        - 网络错误抛出 CloudAPIError
+        """
+        if auth_required:
+            self._ensure_auth()
+
+        headers = kwargs.pop("headers", {})
+        if auth_required and self._access_token:
+            headers["Authorization"] = f"Bearer {self._access_token}"
+
+        try:
+            response = self._client.request(method, path, headers=headers, **kwargs)
+        except httpx.TimeoutException:
+            raise CloudAPIError("请求超时，请检查网络连接")
+        except httpx.ConnectError:
+            raise CloudAPIError("无法连接到云端服务器，请检查网络")
+        except httpx.HTTPError as e:
+            raise CloudAPIError(f"网络请求失败: {e}")
+
+        # 401 自动刷新 token 重试
+        if response.status_code == 401 and auth_required and self._refresh_token_str:
+            if self.refresh_token():
+                headers["Authorization"] = f"Bearer {self._access_token}"
+                try:
+                    response = self._client.request(method, path, headers=headers, **kwargs)
+                except httpx.TimeoutException:
+                    raise CloudAPIError("请求超时，请检查网络连接")
+                except httpx.ConnectError:
+                    raise CloudAPIError("无法连接到云端服务器，请检查网络")
+                except httpx.HTTPError as e:
+                    raise CloudAPIError(f"网络请求失败: {e}")
+
+        # 处理错误响应
+        if response.status_code >= 400:
+            try:
+                error_data = response.json()
+                message = error_data.get("error", error_data.get("detail", f"服务器错误 ({response.status_code})"))
+            except Exception:
+                message = f"服务器错误 ({response.status_code})"
+            raise CloudAPIError(message, response.status_code)
+
+        return response
+
+    def _ensure_auth(self):
+        """检查 token 有效性"""
+        if not self._access_token:
+            raise CloudAPIError("未登录，请先登录云端账户", 401)
+
+    # ========== 认证接口 ==========
+
+    def _handle_auth_response(self, data: dict, email: str):
+        """从认证响应中提取并保存 tokens"""
+        access = data.get("token") or data.get("access_token", "")
+        refresh = data.get("refresh_token", "")
+        if access and refresh:
+            self._save_tokens(access, refresh)
+            Config.set_cloud_user_email(email)
+
+    def register(self, email: str, password: str, display_name: str = None) -> dict:
+        """注册新用户，返回用户信息和 tokens"""
+        payload = {"email": email, "password": password}
+        if display_name:
+            payload["name"] = display_name
+
+        response = self._request("POST", "/api/v1/auth/register", auth_required=False, json=payload)
+        data = response.json()
+        self._handle_auth_response(data, email)
+        return data
+
+    def login(self, email: str, password: str) -> dict:
+        """登录，返回 tokens"""
+        payload = {"email": email, "password": password}
+        response = self._request("POST", "/api/v1/auth/login", auth_required=False, json=payload)
+        data = response.json()
+        self._handle_auth_response(data, email)
+        return data
+
+    def refresh_token(self) -> bool:
+        """使用 refresh_token 刷新 access_token，成功返回 True"""
+        if not self._refresh_token_str:
+            return False
+
+        try:
+            response = self._client.post(
+                "/api/v1/auth/refresh",
+                json={"refresh_token": self._refresh_token_str},
+                timeout=15.0,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                self._save_tokens(
+                    data.get("token") or data.get("access_token", self._access_token),
+                    data.get("refresh_token", self._refresh_token_str),
+                )
+                logger.info("Token 刷新成功")
+                return True
+            else:
+                logger.warning(f"Token 刷新失败: {response.status_code}")
+                return False
+        except Exception as e:
+            logger.warning(f"Token 刷新异常: {e}")
+            return False
+
+    def logout(self):
+        """退出登录，清除本地 tokens"""
+        try:
+            self._request("POST", "/api/v1/auth/logout", auth_required=True)
+        except CloudAPIError:
+            pass  # 即使服务端失败也清除本地状态
+
+        self._access_token = None
+        self._refresh_token_str = None
+        Config.set_cloud_access_token("")
+        Config.set_cloud_refresh_token("")
+        Config.set_cloud_user_email("")
+        logger.info("已退出云端登录")
+
+    # ========== 剪贴板操作 ==========
+
+    def upload_items(self, items: list) -> list:
+        """
+        批量上传剪贴板条目，返回服务端创建的 items。
+        items 为字典列表，每项包含: content_type, text_content, content_hash, preview, device_id, device_name, created_at, is_starred
+        图片数据不在此接口上传（单独走 upload_image）。
+        """
+        response = self._request("POST", "/api/v1/clipboard/batch", json={"items": items})
+        return response.json().get("items", [])
+
+    def sync(self, since_id: int, device_id: str) -> dict:
+        """
+        拉取新记录。
+        返回 {"items": [...], "has_more": bool}
+        """
+        params = {"since_id": since_id, "device_id": device_id, "limit": 100}
+        response = self._request("GET", "/api/v1/clipboard/sync", params=params)
+        return response.json()
+
+    def delete_item(self, item_id: int) -> bool:
+        """删除云端条目"""
+        try:
+            self._request("DELETE", f"/api/v1/clipboard/{item_id}")
+            return True
+        except CloudAPIError:
+            return False
+
+    def toggle_star(self, item_id: int) -> bool:
+        """切换云端条目收藏状态"""
+        try:
+            self._request("PUT", f"/api/v1/clipboard/{item_id}/star")
+            return True
+        except CloudAPIError:
+            return False
+
+    # ========== 图片接口 ==========
+
+    def upload_image(self, item_id: int, image_data: bytes) -> bool:
+        """上传图片数据到云端"""
+        try:
+            self._request(
+                "POST",
+                f"/api/v1/clipboard/{item_id}/image",
+                content=image_data,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            return True
+        except CloudAPIError as e:
+            logger.error(f"图片上传失败: {e}")
+            return False
+
+    def get_image_url(self, item_id: int) -> str:
+        """获取图片下载 URL（presigned URL）"""
+        response = self._request("GET", f"/api/v1/clipboard/{item_id}/image-url")
+        return response.json().get("url", "")
+
+    def download_image(self, item_id: int) -> Optional[bytes]:
+        """下载图片数据：先获取 presigned URL，再下载内容"""
+        url = self.get_image_url(item_id)
+        if not url:
+            return None
+        try:
+            resp = self._client.get(url, timeout=30.0)
+            if resp.status_code == 200:
+                return resp.content
+        except httpx.HTTPError as e:
+            logger.warning(f"图片下载失败 (item_id={item_id}): {e}")
+        return None
+
+    # ========== 订阅接口 ==========
+
+    def get_subscription(self) -> dict:
+        """获取当前用户的订阅信息"""
+        response = self._request("GET", "/api/v1/subscription")
+        return response.json()
+
+    def create_checkout(self, plan: str) -> str:
+        """创建支付 checkout，返回 checkout URL"""
+        response = self._request("POST", "/api/v1/subscription/checkout", json={"plan": plan})
+        return response.json().get("checkout_url", "")
+
+    # ========== 设备接口 ==========
+
+    def register_device(self, device_id: str, device_name: str, platform: str) -> bool:
+        """注册当前设备"""
+        try:
+            self._request(
+                "POST",
+                "/api/v1/devices",
+                json={"device_id": device_id, "device_name": device_name, "platform": platform},
+            )
+            return True
+        except CloudAPIError as e:
+            logger.error(f"设备注册失败: {e}")
+            return False
+
+    def close(self):
+        """关闭 HTTP 客户端"""
+        try:
+            self._client.close()
+        except Exception:
+            pass
