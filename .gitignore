@@ -28,3 +28,10 @@ desktop.ini
 *.db
 *.spec
 clipboard.db
+
+# macOS App Store 构建产物与敏感文件
+*.pkg
+*.provisionprofile
+upload.sh
+.venv_appstore/
+.playwright-mcp/

@@ -25,15 +25,15 @@
 set -e  # 任何命令失败立即退出
 
 # ─── 请修改以下变量 ────────────────────────────────────────────────────────────
-TEAM_ID="YOUR_TEAM_ID"          # 例: ABC1234567
-APPLE_ID="your@email.com"       # Apple ID
+TEAM_ID="N9B2B6LN88"
+APPLE_ID="rwr@qq.com"            # Apple ID
 APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"  # App 专用密码
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_NAME="共享剪贴板"
-BUNDLE_ID="com.sharedclipboard.app"
-APP_SIGN_CERT="3rd Party Mac Developer Application: $(security find-identity -v -p codesigning 2>/dev/null | grep "3rd Party Mac Developer Application" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo "YOUR_CERT_NAME")"
-PKG_SIGN_CERT="3rd Party Mac Developer Installer: $(security find-identity -v -p codesigning 2>/dev/null | grep "3rd Party Mac Developer Installer" | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo "YOUR_CERT_NAME")"
+BUNDLE_ID="com.wenrongruan.sharedclipboard"
+APP_SIGN_CERT="Apple Distribution: wenrong ruan (N9B2B6LN88)"
+PKG_SIGN_CERT="3rd Party Mac Developer Installer: wenrong ruan (N9B2B6LN88)"
 
 APP_BUNDLE="dist/${APP_NAME}.app"
 PKG_OUTPUT="SharedClipboard_appstore.pkg"
@@ -51,7 +51,7 @@ step 1 "检查环境"
 [ "$(uname)" = "Darwin" ] || fail "此脚本只能在 macOS 上运行"
 xcode-select -p &>/dev/null || fail "未找到 Xcode Command Line Tools，请运行: xcode-select --install"
 
-PYTHON=$(command -v python3.11 || command -v python3 || fail "未找到 Python 3")
+PYTHON=$(command -v python3.11 || fail "未找到 python3.11，请从 python.org 安装 universal2 版本")
 PY_VER=$($PYTHON --version 2>&1)
 echo "Python: $PY_VER"
 
@@ -65,11 +65,12 @@ echo "Bundle ID: ${BUNDLE_ID}"
 # ─── [2/7] 创建虚拟环境并安装依赖 ───────────────────────────────────────────────
 step 2 "创建虚拟环境并安装依赖"
 
-$PYTHON -m venv "$VENV_DIR"
+rm -rf "$VENV_DIR"  # 每次重建 venv，使用 x86_64 模式（目标架构）
+arch -x86_64 $PYTHON -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
-pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
-pip install --quiet pyinstaller
+arch -x86_64 pip install --quiet --upgrade pip
+arch -x86_64 pip install --quiet PySide6 Pillow pymysql  # 不安装 pynput（App Sandbox 不支持输入监控）
+arch -x86_64 pip install --quiet pyinstaller
 echo "依赖安装完成"
 
 # ─── [3/7] 生成 AppIcon.icns ──────────────────────────────────────────────────
@@ -93,24 +94,50 @@ pyinstaller \
     --name "${APP_NAME}" \
     --windowed \
     --noconfirm \
+    --target-arch x86_64 \
     $ICON_ARG \
     --add-data "icons:icons" \
     --add-data "core:core" \
     --add-data "ui:ui" \
     --add-data "utils:utils" \
-    --add-data "Info.plist:." \
+    --add-data "plugins:plugins" \
+    --add-data "i18n.py:." \
     --hidden-import "PySide6.QtCore" \
     --hidden-import "PySide6.QtGui" \
     --hidden-import "PySide6.QtWidgets" \
     --hidden-import "PIL" \
-    --hidden-import "pynput.keyboard._darwin" \
-    --hidden-import "pynput.mouse._darwin" \
     --hidden-import "pymysql" \
     --osx-bundle-identifier "$BUNDLE_ID" \
     main.py
 
 [ -d "$APP_BUNDLE" ] || fail "打包失败，未找到 ${APP_BUNDLE}"
 echo "打包成功: ${APP_BUNDLE}"
+
+# 修正 Info.plist（PyInstaller 生成的版本号不正确）
+INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 2.0.0" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion 6" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 6" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.utilities" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.utilities" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 12.0" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 12.0" "$INFO_PLIST"
+echo "Info.plist 已更新: 版本 2.0.0 (Build 6)"
+
+# 嵌入 Provisioning Profile
+if [ -f "*.provisionprofile" ] 2>/dev/null || ls *.provisionprofile 2>/dev/null; then
+    PROFILE=$(ls *.provisionprofile 2>/dev/null | head -1)
+    cp "$PROFILE" "${APP_BUNDLE}/Contents/embedded.provisionprofile"
+    echo "已嵌入 Provisioning Profile: $PROFILE"
+elif [ -f "${APP_BUNDLE}/Contents/embedded.provisionprofile" ]; then
+    echo "embedded.provisionprofile 已存在"
+else
+    warn "未找到 .provisionprofile 文件！App Store 上传将失败，请手动复制到 ${APP_BUNDLE}/Contents/embedded.provisionprofile"
+fi
+
+# 清除 quarantine 扩展属性（浏览器下载文件会自动带此属性，App Store 不允许）
+xattr -cr "$APP_BUNDLE"
+echo "已清除 quarantine 扩展属性"
 
 # ─── [5/7] 深度代码签名 ───────────────────────────────────────────────────────
 step 5 "代码签名（App Sandbox + Hardened Runtime）"
