@@ -35,3 +35,6 @@ clipboard.db
 upload.sh
 .venv_appstore/
 .playwright-mcp/
+
+# Website (not open source)
+website/
