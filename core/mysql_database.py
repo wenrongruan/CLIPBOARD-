@@ -1,6 +1,7 @@
 import time
 import random
 import logging
+import threading
 from typing import Optional, Callable, Any
 from contextlib import contextmanager
 
@@ -17,7 +18,7 @@ except ImportError:
 class MySQLDatabaseManager:
     """MySQL 数据库管理器"""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -55,6 +56,8 @@ class MySQLDatabaseManager:
         self.user = user
         self.password = password
         self.database = database
+        self._conn: Optional[pymysql.connections.Connection] = None
+        self._lock = threading.Lock()
         self._init_database()
 
     def _init_database(self):
@@ -89,10 +92,41 @@ class MySQLDatabaseManager:
                 cursor.execute(self.CREATE_META_TABLE_SQL)
             conn.commit()
 
-    @contextmanager
-    def get_connection(self):
-        """获取数据库连接"""
-        conn = pymysql.connect(
+            # Schema 迁移
+            self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn):
+        """执行 Schema 迁移"""
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT `value` FROM app_meta WHERE `key` = 'schema_version'"
+            )
+            row = cursor.fetchone()
+            current_version = int(row['value']) if row else 1
+
+            if current_version < 2:
+                # v1 → v2: 新增 cloud_id 字段
+                try:
+                    cursor.execute(
+                        "ALTER TABLE clipboard_items ADD COLUMN cloud_id BIGINT DEFAULT NULL"
+                    )
+                    cursor.execute(
+                        "CREATE INDEX idx_cloud_id ON clipboard_items(cloud_id)"
+                    )
+                except pymysql.Error as e:
+                    if "Duplicate column name" not in str(e):
+                        raise
+
+                cursor.execute(
+                    "INSERT INTO app_meta (`key`, `value`) VALUES ('schema_version', '2') "
+                    "ON DUPLICATE KEY UPDATE `value` = '2'"
+                )
+                conn.commit()
+                logger.info("MySQL Schema 已迁移到 v2（新增 cloud_id）")
+
+    def _create_connection(self) -> "pymysql.connections.Connection":
+        """创建新的 MySQL 连接"""
+        return pymysql.connect(
             host=self.host,
             port=self.port,
             user=self.user,
@@ -104,10 +138,32 @@ class MySQLDatabaseManager:
             read_timeout=30,
             write_timeout=30,
         )
-        try:
-            yield conn
-        finally:
-            conn.close()
+
+    @contextmanager
+    def get_connection(self):
+        """复用持久连接，仅在出错时重建。使用锁保证线程安全。"""
+        with self._lock:
+            if self._conn is None:
+                self._conn = self._create_connection()
+            else:
+                try:
+                    self._conn.ping(reconnect=True)
+                except Exception:
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = self._create_connection()
+            yield self._conn
+
+    def close(self):
+        """关闭持久连接，供应用退出时调用"""
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     def execute_with_retry(
         self,

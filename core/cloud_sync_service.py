@@ -135,22 +135,30 @@ class CloudSyncService(QObject):
 
             if items_data:
                 new_items = []
+                cloud_id_pairs = []
                 for item_data in items_data:
                     item = self._server_item_to_local(item_data)
                     if item is None:
                         continue
 
                     # 检查本地是否已存在（通过 content_hash 去重）
+                    server_id = item_data.get("id", 0)
                     existing = self.repository.get_by_hash(item.content_hash)
                     if existing is None:
                         item_id = self.repository.add_item(item)
                         item.id = item_id
                         new_items.append(item)
+                        if server_id and item_id:
+                            cloud_id_pairs.append((item_id, server_id))
+                    elif existing and not existing.is_cloud_synced and server_id:
+                        cloud_id_pairs.append((existing.id, server_id))
 
                     # 更新 sync_id（服务端 item 的 id）
-                    server_id = item_data.get("id", 0)
                     if server_id > self._last_sync_id:
                         self._last_sync_id = server_id
+
+                # 批量写回 cloud_id
+                self.repository.set_cloud_ids_bulk(cloud_id_pairs)
 
                 # 持久化同步位置
                 Config.set_cloud_last_sync_id(self._last_sync_id)
@@ -235,6 +243,14 @@ class CloudSyncService(QObject):
                     sid = si.get("id")
                     if h and sid:
                         hash_to_server_id[h] = sid
+
+            # 批量写回 cloud_id 到本地数据库
+            cloud_id_pairs = [
+                (item.id, hash_to_server_id[item.content_hash])
+                for item in batch
+                if item.id and item.content_hash in hash_to_server_id
+            ]
+            self.repository.set_cloud_ids_bulk(cloud_id_pairs)
 
             # 上传图片数据（逐个，使用服务端 id）
             for item in image_items:

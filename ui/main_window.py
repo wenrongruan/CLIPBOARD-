@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWidgets import QButtonGroup, QProgressDialog, QInputDialog
 
+import logging
+
 from core.models import ClipboardItem, ContentType
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
@@ -39,6 +41,8 @@ from i18n import t, set_language, get_language, get_languages, SUPPORTED_LANGUAG
 from .edge_window import EdgeHiddenWindow
 from .clipboard_item import ClipboardItemWidget
 from .styles import MAIN_STYLE
+
+logger = logging.getLogger(__name__)
 
 
 class PluginConfigDialog(QDialog):
@@ -153,9 +157,10 @@ class PluginConfigDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None, plugin_manager=None):
+    def __init__(self, parent=None, plugin_manager=None, cloud_api=None):
         super().__init__(parent)
         self._plugin_manager = plugin_manager
+        self._cloud_api = cloud_api
         self.setWindowTitle(t("settings"))
         self.setFixedSize(580, 560)
         self.setStyleSheet(MAIN_STYLE)
@@ -401,6 +406,9 @@ class SettingsDialog(QDialog):
 
         # ========== 插件选项卡 ==========
         self._setup_plugin_tab(tab_widget)
+
+        # ========== 云端同步选项卡 ==========
+        self._setup_cloud_tab(tab_widget)
 
         # ========== 关于选项卡 ==========
         about_tab = QWidget()
@@ -752,6 +760,66 @@ class SettingsDialog(QDialog):
             "mysql_database": self.mysql_database_edit.text() or "clipboard",
         }
 
+    def _setup_cloud_tab(self, tab_widget):
+        """构建云端同步选项卡"""
+        cloud_tab = QWidget()
+        cloud_layout = QVBoxLayout(cloud_tab)
+        cloud_layout.setSpacing(12)
+        cloud_layout.setContentsMargins(20, 20, 20, 20)
+
+        # 说明文案
+        desc = QLabel(
+            "云端同步为可选增强功能，无需登录也能正常使用本软件的所有核心功能。\n"
+            "开启后，你的剪贴板记录将额外备份到云端（收藏 + 最新记录），\n"
+            "方便在不同设备间快速访问。"
+        )
+        desc.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        desc.setWordWrap(True)
+        cloud_layout.addWidget(desc)
+
+        # 根据登录状态显示不同内容
+        self._cloud_content_container = QWidget()
+        self._cloud_content_layout = QVBoxLayout(self._cloud_content_container)
+        self._cloud_content_layout.setContentsMargins(0, 0, 0, 0)
+        cloud_layout.addWidget(self._cloud_content_container, 1)
+
+        if self._cloud_api and self._cloud_api.is_authenticated:
+            self._show_cloud_logged_in()
+        else:
+            self._show_cloud_login_form()
+
+        tab_widget.addTab(cloud_tab, "云端同步")
+
+    def _show_cloud_login_form(self):
+        """显示云端登录表单"""
+        from .cloud_login_widget import CloudLoginWidget
+        from core.cloud_api import CloudAPIClient
+
+        layout = self._cloud_content_layout
+
+        form_group = QGroupBox("登录云端账户")
+        group_layout = QVBoxLayout(form_group)
+
+        if not self._cloud_api:
+            self._cloud_api = CloudAPIClient(Config.get_cloud_api_url())
+
+        self._cloud_login_widget = CloudLoginWidget(self._cloud_api)
+        self._cloud_login_widget.login_succeeded.connect(self._on_cloud_login_success)
+        group_layout.addWidget(self._cloud_login_widget)
+
+        layout.addWidget(form_group)
+        layout.addStretch()
+
+    def _show_cloud_logged_in(self):
+        """显示已登录的订阅状态"""
+        from .subscription_widget import SubscriptionWidget
+        widget = SubscriptionWidget(self._cloud_api)
+        self._cloud_content_layout.addWidget(widget)
+
+    def _on_cloud_login_success(self, result: dict):
+        """云端登录成功回调"""
+        self._cloud_login_widget.status_label.setText("登录成功！重启应用后启用云端同步。")
+
     def _on_accept(self):
         """确认保存设置前进行验证"""
         # 如果选择了 MySQL，验证连接
@@ -825,6 +893,7 @@ class MainWindow(EdgeHiddenWindow):
         clipboard_monitor: ClipboardMonitor,
         sync_service: SyncService,
         plugin_manager=None,
+        cloud_api=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -832,6 +901,7 @@ class MainWindow(EdgeHiddenWindow):
         self.clipboard_monitor = clipboard_monitor
         self.sync_service = sync_service
         self.plugin_manager = plugin_manager
+        self.cloud_api = cloud_api
 
         self._current_page = 0
         self._total_pages = 1
@@ -981,6 +1051,7 @@ class MainWindow(EdgeHiddenWindow):
             widget.delete_clicked.connect(self._on_item_delete)
             widget.star_clicked.connect(self._on_item_star)
             widget.save_clicked.connect(self._on_item_save)
+            widget.cloud_delete_clicked.connect(self._on_cloud_delete)
 
             list_item = QListWidgetItem(self.list_widget)
             hint = widget.sizeHint()
@@ -1043,6 +1114,26 @@ class MainWindow(EdgeHiddenWindow):
             self.repository.delete_item(item.id)
             self._load_items()
 
+    def _on_cloud_delete(self, item: ClipboardItem):
+        """删除条目的云端副本"""
+        if not item.cloud_id or not self.cloud_api:
+            return
+        reply = QMessageBox.question(
+            self,
+            "删除云端副本",
+            "确定删除该条目的云端副本？\n本地记录不受影响。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                self.cloud_api.delete_item(item.cloud_id)
+                self.repository.clear_cloud_id(item.id)
+                item.cloud_id = None
+                self._load_items()
+            except Exception as e:
+                logger.warning(f"删除云端副本失败: {e}")
+
     def _on_item_star(self, item: ClipboardItem):
         self.repository.toggle_star(item.id)
         self._load_items()
@@ -1087,7 +1178,7 @@ class MainWindow(EdgeHiddenWindow):
         self.hide_window()
 
     def _show_settings(self):
-        dialog = SettingsDialog(self, plugin_manager=self.plugin_manager)
+        dialog = SettingsDialog(self, plugin_manager=self.plugin_manager, cloud_api=self.cloud_api)
         if dialog.exec() == QDialog.Accepted:
             settings = dialog.get_settings()
             need_restart = False

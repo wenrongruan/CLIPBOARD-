@@ -92,6 +92,12 @@ class SyncService(QObject):
     def force_sync(self):
         self._check_for_updates()
 
+    def advance_sync_id(self, new_id: int):
+        """将同步游标前进到指定 ID，避免已知条目被重复通知"""
+        if new_id > self._last_sync_id:
+            self._last_sync_id = new_id
+            Config.set_last_sync_id(new_id)
+
     def reset_sync_position(self):
         self._last_sync_id = 0
         Config.set_last_sync_id(0)

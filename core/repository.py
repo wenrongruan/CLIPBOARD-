@@ -17,6 +17,19 @@ except ImportError:
 
 
 class ClipboardRepository:
+    # 所有 SELECT 查询共用的字段列表（与 ClipboardItem.from_db_row dict 键一致）
+    _SELECT_FIELDS = (
+        "id, content_type, text_content, image_data, image_thumbnail, "
+        "content_hash, preview, device_id, device_name, "
+        "created_at, is_starred, cloud_id"
+    )
+    # 列表查询时跳过完整图片数据以提高性能
+    _SELECT_FIELDS_NO_IMAGE = (
+        "id, content_type, text_content, NULL as image_data, image_thumbnail, "
+        "content_hash, preview, device_id, device_name, "
+        "created_at, is_starred, cloud_id"
+    )
+
     def __init__(self, db_manager: Union[DatabaseManager, "MySQLDatabaseManager"]):
         self.db = db_manager
         # 检测数据库类型以选择正确的占位符
@@ -49,30 +62,24 @@ class ClipboardRepository:
             cursor = conn.execute(sql, params)
             return cursor.rowcount, cursor.lastrowid
 
-    def _fetchone(self, conn, sql: str, params: tuple = ()) -> Optional[tuple]:
-        """获取单行结果"""
+    def _fetchone(self, conn, sql: str, params: tuple = ()):
+        """获取单行结果（sqlite3.Row 或 dict）"""
         if self._is_mysql:
             sql = sql.replace("?", "%s")
             with conn.cursor() as cursor:
                 cursor.execute(sql, params)
-                row = cursor.fetchone()
-                if row:
-                    # 将字典转换为元组（按字段顺序）
-                    return tuple(row.values()) if isinstance(row, dict) else row
-                return None
+                return cursor.fetchone()
         else:
             cursor = conn.execute(sql, params)
             return cursor.fetchone()
 
-    def _fetchall(self, conn, sql: str, params: tuple = ()) -> List[tuple]:
-        """获取所有结果"""
+    def _fetchall(self, conn, sql: str, params: tuple = ()) -> list:
+        """获取所有结果（sqlite3.Row 或 dict 列表）"""
         if self._is_mysql:
             sql = sql.replace("?", "%s")
             with conn.cursor() as cursor:
                 cursor.execute(sql, params)
-                rows = cursor.fetchall()
-                # 将字典列表转换为元组列表
-                return [tuple(row.values()) if isinstance(row, dict) else row for row in rows]
+                return cursor.fetchall()
         else:
             cursor = conn.execute(sql, params)
             return cursor.fetchall()
@@ -93,10 +100,8 @@ class ClipboardRepository:
 
     def get_by_hash(self, content_hash: str) -> Optional[ClipboardItem]:
         def operation(conn) -> Optional[ClipboardItem]:
-            sql = """
-                SELECT id, content_type, text_content, image_data, image_thumbnail,
-                       content_hash, preview, device_id, device_name,
-                       created_at, is_starred
+            sql = f"""
+                SELECT {self._SELECT_FIELDS}
                 FROM clipboard_items
                 WHERE content_hash = ?
             """
@@ -123,9 +128,7 @@ class ClipboardRepository:
             # 获取分页数据（不加载完整图片数据以提高性能）
             where_clause = "WHERE is_starred = 1" if starred_only else ""
             sql = f"""
-                SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                       content_hash, preview, device_id, device_name,
-                       created_at, is_starred
+                SELECT {self._SELECT_FIELDS_NO_IMAGE}
                 FROM clipboard_items
                 {where_clause}
                 ORDER BY created_at DESC
@@ -147,10 +150,8 @@ class ClipboardRepository:
             row = self._fetchone(conn, "SELECT COUNT(*) FROM clipboard_items")
             total = row[0] if row else 0
 
-            sql = """
-                SELECT id, content_type, text_content, image_data, image_thumbnail,
-                       content_hash, preview, device_id, device_name,
-                       created_at, is_starred
+            sql = f"""
+                SELECT {self._SELECT_FIELDS}
                 FROM clipboard_items
                 ORDER BY created_at ASC
                 LIMIT ? OFFSET ?
@@ -163,10 +164,8 @@ class ClipboardRepository:
 
     def get_item_by_id(self, item_id: int) -> Optional[ClipboardItem]:
         def operation(conn) -> Optional[ClipboardItem]:
-            sql = """
-                SELECT id, content_type, text_content, image_data, image_thumbnail,
-                       content_hash, preview, device_id, device_name,
-                       created_at, is_starred
+            sql = f"""
+                SELECT {self._SELECT_FIELDS}
                 FROM clipboard_items
                 WHERE id = ?
             """
@@ -196,9 +195,7 @@ class ClipboardRepository:
                 total = row[0] if row else 0
 
                 sql = f"""
-                    SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                           content_hash, preview, device_id, device_name,
-                           created_at, is_starred
+                    SELECT {self._SELECT_FIELDS_NO_IMAGE}
                     FROM clipboard_items
                     WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?){star_filter}
                     ORDER BY created_at DESC
@@ -217,9 +214,7 @@ class ClipboardRepository:
                 total = row[0] if row else 0
 
                 sql = f"""
-                    SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                           content_hash, preview, device_id, device_name,
-                           created_at, is_starred
+                    SELECT {self._SELECT_FIELDS_NO_IMAGE}
                     FROM clipboard_items
                     WHERE (text_content LIKE ? OR preview LIKE ?){star_filter}
                     ORDER BY created_at DESC
@@ -256,10 +251,8 @@ class ClipboardRepository:
         self, since_id: int, exclude_device_id: str
     ) -> List[ClipboardItem]:
         def operation(conn) -> List[ClipboardItem]:
-            sql = """
-                SELECT id, content_type, text_content, NULL as image_data, image_thumbnail,
-                       content_hash, preview, device_id, device_name,
-                       created_at, is_starred
+            sql = f"""
+                SELECT {self._SELECT_FIELDS_NO_IMAGE}
                 FROM clipboard_items
                 WHERE id > ? AND device_id != ?
                 ORDER BY id ASC
@@ -361,6 +354,55 @@ class ClipboardRepository:
             return rowcount > 0
 
         return self.db.execute_with_retry(operation)
+
+    def set_cloud_id(self, item_id: int, cloud_id: int):
+        """标记本地条目已同步到云端"""
+        def operation(conn):
+            sql = "UPDATE clipboard_items SET cloud_id = ? WHERE id = ?"
+            self._execute_write(conn, sql, (cloud_id, item_id))
+
+        self.db.execute_with_retry(operation)
+
+    def set_cloud_ids_bulk(self, pairs: list):
+        """批量标记 cloud_id，pairs 为 [(item_id, cloud_id), ...]"""
+        if not pairs:
+            return
+
+        def operation(conn):
+            sql = "UPDATE clipboard_items SET cloud_id = ? WHERE id = ?"
+            if self._is_mysql:
+                sql = sql.replace("?", "%s")
+            data = [(cloud_id, item_id) for item_id, cloud_id in pairs]
+            if self._is_mysql:
+                with conn.cursor() as cursor:
+                    cursor.executemany(sql, data)
+            else:
+                conn.executemany(sql, data)
+
+        self.db.execute_with_retry(operation)
+
+    def clear_cloud_id(self, item_id: int):
+        """清除云端标记（云端副本已删除）"""
+        def operation(conn):
+            sql = "UPDATE clipboard_items SET cloud_id = NULL WHERE id = ?"
+            self._execute_write(conn, sql, (item_id,))
+
+        self.db.execute_with_retry(operation)
+
+    def get_by_cloud_id(self, cloud_id: int) -> Optional[ClipboardItem]:
+        """通过云端 ID 查找本地条目"""
+        def operation(conn) -> Optional[ClipboardItem]:
+            sql = f"""
+                SELECT {self._SELECT_FIELDS}
+                FROM clipboard_items
+                WHERE cloud_id = ?
+            """
+            row = self._fetchone(conn, sql, (cloud_id,))
+            if row:
+                return ClipboardItem.from_db_row(row)
+            return None
+
+        return self.db.execute_read(operation)
 
     def get_latest_id(self) -> int:
         def operation(conn) -> int:

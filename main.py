@@ -181,11 +181,13 @@ class ClipboardApp:
         """创建主窗口"""
         self.clipboard_monitor = ClipboardMonitor(self.repository)
 
-        # 根据同步模式选择同步服务
-        self.cloud_api = None
-        sync_mode = Config.get_sync_mode()
+        # 本地/MySQL 同步服务（始终启动）
+        self.sync_service = SyncService(self.repository)
 
-        if sync_mode == "cloud":
+        # 云端同步服务（叠加层，有 token 时自动启动）
+        self.cloud_api = None
+        self.cloud_sync_service = None
+        if Config.get_cloud_access_token():
             try:
                 from core.cloud_sync_service import CloudSyncService
                 from core.cloud_api import CloudAPIClient
@@ -195,17 +197,14 @@ class ClipboardApp:
                     Config.get_cloud_access_token(),
                     Config.get_cloud_refresh_token(),
                 )
-                self.sync_service = CloudSyncService(self.repository, self.cloud_api)
+                self.cloud_sync_service = CloudSyncService(self.repository, self.cloud_api)
 
                 # 监听剪贴板新增条目，自动加入云端上传队列
                 self.clipboard_monitor.item_added.connect(self._on_new_item_for_cloud)
 
-                logger.info("已启用云端同步模式")
-            except ImportError as e:
-                logger.warning(f"云端同步模块加载失败，回退到本地模式: {e}")
-                self.sync_service = SyncService(self.repository)
-        else:
-            self.sync_service = SyncService(self.repository)
+                logger.info("云端同步已启用（叠加模式）")
+            except Exception as e:
+                logger.warning(f"云端同步启动失败: {e}")
 
         # 初始化插件管理器
         self.plugin_manager = PluginManager()
@@ -216,6 +215,7 @@ class ClipboardApp:
             self.clipboard_monitor,
             self.sync_service,
             plugin_manager=self.plugin_manager,
+            cloud_api=self.cloud_api,
         )
 
         # 连接退出信号
@@ -224,10 +224,28 @@ class ClipboardApp:
         # 启动服务
         self.clipboard_monitor.start()
         self.sync_service.start()
+        if self.cloud_sync_service:
+            # 云端拉取的新条目也通知 UI 刷新
+            self.cloud_sync_service.new_items_available.connect(
+                self.main_window._on_new_items
+            )
+            # 云端写入本地后，推进 SyncService 游标避免重复通知
+            self.cloud_sync_service.new_items_available.connect(
+                self._advance_sync_after_cloud
+            )
+            self.cloud_sync_service.start()
 
     def _on_new_item_for_cloud(self, item):
         """剪贴板新条目回调 — 加入云端上传队列"""
-        self.sync_service.enqueue_upload(item)
+        if self.cloud_sync_service:
+            self.cloud_sync_service.enqueue_upload(item)
+
+    def _advance_sync_after_cloud(self, items):
+        """云端拉取写入本地后，推进 SyncService 游标"""
+        if items:
+            max_id = max(item.id for item in items if item.id)
+            if max_id:
+                self.sync_service.advance_sync_id(max_id)
 
     def _show_window(self):
         """显示主窗口"""
@@ -313,6 +331,8 @@ class ClipboardApp:
 
         self.clipboard_monitor.stop()
         self.sync_service.stop()
+        if self.cloud_sync_service:
+            self.cloud_sync_service.stop()
         self.tray_icon.hide()
         # 关闭云端 API 客户端
         if self.cloud_api is not None:

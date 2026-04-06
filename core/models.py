@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 from enum import Enum
 import time
 
@@ -22,6 +22,7 @@ class ClipboardItem:
     device_name: str = ""
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     is_starred: bool = False
+    cloud_id: Optional[int] = None
 
     @property
     def is_text(self) -> bool:
@@ -30,6 +31,10 @@ class ClipboardItem:
     @property
     def is_image(self) -> bool:
         return self.content_type == ContentType.IMAGE
+
+    @property
+    def is_cloud_synced(self) -> bool:
+        return self.cloud_id is not None
 
     def get_display_preview(self, max_length: int = 100) -> str:
         if self.is_text and self.text_content:
@@ -42,7 +47,23 @@ class ClipboardItem:
         return ""
 
     @classmethod
-    def from_db_row(cls, row: tuple) -> "ClipboardItem":
+    def from_db_row(cls, row: Union[dict, tuple]) -> "ClipboardItem":
+        if isinstance(row, dict):
+            return cls(
+                id=row["id"],
+                content_type=ContentType(row["content_type"]),
+                text_content=row.get("text_content"),
+                image_data=row.get("image_data"),
+                image_thumbnail=row.get("image_thumbnail"),
+                content_hash=row.get("content_hash", ""),
+                preview=row.get("preview", ""),
+                device_id=row.get("device_id", ""),
+                device_name=row.get("device_name", ""),
+                created_at=row.get("created_at", 0),
+                is_starred=bool(row.get("is_starred", False)),
+                cloud_id=row.get("cloud_id"),
+            )
+        # tuple 兼容路径（向后兼容）
         return cls(
             id=row[0],
             content_type=ContentType(row[1]),
@@ -55,6 +76,7 @@ class ClipboardItem:
             device_name=row[8],
             created_at=row[9],
             is_starred=bool(row[10]),
+            cloud_id=row[11] if len(row) > 11 else None,
         )
 
     def to_db_tuple(self) -> tuple:

@@ -222,6 +222,21 @@ QPushButton#saveButton:hover {
     border-radius: 4px;
 }
 
+QPushButton#cloudButton {
+    background-color: transparent;
+    border: none;
+    padding: 4px;
+    min-width: 24px;
+    max-width: 24px;
+    color: #58a6ff;
+}
+
+QPushButton#cloudButton:hover {
+    background-color: rgba(255, 107, 107, 0.2);
+    color: #ff6b6b;
+    border-radius: 4px;
+}
+
 QTabWidget::pane {
     border: 1px solid #555555;
     border-radius: 6px;

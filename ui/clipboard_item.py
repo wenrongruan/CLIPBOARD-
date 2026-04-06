@@ -23,6 +23,7 @@ class ClipboardItemWidget(QWidget):
     delete_clicked = Signal(ClipboardItem)
     star_clicked = Signal(ClipboardItem)
     save_clicked = Signal(ClipboardItem)
+    cloud_delete_clicked = Signal(ClipboardItem)
 
     def __init__(self, item: ClipboardItem, parent=None):
         super().__init__(parent)
@@ -112,6 +113,13 @@ class ClipboardItemWidget(QWidget):
         star_btn.setToolTip("收藏" if not self.item.is_starred else "取消收藏")
         star_btn.clicked.connect(lambda: self.star_clicked.emit(self.item))
         button_layout.addWidget(star_btn)
+
+        if self.item.is_cloud_synced:
+            cloud_btn = QPushButton("☁")
+            cloud_btn.setObjectName("cloudButton")
+            cloud_btn.setToolTip("已同步到云端\n点击删除云端副本")
+            cloud_btn.clicked.connect(lambda: self.cloud_delete_clicked.emit(self.item))
+            button_layout.addWidget(cloud_btn)
 
         if self.item.is_image:
             save_btn = QPushButton("💾")

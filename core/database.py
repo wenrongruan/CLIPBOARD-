@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -86,6 +86,9 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_id_device ON clipboard_items(id, device_id)"
             )
 
+            # Schema 迁移: v1 → v2，新增 cloud_id 字段
+            self._migrate_schema(conn)
+
             # 检查是否需要创建FTS表
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='clipboard_fts'"
@@ -99,6 +102,34 @@ class DatabaseManager:
 
             conn.commit()
 
+    def _migrate_schema(self, conn):
+        """执行 Schema 迁移"""
+        # 检查当前版本
+        cursor = conn.execute(
+            "SELECT value FROM app_meta WHERE key = 'schema_version'"
+        )
+        row = cursor.fetchone()
+        current_version = int(row[0]) if row else 1
+
+        if current_version < 2:
+            # v1 → v2: 新增 cloud_id 字段
+            try:
+                conn.execute(
+                    "ALTER TABLE clipboard_items ADD COLUMN cloud_id INTEGER DEFAULT NULL"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cloud_id ON clipboard_items(cloud_id)"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+
+            conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '2')"
+            )
+            conn.commit()
+            logger.info("数据库 Schema 已迁移到 v2（新增 cloud_id）")
+
     def _create_connection(self) -> sqlite3.Connection:
         """创建新连接并配置 PRAGMA"""
         conn = sqlite3.connect(
@@ -107,6 +138,7 @@ class DatabaseManager:
             isolation_level="DEFERRED",
             check_same_thread=False,
         )
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA synchronous=NORMAL")
