@@ -172,9 +172,9 @@ class AIImageGenPlugin(PluginBase):
 
             # 尝试从 CLIPBOARD- 的 config 系统获取 token
             from config import Config
-            base_url = Config.get("cloud_api_url", "https://api.jlike.com")
-            access_token = Config.get("cloud_access_token", "")
-            refresh_token = Config.get("cloud_refresh_token", "")
+            base_url = Config.get_cloud_api_url()
+            access_token = Config.get_cloud_access_token()
+            refresh_token = Config.get_cloud_refresh_token()
 
             if not access_token:
                 return None

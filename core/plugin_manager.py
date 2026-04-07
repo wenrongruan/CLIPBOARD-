@@ -400,13 +400,22 @@ class PluginManager(QObject):
     def _get_plugin_dirs(self) -> List[Path]:
         """获取插件搜索目录列表"""
         dirs = []
-        # 项目内置插件
-        app_root = Path(__file__).parent.parent
-        dirs.append(app_root / "plugins")
+        # 内置插件：frozen 时从 _MEIPASS 目录找，源码时从项目根找
+        if getattr(sys, 'frozen', False):
+            app_root = Path(sys._MEIPASS)
+        else:
+            app_root = Path(__file__).parent.parent
+        builtin_dir = app_root / "plugins"
+        dirs.append(builtin_dir)
         # 用户安装插件
         user_dir = Config.get_user_plugins_dir()
-        if user_dir != dirs[0]:
+        if user_dir != builtin_dir:
             dirs.append(user_dir)
+        # exe 同级目录的 plugins（方便不重新编译就添加插件）
+        if getattr(sys, 'frozen', False):
+            exe_plugins = Path(sys.executable).parent / "plugins"
+            if exe_plugins not in dirs:
+                dirs.append(exe_plugins)
         return dirs
 
     def _check_version_compat(self, manifest: dict) -> bool:
