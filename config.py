@@ -4,9 +4,12 @@ import sys
 import json
 import stat
 import uuid
+import logging
 import hashlib
 import platform
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -61,7 +64,8 @@ class Config:
         return cls._config_file
 
     @classmethod
-    def load_settings(cls) -> dict:
+    def _ensure_settings(cls) -> dict:
+        """确保 _settings 已加载，返回内部引用（仅限内部使用）"""
         if cls._settings is None:
             config_file = cls.get_config_file()
             if config_file.exists():
@@ -73,6 +77,11 @@ class Config:
             else:
                 cls._settings = {}
         return cls._settings
+
+    @classmethod
+    def load_settings(cls) -> dict:
+        cls._ensure_settings()
+        return dict(cls._settings)
 
     @classmethod
     def save_settings(cls, settings: dict):
@@ -89,12 +98,12 @@ class Config:
 
     @classmethod
     def get_setting(cls, key: str, default=None):
-        settings = cls.load_settings()
+        settings = cls._ensure_settings()
         return settings.get(key, default)
 
     @classmethod
     def set_setting(cls, key: str, value):
-        settings = cls.load_settings()
+        settings = cls._ensure_settings()
         settings[key] = value
         cls.save_settings(settings)
 
@@ -118,6 +127,8 @@ class Config:
     def set_dock_edge(cls, edge: str):
         if edge in ("left", "right", "top", "bottom"):
             cls.set_setting("dock_edge", edge)
+        else:
+            logger.warning(f"无效的停靠边缘值: {edge}")
 
     @classmethod
     def get_device_id(cls) -> str:
@@ -171,6 +182,8 @@ class Config:
     def set_sync_mode(cls, mode: str):
         if mode in ("local", "mysql", "cloud"):
             cls.set_setting("sync_mode", mode)
+        else:
+            logger.warning(f"无效的同步模式: {mode}")
 
     # ========== 云端配置 ==========
 
@@ -246,6 +259,8 @@ class Config:
     def set_db_type(cls, db_type: str):
         if db_type in ("sqlite", "mysql"):
             cls.set_setting("db_type", db_type)
+        else:
+            logger.warning(f"无效的数据库类型: {db_type}")
 
     # ========== MySQL 配置 ==========
     # 数据库名白名单：仅允许字母、数字、下划线
@@ -283,7 +298,7 @@ class Config:
     @classmethod
     def _ensure_default_profile(cls):
         """确保至少有一个 Default profile（从现有设置自动生成）"""
-        settings = cls.load_settings()
+        settings = cls._ensure_settings()
         if "db_profiles" not in settings:
             default_profile = {
                 "db_type": settings.get("db_type", "sqlite"),
@@ -323,9 +338,10 @@ class Config:
         profile = profiles.get(name)
         if not profile:
             return
-        settings = cls.load_settings()
+        settings = cls._ensure_settings()
+        # 跳过 mysql_password — 密码已迁移到安全存储，不写入配置文件
         for key in ("db_type", "database_path", "mysql_host", "mysql_port",
-                     "mysql_user", "mysql_password", "mysql_database"):
+                     "mysql_user", "mysql_database"):
             if key in profile:
                 settings[key] = profile[key]
         settings["active_profile"] = name

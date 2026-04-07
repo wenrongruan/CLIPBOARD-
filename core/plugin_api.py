@@ -33,6 +33,14 @@ class PluginAction:
     icon: str                             # 单个 emoji 或文本图标，如 "🌐"
     supported_types: List[ContentType]    # 支持的内容类型列表
 
+    def __post_init__(self):
+        if not self.action_id or not self.action_id.strip():
+            raise ValueError("PluginAction: action_id 不能为空")
+        if not self.label or not self.label.strip():
+            raise ValueError("PluginAction: label 不能为空")
+        if not self.supported_types:
+            raise ValueError("PluginAction: supported_types 不能为空")
+
 
 @dataclass
 class PluginResult:
@@ -46,6 +54,9 @@ class PluginResult:
     cancelled: bool = False
 
     def __post_init__(self):
+        # cancelled 隐含 success=False
+        if self.cancelled:
+            self.success = False
         if self.success and self.text_content is None and self.image_data is None:
             raise ValueError("PluginResult: success=True requires text_content or image_data")
 

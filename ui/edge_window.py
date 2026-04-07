@@ -325,10 +325,32 @@ class EdgeHiddenWindow(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        """鼠标释放事件 - 结束拖动"""
+        """鼠标释放事件 - 结束拖动并重新吸附到最近边缘"""
         if event.button() == Qt.LeftButton and self._dragging:
             self._dragging = False
             self.setCursor(Qt.ArrowCursor)
+            # 根据松手位置确定最近的屏幕边缘并重新吸附
+            self._snap_to_nearest_edge()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def _snap_to_nearest_edge(self):
+        """根据当前窗口位置，吸附到最近的屏幕边缘"""
+        screen_rect = self._get_screen_rect()
+        if screen_rect.isEmpty():
+            return
+
+        center = self.geometry().center()
+        # 计算到四条边的距离
+        distances = {
+            "left": center.x() - screen_rect.left(),
+            "right": screen_rect.right() - center.x(),
+            "top": center.y() - screen_rect.top(),
+            "bottom": screen_rect.bottom() - center.y(),
+        }
+        nearest_edge = min(distances, key=distances.get)
+        if nearest_edge != self._dock_edge:
+            self.set_dock_edge(nearest_edge)
+        else:
+            self._move_to_visible_position(screen_rect)

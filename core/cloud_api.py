@@ -119,6 +119,9 @@ class CloudAPIClient:
         if access and refresh:
             self._save_tokens(access, refresh)
             Config.set_cloud_user_email(email)
+        else:
+            logger.warning(f"认证响应中缺少 token: access={bool(access)}, refresh={bool(refresh)}")
+            raise CloudAPIError("登录成功但服务端未返回有效 token，请重试")
 
     def register(self, email: str, password: str, display_name: str = None) -> dict:
         """注册新用户，返回用户信息和 tokens"""
@@ -169,8 +172,8 @@ class CloudAPIClient:
         """退出登录，清除本地 tokens"""
         try:
             self._request("POST", "/api/v1/auth/logout", auth_required=True)
-        except CloudAPIError:
-            pass  # 即使服务端失败也清除本地状态
+        except CloudAPIError as e:
+            logger.warning(f"服务端 logout 失败（仍清除本地 token）: {e}")
 
         self._access_token = None
         self._refresh_token_str = None
@@ -204,7 +207,8 @@ class CloudAPIClient:
         try:
             self._request("DELETE", f"/api/v1/clipboard/{item_id}")
             return True
-        except CloudAPIError:
+        except CloudAPIError as e:
+            logger.warning(f"删除云端条目失败 (id={item_id}): {e}")
             return False
 
     def toggle_star(self, item_id: int) -> bool:
@@ -212,7 +216,8 @@ class CloudAPIClient:
         try:
             self._request("PUT", f"/api/v1/clipboard/{item_id}/star")
             return True
-        except CloudAPIError:
+        except CloudAPIError as e:
+            logger.warning(f"切换收藏状态失败 (id={item_id}): {e}")
             return False
 
     # ========== 图片接口 ==========

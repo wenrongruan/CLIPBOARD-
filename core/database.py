@@ -165,12 +165,13 @@ class DatabaseManager:
 
     def close(self):
         """关闭持久连接，供应用退出时调用"""
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def execute_with_retry(
         self,
@@ -188,7 +189,6 @@ class DatabaseManager:
                 last_error = e
                 error_msg = str(e).lower()
                 if "database is locked" in error_msg or "busy" in error_msg:
-                    # 指数退避 + 随机抖动
                     wait_time = (2**attempt) * 0.1 + random.uniform(0, 0.1)
                     logger.warning(
                         f"数据库锁定，重试 {attempt + 1}/{max_retries}，等待 {wait_time:.2f}s"

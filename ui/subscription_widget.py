@@ -1,8 +1,9 @@
 """订阅状态组件 — 嵌入设置对话框的「云端同步」选项卡"""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.cloud_api import CloudAPIClient, CloudAPIError
+from PySide6.QtCore import Signal as QtSignal
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +27,20 @@ logger = logging.getLogger(__name__)
 class SubscriptionWidget(QWidget):
     """订阅状态组件，显示当前套餐、用量和管理按钮"""
 
+    logout_completed = QtSignal()  # 退出登录完成信号
+
     def __init__(self, cloud_api: CloudAPIClient, parent=None):
         super().__init__(parent)
         self.cloud_api = cloud_api
+        self._executor: ThreadPoolExecutor | None = None
         self._setup_ui()
         self._load_subscription()
+
+    def closeEvent(self, event):
+        if self._executor is not None:
+            self._executor.shutdown(wait=False)
+            self._executor = None
+        super().closeEvent(event)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -153,13 +164,28 @@ class SubscriptionWidget(QWidget):
         self.devices_label.setText("已注册设备: --")
 
     def _load_subscription(self):
-        """加载订阅信息"""
+        """加载订阅信息（HTTP 请求在后台线程执行）"""
         if not self.cloud_api.is_authenticated:
             self._reset_to_logged_out()
             return
 
+        self.plan_label.setText("加载中...")
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1)
+
+        future = self._executor.submit(self._fetch_subscription)
+        future.add_done_callback(
+            lambda f: QTimer.singleShot(0, lambda: self._on_subscription_loaded(f))
+        )
+
+    def _fetch_subscription(self) -> dict:
+        """在后台线程中获取订阅信息"""
+        return self.cloud_api.get_subscription()
+
+    def _on_subscription_loaded(self, future):
+        """订阅信息加载完成回调（主线程）"""
         try:
-            sub = self.cloud_api.get_subscription()
+            sub = future.result()
 
             # 套餐信息 — 兼容扁平和嵌套两种响应格式
             plan = sub.get("plan", "free")
@@ -243,5 +269,6 @@ class SubscriptionWidget(QWidget):
             logger.warning(f"退出登录异常: {e}")
 
         self._reset_to_logged_out()
+        self.logout_completed.emit()
 
         QMessageBox.information(self, "提示", "已退出云端账户，重启应用后生效。")

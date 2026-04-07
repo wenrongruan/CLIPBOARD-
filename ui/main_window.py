@@ -1035,21 +1035,24 @@ class MainWindow(EdgeHiddenWindow):
         self._load_items()
 
     def _load_items(self):
-        if self._search_query:
-            items, total = self.repository.search(
-                self._search_query, self._current_page, self._page_size,
-                starred_only=self._starred_only
-            )
-        else:
-            items, total = self.repository.get_items(
-                self._current_page, self._page_size,
-                starred_only=self._starred_only
-            )
+        try:
+            if self._search_query:
+                items, total = self.repository.search(
+                    self._search_query, self._current_page, self._page_size,
+                    starred_only=self._starred_only
+                )
+            else:
+                items, total = self.repository.get_items(
+                    self._current_page, self._page_size,
+                    starred_only=self._starred_only
+                )
 
-        self._items = items
-        self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
-        self._update_list()
-        self._update_pagination()
+            self._items = items
+            self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
+            self._update_list()
+            self._update_pagination()
+        except Exception as e:
+            logger.error(f"加载剪贴板条目失败: {e}")
 
     def _update_list(self):
         self.list_widget.clear()
@@ -1467,13 +1470,15 @@ class MainWindow(EdgeHiddenWindow):
         elif result.action == PluginResultAction.SAVE:
             # 保存为新条目
             from utils.hash_utils import compute_content_hash
+            hash_content = result.text_content or result.image_data
+            if not hash_content:
+                self._show_plugin_feedback("❌ 插件返回空内容", "copyFeedbackError")
+                return
             new_item = ClipboardItem(
                 content_type=result.content_type,
                 text_content=result.text_content,
                 image_data=result.image_data,
-                content_hash=compute_content_hash(
-                    result.text_content or result.image_data or ""
-                ),
+                content_hash=compute_content_hash(hash_content),
                 preview=(result.text_content or "")[:100],
                 device_id=Config.get_device_id(),
                 device_name=Config.get_device_name(),

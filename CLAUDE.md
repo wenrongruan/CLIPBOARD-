@@ -16,6 +16,10 @@ SharedClipboard (共享剪贴板) is a Windows desktop application for clipboard
 
 > **注意**：`website/` 是一个独立的 Git 仓库（remote: `github.com:wenrongruan/jlike.git`），有自己的提交历史和 CLAUDE.md。对网站的修改需要在该目录下单独 commit 和 push。
 
+### AI 生图工作台插件
+
+AI 生图工作台插件项目位于：`E:/python/chat_image_gen`
+
 ## Running the Application
 
 ```bash

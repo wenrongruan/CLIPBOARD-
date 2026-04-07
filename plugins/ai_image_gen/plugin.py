@@ -145,30 +145,34 @@ class AIImageGenPlugin(PluginBase):
             )
 
         # 通过环境变量传递 token（比命令行参数更安全）
+        from config import Config
         env = os.environ.copy()
-        env["CLOUD_ACCESS_TOKEN"] = cloud_client._access_token
-        env["CLOUD_REFRESH_TOKEN"] = cloud_client._refresh_token_str
+        env["CLOUD_ACCESS_TOKEN"] = Config.get_cloud_access_token()
+        env["CLOUD_REFRESH_TOKEN"] = Config.get_cloud_refresh_token()
 
         cmd = [
             sys.executable, script,
-            "--cloud-url", cloud_client._base_url,
+            "--cloud-url", Config.get_cloud_api_url(),
         ]
 
         subprocess.Popen(cmd, env=env, cwd=gen_path)
 
+        # 使用 SAVE 而非 COPY，避免污染用户剪贴板
         return PluginResult(
             success=True,
             content_type=ContentType.TEXT,
             text_content="已打开 AI 生图工作台",
-            action=PluginResultAction.COPY,
+            action=PluginResultAction.SAVE,
         )
 
     def _get_cloud_client(self):
         """从 CLIPBOARD- 框架获取已认证的 cloud client。"""
         try:
             # 动态导入，避免硬依赖
-            sys.path.insert(0, os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__)))))
+            project_root = os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
 
             # 尝试从 CLIPBOARD- 的 config 系统获取 token
             from config import Config
@@ -202,16 +206,21 @@ class AIImageGenPlugin(PluginBase):
         """轮询万相异步任务。"""
         import time
         elapsed = 0
+        poll_interval = 3  # 轮询间隔秒数
+        check_interval = 0.5  # 取消检查间隔秒数
         while elapsed < max_wait:
-            if cancel_check and cancel_check():
-                try:
-                    cloud_client.cancel_task(task_uuid)
-                except Exception:
-                    pass
-                return None
-
-            time.sleep(3)
-            elapsed += 3
+            # 分段 sleep 以快速响应取消
+            waited = 0
+            while waited < poll_interval:
+                time.sleep(check_interval)
+                waited += check_interval
+                if cancel_check and cancel_check():
+                    try:
+                        cloud_client.cancel_task(task_uuid)
+                    except Exception:
+                        pass
+                    return None
+            elapsed += poll_interval
 
             if progress_callback:
                 pct = min(80, 50 + int(elapsed / max_wait * 30))

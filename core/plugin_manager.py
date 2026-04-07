@@ -126,8 +126,9 @@ class PluginManager(QObject):
             logger.warning(f"不安全的插件 ID: {plugin_id}")
             return
 
-        # 避���重复加载
+        # 避免重复加载
         if plugin_id in self._plugins:
+            logger.debug(f"插件 {plugin_id} 已加载，跳过重复加载")
             return
 
         self._manifests[plugin_id] = manifest
@@ -363,18 +364,32 @@ class PluginManager(QObject):
         if self._active_worker:
             worker = self._active_worker
             self._active_worker = None
-            # 断开信号防止重复触发
+            # 断开所有信号防止重复触发
             try:
                 worker.progress.disconnect()
                 worker.finished.disconnect()
                 worker.error.disconnect()
             except RuntimeError:
                 pass
-            # 安全清理: 线程结束后释放
+            # 安全清理: 等待线程结束后释放，设置超时防止泄漏
             if worker.isFinished():
                 worker.deleteLater()
             else:
-                worker.finished.connect(worker.deleteLater)
+                # 设置超时：如果 5 秒内线程未结束则强制清理
+                def _force_cleanup():
+                    if not worker.isFinished():
+                        logger.warning("插件工作线程超时未结束，强制终止")
+                        worker.terminate()
+                        worker.wait(1000)
+                    worker.deleteLater()
+                cleanup_timer = QTimer(self)
+                cleanup_timer.setSingleShot(True)
+                cleanup_timer.timeout.connect(_force_cleanup)
+                cleanup_timer.start(5000)
+                def _on_finished():
+                    cleanup_timer.stop()
+                    worker.deleteLater()
+                worker.finished.connect(_on_finished)
 
     # ========== 配置 ==========
 

@@ -35,8 +35,8 @@ if platform.system() == "Windows" and not _HAS_KEYRING:
         _crypt32 = ctypes.windll.crypt32
         _kernel32 = ctypes.windll.kernel32
         _HAS_DPAPI = True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"DPAPI 不可用: {e}")
 
 
 def _make_blob(data: bytes) -> DATA_BLOB:
@@ -98,6 +98,7 @@ def store_credential(key: str, value: str):
             logger.warning(f"DPAPI 加密失败，回退到 base64 混淆: {e}")
 
     # 最后回退：base64 混淆（非真正加密，但防止肉眼直读）
+    logger.warning(f"凭据 '{key}' 使用 base64 混淆存储（非加密），建议安装 keyring 包")
     obfuscated = "b64:" + base64.b64encode(value.encode("utf-8")).decode("ascii")
     _write_to_config(key, obfuscated)
 
@@ -133,7 +134,8 @@ def retrieve_credential(key: str) -> str:
     if raw.startswith("b64:"):
         try:
             return base64.b64decode(raw.removeprefix("b64:")).decode("utf-8")
-        except Exception:
+        except Exception as e:
+            logger.error(f"base64 解码凭据 '{key}' 失败: {e}")
             return ""
 
     return raw
@@ -144,8 +146,8 @@ def delete_credential(key: str):
     if _HAS_KEYRING:
         try:
             keyring.delete_password(_SERVICE_NAME, key)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"keyring 删除凭据 '{key}' 失败（可能不存在）: {e}")
     _write_to_config(key, "")
 
 

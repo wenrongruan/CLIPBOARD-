@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Optional, Union
 from enum import Enum
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 
 class ContentType(Enum):
@@ -23,6 +26,10 @@ class ClipboardItem:
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     is_starred: bool = False
     cloud_id: Optional[int] = None
+
+    def __post_init__(self):
+        if self.id is not None and not self.content_hash:
+            logger.warning(f"ClipboardItem(id={self.id}) 的 content_hash 为空")
 
     @property
     def is_text(self) -> bool:

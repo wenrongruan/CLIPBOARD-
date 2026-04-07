@@ -214,9 +214,10 @@ class ClipboardMonitor(QObject):
             self.clipboard.setText(item.text_content)
             return True
         elif item.is_image and item.image_data:
-            self._last_image_hash = item.content_hash
             image = QImage()
             image.loadFromData(item.image_data)
+            # 使用 _fast_image_hash 计算 hash 以匹配 _handle_image 的检测逻辑
+            self._last_image_hash = self._fast_image_hash(image)
             self.clipboard.setImage(image)
             return True
         return False
