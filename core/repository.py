@@ -84,6 +84,15 @@ class ClipboardRepository:
             cursor = conn.execute(sql, params)
             return cursor.fetchall()
 
+    def _scalar(self, conn, sql: str, params: tuple = (), default=0):
+        """获取单个标量值，兼容 dict（MySQL）和 tuple（SQLite）"""
+        row = self._fetchone(conn, sql, params)
+        if row is None:
+            return default
+        if isinstance(row, dict):
+            return list(row.values())[0]
+        return row[0]
+
     def add_item(self, item: ClipboardItem) -> int:
         def operation(conn) -> int:
             sql = """
@@ -101,7 +110,7 @@ class ClipboardRepository:
     def get_by_hash(self, content_hash: str) -> Optional[ClipboardItem]:
         def operation(conn) -> Optional[ClipboardItem]:
             sql = f"""
-                SELECT {self._SELECT_FIELDS}
+                SELECT {self._SELECT_FIELDS_NO_IMAGE}
                 FROM clipboard_items
                 WHERE content_hash = ?
             """
@@ -122,8 +131,7 @@ class ClipboardRepository:
             count_sql = "SELECT COUNT(*) FROM clipboard_items"
             if starred_only:
                 count_sql += " WHERE is_starred = 1"
-            row = self._fetchone(conn, count_sql)
-            total = row[0] if row else 0
+            total = self._scalar(conn, count_sql)
 
             # 获取分页数据（不加载完整图片数据以提高性能）
             where_clause = "WHERE is_starred = 1" if starred_only else ""
@@ -147,8 +155,7 @@ class ClipboardRepository:
         def operation(conn) -> Tuple[List[ClipboardItem], int]:
             offset = page * page_size
 
-            row = self._fetchone(conn, "SELECT COUNT(*) FROM clipboard_items")
-            total = row[0] if row else 0
+            total = self._scalar(conn, "SELECT COUNT(*) FROM clipboard_items")
 
             sql = f"""
                 SELECT {self._SELECT_FIELDS}
@@ -191,8 +198,7 @@ class ClipboardRepository:
                     SELECT COUNT(*) FROM clipboard_items
                     WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?){star_filter}
                 """
-                row = self._fetchone(conn, count_sql, (fts_query,))
-                total = row[0] if row else 0
+                total = self._scalar(conn, count_sql, (fts_query,))
 
                 sql = f"""
                     SELECT {self._SELECT_FIELDS_NO_IMAGE}
@@ -203,20 +209,21 @@ class ClipboardRepository:
                 """
                 rows = self._fetchall(conn, sql, (fts_query, page_size, offset))
             else:
-                # FTS5 不可用，回退到 LIKE
-                like_query = f"%{query}%"
+                # FTS5 不可用，回退到 LIKE（转义通配符）
+                escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                like_query = f"%{escaped}%"
+                escape_clause = " ESCAPE '\\\\'" if self._is_mysql else " ESCAPE '\\'"
 
                 count_sql = f"""
                     SELECT COUNT(*) FROM clipboard_items
-                    WHERE (text_content LIKE ? OR preview LIKE ?){star_filter}
+                    WHERE (text_content LIKE ?{escape_clause} OR preview LIKE ?{escape_clause}){star_filter}
                 """
-                row = self._fetchone(conn, count_sql, (like_query, like_query))
-                total = row[0] if row else 0
+                total = self._scalar(conn, count_sql, (like_query, like_query))
 
                 sql = f"""
                     SELECT {self._SELECT_FIELDS_NO_IMAGE}
                     FROM clipboard_items
-                    WHERE (text_content LIKE ? OR preview LIKE ?){star_filter}
+                    WHERE (text_content LIKE ?{escape_clause} OR preview LIKE ?{escape_clause}){star_filter}
                     ORDER BY created_at DESC
                     LIMIT ? OFFSET ?
                 """
@@ -266,8 +273,7 @@ class ClipboardRepository:
     def cleanup_old_items(self, max_items: int = 10000) -> int:
         def operation(conn) -> int:
             # 获取当前非收藏记录数
-            row = self._fetchone(conn, "SELECT COUNT(*) FROM clipboard_items WHERE is_starred = 0")
-            count = row[0] if row else 0
+            count = self._scalar(conn, "SELECT COUNT(*) FROM clipboard_items WHERE is_starred = 0")
 
             if count <= max_items:
                 return 0
@@ -406,8 +412,7 @@ class ClipboardRepository:
 
     def get_latest_id(self) -> int:
         def operation(conn) -> int:
-            row = self._fetchone(conn, "SELECT MAX(id) FROM clipboard_items")
-            result = row[0] if row else 0
+            result = self._scalar(conn, "SELECT MAX(id) FROM clipboard_items")
             return result if result else 0
 
         return self.db.execute_read(operation)

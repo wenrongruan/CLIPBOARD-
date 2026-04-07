@@ -73,6 +73,7 @@ class ClipboardItemWidget(QWidget):
 
             preview_label = QLabel(self.item.preview)
             preview_label.setObjectName("previewLabel")
+            preview_label.setTextFormat(Qt.PlainText)
             preview_label.setMinimumWidth(0)
             preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             info_layout.addWidget(preview_label)
@@ -88,6 +89,7 @@ class ClipboardItemWidget(QWidget):
             preview_text = self._get_multiline_preview(self.item, max_lines=3, max_chars=120)
             preview_label = QLabel(preview_text)
             preview_label.setObjectName("previewLabel")
+            preview_label.setTextFormat(Qt.PlainText)
             preview_label.setWordWrap(True)
             preview_label.setMinimumWidth(0)
             preview_label.setMaximumHeight(54)

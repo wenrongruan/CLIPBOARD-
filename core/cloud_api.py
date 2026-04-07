@@ -1,7 +1,8 @@
-"""云端 API 客户端，封装所有与云端服务器的 HTTP 通信"""
+"""云�� API 客户端，封装所有与云端服务器的 HTTP 通信"""
 
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -21,11 +22,19 @@ class CloudAPIError(Exception):
 class CloudAPIClient:
     """云端 API 客户端，处理认证和所有 HTTP 请求"""
 
+    # 允许下载图片的域名白名单（presigned URL 可能来自 CDN/S3）
+    _ALLOWED_DOWNLOAD_DOMAINS = {
+        "www.jlike.com",
+        "s3.amazonaws.com",
+        "s3.us-east-1.amazonaws.com",
+        "storage.googleapis.com",
+    }
+
     def __init__(self, base_url: str):
         self._base_url = base_url.rstrip("/")
         self._access_token: Optional[str] = None
         self._refresh_token_str: Optional[str] = None
-        self._client = httpx.Client(base_url=self._base_url, timeout=30.0)
+        self._client = httpx.Client(base_url=self._base_url, timeout=30.0, verify=True)
 
     # ========== Token 管理 ==========
 
@@ -228,9 +237,21 @@ class CloudAPIClient:
         return response.json().get("url", "")
 
     def download_image(self, item_id: int) -> Optional[bytes]:
-        """下载图片数据：先获取 presigned URL，再下载内容"""
+        """下载图片数据：先获取 presigned URL，再下载���容"""
         url = self.get_image_url(item_id)
         if not url:
+            return None
+        # 校验下载 URL 的安全性，防止 SSRF
+        parsed = urlparse(url)
+        if parsed.scheme not in ("https", "http"):
+            logger.warning(f"不安全的图片 URL scheme: {url}")
+            return None
+        hostname = parsed.hostname or ""
+        # 允许 API 同域 + 已知 CDN/存储域名
+        api_host = urlparse(self._base_url).hostname or ""
+        allowed = self._ALLOWED_DOWNLOAD_DOMAINS | {api_host}
+        if not any(hostname == d or hostname.endswith(f".{d}") for d in allowed):
+            logger.warning(f"不允许的图片下载域名: {hostname}")
             return None
         try:
             resp = self._client.get(url, timeout=30.0)

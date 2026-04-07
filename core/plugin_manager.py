@@ -120,7 +120,13 @@ class PluginManager(QObject):
             logger.warning(f"Missing 'id' in manifest: {manifest_path}")
             return
 
-        # 避免重复加载
+        # 校验 plugin_id 安全性（仅允许字母、数字、下划线、连字符）
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', plugin_id):
+            logger.warning(f"不安全的插件 ID: {plugin_id}")
+            return
+
+        # 避���重复加载
         if plugin_id in self._plugins:
             return
 

@@ -2,6 +2,9 @@ import io
 from typing import Tuple, Optional
 from PIL import Image
 
+# 限制最大图片像素数，防止解压炸弹导致内存耗尽（约 50M 像素）
+Image.MAX_IMAGE_PIXELS = 50_000_000
+
 
 def create_thumbnail(
     image_data: bytes, size: Tuple[int, int] = (100, 100)

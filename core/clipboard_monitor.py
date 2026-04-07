@@ -98,7 +98,7 @@ class ClipboardMonitor(QObject):
             logger.info(f"文本超过最大长度限制 ({len(text)} > {max_text_length})，跳过")
             return
 
-        logger.info(f"检测到新文本: {text[:30]}...")
+        logger.debug(f"检测到新文本: {text[:30]}...")
 
         content_hash = compute_content_hash(text)
 
@@ -124,7 +124,7 @@ class ClipboardMonitor(QObject):
 
             self._maybe_cleanup()
 
-            logger.info(f"保存文本成功: {preview[:50]}...")
+            logger.info(f"保存文本成功: id={item.id}")
             self.item_added.emit(item)
 
         except Exception as e:

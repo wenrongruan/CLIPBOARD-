@@ -1125,14 +1125,28 @@ class MainWindow(EdgeHiddenWindow):
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
-        if reply == QMessageBox.Yes:
+        if reply != QMessageBox.Yes:
+            return
+
+        cloud_id = item.cloud_id
+        item_id = item.id
+        api = self.cloud_api
+
+        from concurrent.futures import ThreadPoolExecutor
+        if not hasattr(self, '_cloud_executor'):
+            self._cloud_executor = ThreadPoolExecutor(max_workers=1)
+        future = self._cloud_executor.submit(api.delete_item, cloud_id)
+
+        def _on_done(f):
             try:
-                self.cloud_api.delete_item(item.cloud_id)
-                self.repository.clear_cloud_id(item.id)
+                f.result()
+                self.repository.clear_cloud_id(item_id)
                 item.cloud_id = None
                 self._load_items()
             except Exception as e:
                 logger.warning(f"删除云端副本失败: {e}")
+
+        future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_done(f)))
 
     def _on_item_star(self, item: ClipboardItem):
         self.repository.toggle_star(item.id)

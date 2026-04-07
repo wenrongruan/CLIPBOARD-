@@ -1,3 +1,4 @@
+import re
 import time
 import random
 import logging
@@ -47,9 +48,16 @@ class MySQLDatabaseManager:
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     """
 
+    # 数据库名白名单：仅允许字母、数字、下划线
+    _SAFE_DB_NAME = re.compile(r'^[a-zA-Z0-9_]+$')
+
     def __init__(self, host: str, port: int, user: str, password: str, database: str):
         if not PYMYSQL_AVAILABLE:
             raise ImportError("pymysql 未安装，请运行: pip install pymysql")
+
+        # 校验数据库名，防止 SQL 注入
+        if not self._SAFE_DB_NAME.match(database):
+            raise ValueError(f"不安全的数据库名（仅允许字母、数字、下划线）: {database}")
 
         self.host = host
         self.port = port

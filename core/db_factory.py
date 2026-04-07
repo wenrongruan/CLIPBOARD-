@@ -21,7 +21,7 @@ def create_database_manager():
         from .mysql_database import MySQLDatabaseManager
 
         mysql_config = Config.get_mysql_config()
-        logger.info(f"使用 MySQL 数据库: {mysql_config['host']}:{mysql_config['port']}/{mysql_config['database']}")
+        logger.info(f"使用 MySQL 数据库: {mysql_config['host']}:{mysql_config['port']}/{mysql_config['database']} (user={mysql_config['user']})")
 
         return MySQLDatabaseManager(
             host=mysql_config["host"],

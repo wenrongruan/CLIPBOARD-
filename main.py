@@ -243,7 +243,7 @@ class ClipboardApp:
     def _advance_sync_after_cloud(self, items):
         """云端拉取写入本地后，推进 SyncService 游标"""
         if items:
-            max_id = max(item.id for item in items if item.id)
+            max_id = max((item.id for item in items if item.id), default=0)
             if max_id:
                 self.sync_service.advance_sync_id(max_id)
 

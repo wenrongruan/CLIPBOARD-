@@ -1,6 +1,8 @@
 import os
+import re
 import sys
 import json
+import stat
 import uuid
 import hashlib
 import platform
@@ -78,6 +80,12 @@ class Config:
         config_file = cls.get_config_file()
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
+        # 限制配置文件权限，仅所有者可读写
+        try:
+            if not cls.IS_WINDOWS:
+                os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
 
     @classmethod
     def get_setting(cls, key: str, default=None):
@@ -115,9 +123,8 @@ class Config:
     def get_device_id(cls) -> str:
         device_id = cls.get_setting("device_id")
         if not device_id:
-            # 基于MAC地址生成稳定的设备ID
-            mac = uuid.getnode()
-            device_id = hashlib.md5(str(mac).encode()).hexdigest()[:16]
+            # 使用随机 UUID，避免 MAC 地址泄露隐私
+            device_id = uuid.uuid4().hex[:16]
             cls.set_setting("device_id", device_id)
         return device_id
 
@@ -166,30 +173,52 @@ class Config:
             cls.set_setting("sync_mode", mode)
 
     # ========== 云端配置 ==========
+
+    # 允许的 API 域名白名单
+    _ALLOWED_API_DOMAINS = {"www.jlike.com", "localhost", "127.0.0.1"}
+
     @classmethod
     def get_cloud_api_url(cls) -> str:
         """获取云端 API 地址"""
-        return cls.get_setting("cloud_api_url", "https://api.jlike.com")
+        return cls.get_setting("cloud_api_url", "https://www.jlike.com")
 
     @classmethod
     def set_cloud_api_url(cls, url: str):
+        cls.validate_cloud_api_url(url)
         cls.set_setting("cloud_api_url", url)
 
     @classmethod
+    def validate_cloud_api_url(cls, url: str):
+        """校验云端 API URL 的安全性"""
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        # 强制 HTTPS（localhost 开发环境除外）
+        hostname = parsed.hostname or ""
+        if parsed.scheme != "https" and hostname not in ("localhost", "127.0.0.1"):
+            raise ValueError(f"云端 API 必须使用 HTTPS 协议: {url}")
+        # 域名白名单校验
+        if hostname not in cls._ALLOWED_API_DOMAINS:
+            raise ValueError(f"不允许的 API 域名: {hostname}")
+
+    @classmethod
     def get_cloud_access_token(cls) -> str:
-        return cls.get_setting("cloud_access_token", "")
+        from utils.secure_store import retrieve_credential
+        return retrieve_credential("cloud_access_token")
 
     @classmethod
     def set_cloud_access_token(cls, token: str):
-        cls.set_setting("cloud_access_token", token)
+        from utils.secure_store import store_credential
+        store_credential("cloud_access_token", token)
 
     @classmethod
     def get_cloud_refresh_token(cls) -> str:
-        return cls.get_setting("cloud_refresh_token", "")
+        from utils.secure_store import retrieve_credential
+        return retrieve_credential("cloud_refresh_token")
 
     @classmethod
     def set_cloud_refresh_token(cls, token: str):
-        cls.set_setting("cloud_refresh_token", token)
+        from utils.secure_store import store_credential
+        store_credential("cloud_refresh_token", token)
 
     @classmethod
     def get_cloud_user_email(cls) -> str:
@@ -219,23 +248,36 @@ class Config:
             cls.set_setting("db_type", db_type)
 
     # ========== MySQL 配置 ==========
+    # 数据库名白名单：仅允许字母、数字、下划线
+    _DB_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_]+$')
+
     @classmethod
     def get_mysql_config(cls) -> dict:
+        from utils.secure_store import retrieve_credential
         return {
             "host": cls.get_setting("mysql_host", "localhost"),
             "port": cls.get_setting("mysql_port", 3306),
             "user": cls.get_setting("mysql_user", ""),
-            "password": cls.get_setting("mysql_password", ""),
+            "password": retrieve_credential("mysql_password"),
             "database": cls.get_setting("mysql_database", "clipboard"),
         }
 
     @classmethod
     def set_mysql_config(cls, host: str, port: int, user: str, password: str, database: str):
+        from utils.secure_store import store_credential
+        # 校验数据库名安全性
+        if database and not cls._DB_NAME_PATTERN.match(database):
+            raise ValueError(f"不安全的数据库名（仅允许字母、数字、下划线）: {database}")
         cls.set_setting("mysql_host", host)
         cls.set_setting("mysql_port", port)
         cls.set_setting("mysql_user", user)
-        cls.set_setting("mysql_password", password)
+        store_credential("mysql_password", password)
         cls.set_setting("mysql_database", database)
+
+    @classmethod
+    def validate_mysql_database_name(cls, name: str) -> bool:
+        """校验 MySQL 数据库名是否安全"""
+        return bool(cls._DB_NAME_PATTERN.match(name))
 
     # ========== 数据库 Profiles ==========
     @classmethod
@@ -249,7 +291,7 @@ class Config:
                 "mysql_host": settings.get("mysql_host", "localhost"),
                 "mysql_port": settings.get("mysql_port", 3306),
                 "mysql_user": settings.get("mysql_user", ""),
-                "mysql_password": settings.get("mysql_password", ""),
+                "mysql_password": "",  # 密码已迁移到安全存储，不再存入 profile
                 "mysql_database": settings.get("mysql_database", "clipboard"),
             }
             settings["db_profiles"] = {"Default": default_profile}

@@ -17,6 +17,9 @@ from core.cloud_api import CloudAPIClient, CloudAPIError
 
 logger = logging.getLogger(__name__)
 
+# 模块级单例线程池，避免每次登录创建新的 Executor
+_executor = ThreadPoolExecutor(max_workers=1)
+
 
 class CloudLoginWidget(QWidget):
     """云端登录表单，可嵌入对话框或设置页。"""
@@ -98,17 +101,12 @@ class CloudLoginWidget(QWidget):
                 self.status_label.setText("登录成功！")
                 self.login_btn.setText("已登录")
                 self.login_succeeded.emit(result if result else {})
-            except CloudAPIError as e:
-                self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.status_label.setText(str(e))
-                self._set_loading(False)
-                self.login_failed.emit(str(e))
             except Exception as e:
+                msg = str(e) if isinstance(e, CloudAPIError) else f"连接失败: {e}"
                 self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.status_label.setText(f"连接失败: {e}")
+                self.status_label.setText(msg)
                 self._set_loading(False)
-                self.login_failed.emit(str(e))
+                self.login_failed.emit(msg)
 
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(_login_task)
+        future = _executor.submit(_login_task)
         future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_done(f)))
