@@ -4,7 +4,7 @@ import re
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import Signal, QTimer
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget,
     QFormLayout,
@@ -26,10 +26,12 @@ class CloudLoginWidget(QWidget):
 
     login_succeeded = Signal(dict)   # 登录成功，携带 API 返回结果
     login_failed = Signal(str)       # 登录失败，携带错误消息
+    _login_done = Signal(object)     # 内部信号：后台线程 -> 主线程
 
     def __init__(self, cloud_api: CloudAPIClient, parent=None):
         super().__init__(parent)
         self.cloud_api = cloud_api
+        self._login_done.connect(self._handle_login_result)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -94,19 +96,20 @@ class CloudLoginWidget(QWidget):
         def _login_task():
             return api.login(email, password)
 
-        def _on_done(future):
-            try:
-                result = future.result()
-                self.status_label.setStyleSheet("color: #4ade80; font-size: 12px;")
-                self.status_label.setText("登录成功！")
-                self.login_btn.setText("已登录")
-                self.login_succeeded.emit(result if result else {})
-            except Exception as e:
-                msg = str(e) if isinstance(e, CloudAPIError) else f"连接失败: {e}"
-                self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
-                self.status_label.setText(msg)
-                self._set_loading(False)
-                self.login_failed.emit(msg)
-
         future = _executor.submit(_login_task)
-        future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_done(f)))
+        future.add_done_callback(lambda f: self._login_done.emit(f))
+
+    def _handle_login_result(self, future):
+        """在主线程中处理登录结果"""
+        try:
+            result = future.result()
+            self.status_label.setStyleSheet("color: #4ade80; font-size: 12px;")
+            self.status_label.setText("登录成功！")
+            self.login_btn.setText("已登录")
+            self.login_succeeded.emit(result if result else {})
+        except Exception as e:
+            msg = str(e) if isinstance(e, CloudAPIError) else f"连接失败: {e}"
+            self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
+            self.status_label.setText(msg)
+            self._set_loading(False)
+            self.login_failed.emit(msg)

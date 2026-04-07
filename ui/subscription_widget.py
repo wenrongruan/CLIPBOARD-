@@ -161,9 +161,18 @@ class SubscriptionWidget(QWidget):
         try:
             sub = self.cloud_api.get_subscription()
 
-            # 套餐信息
-            plan = sub.get("plan", {})
-            plan_name = plan.get("name", "免费版")
+            # 套餐信息 — 兼容扁平和嵌套两种响应格式
+            plan = sub.get("plan", "free")
+            if isinstance(plan, dict):
+                plan_name = plan.get("name", "免费版")
+                max_items = plan.get("max_items", 30)
+                max_devices = plan.get("max_devices", 2)
+            else:
+                plan_name_map = {"free": "免费版", "pro": "专业版", "premium": "高级版"}
+                plan_name = plan_name_map.get(plan, str(plan))
+                max_items = sub.get("max_records", 30)
+                max_devices = sub.get("max_devices", 2)
+
             self.plan_label.setText(plan_name)
 
             status = sub.get("status", "active")
@@ -175,10 +184,15 @@ class SubscriptionWidget(QWidget):
             }
             self.status_label.setText(status_map.get(status, status))
 
-            # 用量
+            # 用量 — 兼容扁平和嵌套格式
             usage = sub.get("usage", {})
-            items_count = usage.get("items_count", 0)
-            max_items = plan.get("max_items", 30)
+            if isinstance(usage, dict):
+                items_count = usage.get("items_count", 0)
+                devices_count = usage.get("devices_count", 0)
+            else:
+                items_count = sub.get("used_records", 0)
+                devices_count = sub.get("used_devices", 0)
+
             self.items_count_label.setText(f"已用 {items_count}/{max_items} 条")
 
             if max_items > 0:
@@ -193,8 +207,6 @@ class SubscriptionWidget(QWidget):
                 """)
 
             # 设备数
-            devices_count = usage.get("devices_count", 0)
-            max_devices = plan.get("max_devices", 2)
             self.devices_label.setText(f"已注册设备: {devices_count}/{max_devices}")
 
         except CloudAPIError as e:

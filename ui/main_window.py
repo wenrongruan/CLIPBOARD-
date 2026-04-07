@@ -783,6 +783,15 @@ class SettingsDialog(QDialog):
         self._cloud_content_layout.setContentsMargins(0, 0, 0, 0)
         cloud_layout.addWidget(self._cloud_content_container, 1)
 
+        # 如果没有传入 cloud_api，但配置中有已保存的 token，则创建客户端
+        if not self._cloud_api and Config.get_cloud_access_token():
+            from core.cloud_api import CloudAPIClient
+            self._cloud_api = CloudAPIClient(Config.get_cloud_api_url())
+            self._cloud_api.set_tokens(
+                Config.get_cloud_access_token(),
+                Config.get_cloud_refresh_token(),
+            )
+
         if self._cloud_api and self._cloud_api.is_authenticated:
             self._show_cloud_logged_in()
         else:
