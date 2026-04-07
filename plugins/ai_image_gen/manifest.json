@@ -1,0 +1,26 @@
+{
+    "id": "ai_image_gen",
+    "name": "AI 图片生成",
+    "version": "1.0.0",
+    "description": "使用 Gemini 和万相 AI 生成图片，支持多轮对话和编辑",
+    "author": "AladdinPic",
+    "entry_point": "plugin.py",
+    "min_app_version": "1.0.0",
+    "permissions": ["network", "clipboard_write"],
+    "timeout": 300,
+    "config_schema": {
+        "default_provider": {
+            "type": "select",
+            "label": "默认 AI 提供商",
+            "options": ["gemini", "wan"],
+            "default": "gemini",
+            "description": "默认使用的 AI 图片生成服务"
+        },
+        "chat_image_gen_path": {
+            "type": "string",
+            "label": "chat_image_gen 路径",
+            "default": "",
+            "description": "chat_image_gen.py 所在目录路径（留空则使用默认路径）"
+        }
+    }
+}
