@@ -1,6 +1,8 @@
+import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
@@ -847,6 +849,7 @@ class SettingsDialog(QDialog):
         # 将 cloud_api 注入到 PluginManager，使插件可以使用认证和扣点功能
         if self._plugin_manager and self._cloud_api:
             self._plugin_manager.set_cloud_client(self._cloud_api)
+        self._save_clipboard_auth_file()
 
     def _on_accept(self):
         """确认保存设置前进行验证"""
@@ -883,6 +886,25 @@ class SettingsDialog(QDialog):
                 return
 
         self.accept()
+
+    def _save_clipboard_auth_file(self):
+        """将当前 token 写入 ~/.shared_clipboard/auth.json，供 chat_image_gen 独立启动时复用登录态。"""
+        if not self._cloud_api or not self._cloud_api.is_authenticated:
+            return
+        try:
+            auth_dir = Path.home() / ".shared_clipboard"
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            access_token, refresh_token = self._cloud_api.get_tokens()
+            data = {
+                "api_base_url": Config.get_cloud_api_url(),
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+            }
+            (auth_dir / "auth.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            logger.warning("保存 auth.json 失败", exc_info=True)
 
     def get_cloud_api(self):
         """返回当前的云端 API 客户端（可能在对话框中登录后更新）"""
