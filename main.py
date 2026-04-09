@@ -330,6 +330,8 @@ class ClipboardApp:
             self.plugin_manager.unload_all()
 
         self.clipboard_monitor.stop()
+        self.main_window._copy_executor.shutdown(wait=False)
+        self.main_window._cloud_executor.shutdown(wait=False)
         self.sync_service.stop()
         if self.cloud_sync_service:
             self.cloud_sync_service.stop()
@@ -337,6 +339,8 @@ class ClipboardApp:
         # 关闭云端 API 客户端
         if self.cloud_api is not None:
             self.cloud_api.close()
+        # 刷新延迟写入的配置
+        Config.flush()
         # 关闭持久数据库连接
         if hasattr(self.db_manager, 'close'):
             self.db_manager.close()

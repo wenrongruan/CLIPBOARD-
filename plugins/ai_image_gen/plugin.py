@@ -21,6 +21,10 @@ DEFAULT_CHAT_IMAGE_GEN_PATH = os.path.join(
 
 class AIImageGenPlugin(PluginBase):
 
+    def __init__(self):
+        super().__init__()
+        self._gen_client = None  # 缓存图片生成专用客户端
+
     def get_id(self):
         return "ai_image_gen"
 
@@ -58,16 +62,17 @@ class AIImageGenPlugin(PluginBase):
         if not item.text_content:
             return PluginResult(success=False, error_message="无文本内容")
 
-        cloud_client = self._get_cloud_client()
+        # 使用框架提供的标准认证方法
+        cloud_client = self.get_cloud_client()
         if not cloud_client:
-            return PluginResult(success=False, error_message="未登录 CLIPBOARD- 账户")
+            return PluginResult(success=False, error_message="未登录 CLIPBOARD- 账户，请在设置中登录")
 
-        # 检查余额
+        # 使用框架标准方法检查余额
         if progress_callback:
             progress_callback(10, "正在检查余额...")
 
         try:
-            balance_data = cloud_client.get_balance()
+            balance_data = self.get_balance()
             available = balance_data.get("balance", 0) - balance_data.get("frozen", 0)
             if available < 0.05:
                 return PluginResult(success=False, error_message=f"积分余额不足 (${available:.4f})，请先充值")
@@ -88,8 +93,13 @@ class AIImageGenPlugin(PluginBase):
         model = ("gemini-3.1-flash-image-preview" if provider == "gemini"
                  else "wan2.7-image-pro")
 
+        # 使用专用图片生成客户端（缓存复用）
+        gen_client = self._get_gen_client()
+        if not gen_client:
+            return PluginResult(success=False, error_message="图片生成服务不可用")
+
         try:
-            data = cloud_client.generate(
+            data = gen_client.generate(
                 provider=provider,
                 model=model,
                 prompt=item.text_content,
@@ -105,7 +115,7 @@ class AIImageGenPlugin(PluginBase):
         if data.get("status") == "processing":
             if progress_callback:
                 progress_callback(50, "等待万相生成结果...")
-            data = self._poll_wan_task(cloud_client, task_uuid, progress_callback, cancel_check)
+            data = self._poll_wan_task(gen_client, task_uuid, progress_callback, cancel_check)
             if not data:
                 return PluginResult(success=False, error_message="生成超时或失败")
 
@@ -130,9 +140,8 @@ class AIImageGenPlugin(PluginBase):
 
     def _open_studio(self, item):
         """启动完整的 chat_image_gen 窗口（子进程方式）。"""
-        cloud_client = self._get_cloud_client()
-        if not cloud_client:
-            return PluginResult(success=False, error_message="未登录 CLIPBOARD- 账户")
+        if not self.get_cloud_client():
+            return PluginResult(success=False, error_message="未登录 CLIPBOARD- 账户，请在设置中登录")
 
         config = self.get_config()
         gen_path = config.get("chat_image_gen_path", "") or DEFAULT_CHAT_IMAGE_GEN_PATH
@@ -165,16 +174,16 @@ class AIImageGenPlugin(PluginBase):
             action=PluginResultAction.SAVE,
         )
 
-    def _get_cloud_client(self):
-        """从 CLIPBOARD- 框架获取已认证的 cloud client。"""
-        try:
-            # 动态导入，避免硬依赖
-            project_root = os.path.dirname(os.path.dirname(
-                os.path.dirname(os.path.abspath(__file__))))
-            if project_root not in sys.path:
-                sys.path.insert(0, project_root)
+    def _get_gen_client(self):
+        """获取图片生成专用客户端（缓存复用）。
 
-            # 尝试从 CLIPBOARD- 的 config 系统获取 token
+        认证信息从框架注入的 cloud_client 获取，避免每次重新导入和创建。
+        """
+        # 检查缓存的客户端是否仍然有效
+        if self._gen_client is not None:
+            return self._gen_client
+
+        try:
             from config import Config
             base_url = Config.get_cloud_api_url()
             access_token = Config.get_cloud_access_token()
@@ -183,23 +192,27 @@ class AIImageGenPlugin(PluginBase):
             if not access_token:
                 return None
 
-            # 使用 chat_image_gen 的 cloud_client（动态导入）
+            # 动态导入 ImageGenCloudClient（仅首次）
             config = self.get_config()
             gen_path = config.get("chat_image_gen_path", "") or DEFAULT_CHAT_IMAGE_GEN_PATH
             if gen_path not in sys.path:
                 sys.path.insert(0, gen_path)
 
             from lib.cloud_client import ImageGenCloudClient
-            client = ImageGenCloudClient(base_url)
-            client.set_tokens(access_token, refresh_token)
-            return client
+            self._gen_client = ImageGenCloudClient(base_url)
+            self._gen_client.set_tokens(access_token, refresh_token)
+            return self._gen_client
 
         except ImportError:
-            self.logger.warning("Failed to import Config or ImageGenCloudClient")
+            self.logger.warning("Failed to import ImageGenCloudClient")
             return None
         except Exception as e:
-            self.logger.error("Failed to get cloud client: %s", e)
+            self.logger.error("Failed to create gen client: %s", e)
             return None
+
+    def on_config_changed(self, config: dict):
+        """配置变更时清除缓存的客户端"""
+        self._gen_client = None
 
     def _poll_wan_task(self, cloud_client, task_uuid, progress_callback, cancel_check,
                        max_wait=300):

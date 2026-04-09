@@ -1,5 +1,6 @@
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
@@ -828,6 +829,9 @@ class SettingsDialog(QDialog):
     def _on_cloud_login_success(self, result: dict):
         """云端登录成功回调"""
         self._cloud_login_widget.status_label.setText("登录成功！重启应用后启用云端同步。")
+        # 将 cloud_api 注入到 PluginManager，使插件可以使用认证和扣点功能
+        if self._plugin_manager and self._cloud_api:
+            self._plugin_manager.set_cloud_client(self._cloud_api)
 
     def _on_accept(self):
         """确认保存设置前进行验证"""
@@ -912,12 +916,18 @@ class MainWindow(EdgeHiddenWindow):
         self.plugin_manager = plugin_manager
         self.cloud_api = cloud_api
 
+        # 将 cloud_api 注入到 PluginManager，使插件可以复用登录态
+        if self.plugin_manager and self.cloud_api:
+            self.plugin_manager.set_cloud_client(self.cloud_api)
+
         self._current_page = 0
         self._total_pages = 1
         self._page_size = Config.PAGE_SIZE
         self._search_query = ""
         self._starred_only = False
         self._items: List[ClipboardItem] = []
+        self._copy_executor = ThreadPoolExecutor(max_workers=1)
+        self._cloud_executor = ThreadPoolExecutor(max_workers=1)
 
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
@@ -1054,21 +1064,26 @@ class MainWindow(EdgeHiddenWindow):
         except Exception as e:
             logger.error(f"加载剪贴板条目失败: {e}")
 
+    def _make_list_item(self, item: ClipboardItem):
+        """创建 ClipboardItemWidget 和对应的 QListWidgetItem，连接信号"""
+        widget = ClipboardItemWidget(item)
+        widget.clicked.connect(self._on_item_clicked)
+        widget.delete_clicked.connect(self._on_item_delete)
+        widget.star_clicked.connect(self._on_item_star)
+        widget.save_clicked.connect(self._on_item_save)
+        widget.cloud_delete_clicked.connect(self._on_cloud_delete)
+
+        list_item = QListWidgetItem()
+        hint = widget.sizeHint()
+        min_h = 92 if item.is_image else 76
+        list_item.setSizeHint(QSize(hint.width(), max(hint.height(), min_h)))
+        return list_item, widget
+
     def _update_list(self):
         self.list_widget.clear()
 
         for item in self._items:
-            widget = ClipboardItemWidget(item)
-            widget.clicked.connect(self._on_item_clicked)
-            widget.delete_clicked.connect(self._on_item_delete)
-            widget.star_clicked.connect(self._on_item_star)
-            widget.save_clicked.connect(self._on_item_save)
-            widget.cloud_delete_clicked.connect(self._on_cloud_delete)
-
-            list_item = QListWidgetItem(self.list_widget)
-            hint = widget.sizeHint()
-            min_h = 92 if item.is_image else 76
-            list_item.setSizeHint(QSize(hint.width(), max(hint.height(), min_h)))
+            list_item, widget = self._make_list_item(item)
             self.list_widget.addItem(list_item)
             self.list_widget.setItemWidget(list_item, widget)
 
@@ -1096,14 +1111,8 @@ class MainWindow(EdgeHiddenWindow):
         self._current_page = 0
         self._load_items()
 
-    def _on_item_clicked(self, item: ClipboardItem):
-        # 需要从数据库获取完整数据（包括图片）
-        if item.is_image:
-            full_item = self.repository.get_item_by_id(item.id)
-            if full_item:
-                item = full_item
-
-        success = self.clipboard_monitor.copy_to_clipboard(item)
+    def _show_copy_feedback(self, success: bool):
+        """显示复制结果反馈"""
         if success:
             self.copy_feedback_label.setText(t("copied_to_clipboard"))
             self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
@@ -1113,6 +1122,31 @@ class MainWindow(EdgeHiddenWindow):
         self.copy_feedback_label.style().polish(self.copy_feedback_label)
         self.copy_feedback_label.show()
         self._feedback_timer.start(2000)
+
+    def _on_item_clicked(self, item: ClipboardItem):
+        # 图片需要从数据库获取完整数据 — 异步加载避免阻塞主线程
+        if item.is_image:
+            self.copy_feedback_label.setText("正在加载图片...")
+            self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
+            self.copy_feedback_label.style().polish(self.copy_feedback_label)
+            self.copy_feedback_label.show()
+
+            future = self._copy_executor.submit(self.repository.get_item_by_id, item.id)
+
+            def _on_loaded(f):
+                try:
+                    full_item = f.result()
+                    success = self.clipboard_monitor.copy_to_clipboard(full_item) if full_item else False
+                except Exception as e:
+                    logger.error(f"加载图片失败: {e}")
+                    success = False
+                self._show_copy_feedback(success)
+
+            future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_loaded(f)))
+            return
+
+        success = self.clipboard_monitor.copy_to_clipboard(item)
+        self._show_copy_feedback(success)
 
     def _on_item_delete(self, item: ClipboardItem):
         reply = QMessageBox.question(
@@ -1144,9 +1178,6 @@ class MainWindow(EdgeHiddenWindow):
         item_id = item.id
         api = self.cloud_api
 
-        from concurrent.futures import ThreadPoolExecutor
-        if not hasattr(self, '_cloud_executor'):
-            self._cloud_executor = ThreadPoolExecutor(max_workers=1)
         future = self._cloud_executor.submit(api.delete_item, cloud_id)
 
         def _on_done(f):
@@ -1184,9 +1215,24 @@ class MainWindow(EdgeHiddenWindow):
             except Exception as e:
                 QMessageBox.critical(self, t("error"), t("save_failed", error=str(e)))
 
+    def _prepend_item(self, item: ClipboardItem):
+        """在列表顶部插入单个新条目，避免全量重建"""
+        list_item, widget = self._make_list_item(item)
+
+        self.list_widget.insertItem(0, list_item)
+        self.list_widget.setItemWidget(list_item, widget)
+        self._items.insert(0, item)
+
+        # 超出每页大小时移除末尾
+        if self.list_widget.count() > self._page_size:
+            self.list_widget.takeItem(self.list_widget.count() - 1)
+            if len(self._items) > self._page_size:
+                self._items.pop()
+
     def _on_item_added(self, item: ClipboardItem):
-        # 如果在第一页且没有搜索，刷新列表
-        if self._current_page == 0 and not self._search_query:
+        if self._current_page == 0 and not self._search_query and not self._starred_only:
+            self._prepend_item(item)
+        elif self._current_page == 0 and not self._search_query:
             self._load_items()
 
     def _on_new_items(self, items: List[ClipboardItem]):
@@ -1196,6 +1242,9 @@ class MainWindow(EdgeHiddenWindow):
 
     def _toggle_pin(self):
         is_pinned = self.toggle_pin()
+        # 取消固定时若处于悬浮模式，吸附回最近边缘
+        if not is_pinned and self._is_floating:
+            self._snap_to_nearest_edge()
         self.pin_btn.setText("📍" if is_pinned else "📌")
         self.pin_btn.setToolTip(t("unpin_window") if is_pinned else t("pin_window"))
 

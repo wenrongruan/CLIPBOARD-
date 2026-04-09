@@ -51,6 +51,9 @@ class EdgeHiddenWindow(QWidget):
         self._is_pinned = False  # 固定模式，不自动隐藏
         self._show_protection = False  # 显示保护期，防止立即隐藏
 
+        # 悬浮模式（脱离边缘吸附，自由定位）
+        self._is_floating = Config.get_is_floating()
+
         # 拖动支持
         self._dragging = False
         self._drag_start_pos = QPoint()
@@ -71,9 +74,26 @@ class EdgeHiddenWindow(QWidget):
 
     def _init_position(self):
         screen_rect = self._get_screen_rect()
-        if not screen_rect.isEmpty():
-            self._move_to_hidden_position(screen_rect)
-            self.show()
+        if screen_rect.isEmpty():
+            return
+
+        if self._is_floating:
+            pos = Config.get_floating_position()
+            if pos and len(pos) == 2:
+                x, y = pos
+                # 校验位置是否在屏幕内
+                if screen_rect.contains(QPoint(x, y)):
+                    self.setGeometry(QRect(x, y, self._window_width, self._window_height))
+                    self._is_visible = True
+                    self._is_pinned = True
+                    self.show()
+                    return
+            # 保存的位置无效，回退到吸附模式
+            self._is_floating = False
+            Config.set_is_floating(False)
+
+        self._move_to_hidden_position(screen_rect)
+        self.show()
 
     def _get_screen(self) -> Optional[QScreen]:
         return QApplication.primaryScreen()
@@ -90,6 +110,8 @@ class EdgeHiddenWindow(QWidget):
     def set_dock_edge(self, edge: str):
         if edge in ("left", "right", "top", "bottom"):
             self._dock_edge = edge
+            self._is_floating = False
+            Config.set_is_floating(False)
             Config.set_dock_edge(edge)
             # 重新定位
             screen_rect = self._get_screen_rect()
@@ -204,6 +226,10 @@ class EdgeHiddenWindow(QWidget):
         self.setGeometry(self._get_visible_geometry(screen_rect))
 
     def _check_mouse_position(self):
+        # 悬浮模式下不做边缘检测
+        if self._is_floating:
+            return
+
         # 保护期内不自动隐藏
         if self._show_protection:
             return
@@ -240,12 +266,12 @@ class EdgeHiddenWindow(QWidget):
         self._animation.setEndValue(end_geometry)
         self._animation.start()
         self._is_visible = True
-        self._mouse_check_timer.setInterval(50)  # 窗口可见时快速检测
+        self._mouse_check_timer.setInterval(100)  # 窗口可见时快速检测
         self.raise_()
         self.activateWindow()
 
     def _slide_out(self):
-        if self._is_pinned:
+        if self._is_pinned or self._is_floating:
             return
 
         if self._animation.state() == QPropertyAnimation.Running:
@@ -272,6 +298,8 @@ class EdgeHiddenWindow(QWidget):
 
     def hide_window(self):
         self._is_pinned = False
+        self._is_floating = False
+        Config.set_is_floating(False)
         self._show_protection = False
         self._slide_out()
 
@@ -325,31 +353,60 @@ class EdgeHiddenWindow(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        """鼠标释放事件 - 结束拖动并重新吸附到最近边缘"""
+        """鼠标释放事件 - 结束拖动，根据位置吸附或悬浮"""
         if event.button() == Qt.LeftButton and self._dragging:
             self._dragging = False
             self.setCursor(Qt.ArrowCursor)
-            # 根据松手位置确定最近的屏幕边缘并重新吸附
-            self._snap_to_nearest_edge()
+            self._snap_or_float()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
-    def _snap_to_nearest_edge(self):
-        """根据当前窗口位置，吸附到最近的屏幕边缘"""
-        screen_rect = self._get_screen_rect()
-        if screen_rect.isEmpty():
-            return
-
+    def _nearest_edge_and_distance(self, screen_rect: QRect):
+        """计算窗口中心到四条屏幕边缘的距离，返回 (最近边缘名, 距离)"""
         center = self.geometry().center()
-        # 计算到四条边的距离
         distances = {
             "left": center.x() - screen_rect.left(),
             "right": screen_rect.right() - center.x(),
             "top": center.y() - screen_rect.top(),
             "bottom": screen_rect.bottom() - center.y(),
         }
-        nearest_edge = min(distances, key=distances.get)
+        nearest = min(distances, key=distances.get)
+        return nearest, distances[nearest]
+
+    def _snap_or_float(self):
+        """根据松手位置决定吸附到边缘还是悬浮"""
+        screen_rect = self._get_screen_rect()
+        if screen_rect.isEmpty():
+            return
+
+        SNAP_THRESHOLD = 80
+        nearest_edge, distance = self._nearest_edge_and_distance(screen_rect)
+
+        if distance <= SNAP_THRESHOLD:
+            self._is_floating = False
+            Config.set_is_floating(False)
+            if nearest_edge != self._dock_edge:
+                self.set_dock_edge(nearest_edge)
+            else:
+                self._move_to_visible_position(screen_rect)
+        else:
+            self._is_floating = True
+            self._is_pinned = True
+            Config.set_is_floating(True)
+            pos = self.geometry().topLeft()
+            Config.set_floating_position(pos.x(), pos.y())
+
+    def _snap_to_nearest_edge(self):
+        """吸附到最近的屏幕边缘（强制吸附，不进入悬浮）"""
+        screen_rect = self._get_screen_rect()
+        if screen_rect.isEmpty():
+            return
+
+        self._is_floating = False
+        Config.set_is_floating(False)
+
+        nearest_edge, _ = self._nearest_edge_and_distance(screen_rect)
         if nearest_edge != self._dock_edge:
             self.set_dock_edge(nearest_edge)
         else:

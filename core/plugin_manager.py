@@ -92,6 +92,7 @@ class PluginManager(QObject):
         self._plugin_status: Dict[str, dict] = {}  # {id: {status, message}}
         self._active_worker: Optional[PluginWorker] = None
         self._timeout_timer: Optional[QTimer] = None
+        self._cloud_client = None  # 共享的云端客户端实例
 
     # ========== 生命周期 ==========
 
@@ -207,9 +208,10 @@ class PluginManager(QObject):
 
         try:
             plugin = plugin_class()
-            # 注入 logger 和 config
+            # 注入 logger、config 和 cloud_client
             plugin._logger = self._init_plugin_logger(plugin_id)
             plugin._config = self._load_plugin_config(plugin_id)
+            plugin._cloud_client = self._cloud_client
             plugin.on_load()
             self._plugins[plugin_id] = plugin
             self._plugin_status[plugin_id] = {"status": "loaded", "message": ""}
@@ -241,6 +243,15 @@ class PluginManager(QObject):
         """重新加载所有插件"""
         self.unload_all()
         self.load_plugins()
+
+    # ========== 云端客户端 ==========
+
+    def set_cloud_client(self, client):
+        """设置云端 API 客户端，所有插件共享此实例"""
+        self._cloud_client = client
+        # 同步更新已加载插件的 cloud_client
+        for plugin in self._plugins.values():
+            plugin._cloud_client = client
 
     # ========== 查询 ==========
 

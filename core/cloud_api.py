@@ -278,6 +278,37 @@ class CloudAPIClient:
         response = self._request("POST", "/api/v1/subscription/checkout", json={"plan": plan})
         return response.json().get("checkout_url", "")
 
+    # ========== 积分/扣点接口 ==========
+
+    def get_balance(self) -> dict:
+        """获取当前用户的积分余额
+        返回: {"balance": float, "frozen": float}
+        """
+        response = self._request("GET", "/api/v1/credits/balance")
+        return response.json()
+
+    def deduct_credits(self, amount: float, reason: str, plugin_id: str = "", task_uuid: str = "") -> dict:
+        """扣除积分
+        返回: {"success": bool, "remaining": float, "transaction_id": str}
+        """
+        payload = {
+            "amount": amount,
+            "reason": reason,
+            "plugin_id": plugin_id,
+            "task_uuid": task_uuid,
+        }
+        response = self._request("POST", "/api/v1/credits/deduct", json=payload)
+        return response.json()
+
+    def check_credits(self, required: float) -> bool:
+        """检查积分是否足够"""
+        try:
+            data = self.get_balance()
+            available = data.get("balance", 0) - data.get("frozen", 0)
+            return available >= required
+        except CloudAPIError:
+            return False
+
     # ========== 设备接口 ==========
 
     def register_device(self, device_id: str, device_name: str, platform: str) -> bool:

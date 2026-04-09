@@ -7,6 +7,7 @@ import uuid
 import logging
 import hashlib
 import platform
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ class Config:
     _config_dir = None
     _config_file = None
     _settings = None
+    _settings_lock = threading.Lock()
+    _save_dirty = False
+    _save_timer = None  # 延迟写入定时器
 
     @classmethod
     def get_config_dir(cls) -> Path:
@@ -67,15 +71,17 @@ class Config:
     def _ensure_settings(cls) -> dict:
         """确保 _settings 已加载，返回内部引用（仅限内部使用）"""
         if cls._settings is None:
-            config_file = cls.get_config_file()
-            if config_file.exists():
-                try:
-                    with open(config_file, "r", encoding="utf-8") as f:
-                        cls._settings = json.load(f)
-                except (json.JSONDecodeError, IOError):
-                    cls._settings = {}
-            else:
-                cls._settings = {}
+            with cls._settings_lock:
+                if cls._settings is None:
+                    config_file = cls.get_config_file()
+                    if config_file.exists():
+                        try:
+                            with open(config_file, "r", encoding="utf-8") as f:
+                                cls._settings = json.load(f)
+                        except (json.JSONDecodeError, IOError):
+                            cls._settings = {}
+                    else:
+                        cls._settings = {}
         return cls._settings
 
     @classmethod
@@ -86,15 +92,51 @@ class Config:
     @classmethod
     def save_settings(cls, settings: dict):
         cls._settings = settings
+        cls._flush_to_disk()
+
+    @classmethod
+    def _flush_to_disk(cls):
+        """立即将当前 settings 写入磁盘"""
         config_file = cls.get_config_file()
-        with open(config_file, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=2, ensure_ascii=False)
+        with cls._settings_lock:
+            with open(config_file, "w", encoding="utf-8") as f:
+                json.dump(cls._settings, f, indent=2, ensure_ascii=False)
+            cls._save_dirty = False
         # 限制配置文件权限，仅所有者可读写
         try:
             if not cls.IS_WINDOWS:
                 os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)
         except OSError:
             pass
+
+    @classmethod
+    def _schedule_save(cls):
+        """延迟写入：合并高频 set_setting 调用，最多延迟 2 秒"""
+        cls._save_dirty = True
+        # 如果在 Qt 事件循环中，使用 QTimer 延迟写入
+        try:
+            from PySide6.QtCore import QTimer
+            if cls._save_timer is None:
+                cls._save_timer = QTimer()
+                cls._save_timer.setSingleShot(True)
+                cls._save_timer.timeout.connect(cls._deferred_flush)
+            if not cls._save_timer.isActive():
+                cls._save_timer.start(2000)
+        except (ImportError, RuntimeError):
+            # Qt 未初始化或无事件循环时直接写入
+            cls._flush_to_disk()
+
+    @classmethod
+    def _deferred_flush(cls):
+        """延迟写入回调"""
+        if cls._save_dirty and cls._settings is not None:
+            cls._flush_to_disk()
+
+    @classmethod
+    def flush(cls):
+        """手动触发写入（应用退出时调用）"""
+        if cls._save_dirty and cls._settings is not None:
+            cls._flush_to_disk()
 
     @classmethod
     def get_setting(cls, key: str, default=None):
@@ -105,7 +147,7 @@ class Config:
     def set_setting(cls, key: str, value):
         settings = cls._ensure_settings()
         settings[key] = value
-        cls.save_settings(settings)
+        cls._schedule_save()
 
     @classmethod
     def get_database_path(cls) -> str:
@@ -378,6 +420,24 @@ class Config:
     @classmethod
     def get_poll_interval_ms(cls) -> int:
         return cls.get_setting("poll_interval_ms", 500)
+
+    # ========== 悬浮模式配置 ==========
+    @classmethod
+    def get_is_floating(cls) -> bool:
+        return cls.get_setting("is_floating", False)
+
+    @classmethod
+    def set_is_floating(cls, val: bool):
+        cls.set_setting("is_floating", val)
+
+    @classmethod
+    def get_floating_position(cls):
+        """返回 [x, y] 或 None"""
+        return cls.get_setting("floating_position", None)
+
+    @classmethod
+    def set_floating_position(cls, x: int, y: int):
+        cls.set_setting("floating_position", [x, y])
 
     # ========== 语言配置 ==========
     @classmethod

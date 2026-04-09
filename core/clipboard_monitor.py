@@ -1,6 +1,6 @@
-import io
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, QTimer, Qt
@@ -10,8 +10,9 @@ from PySide6.QtWidgets import QApplication
 from .models import ClipboardItem, ContentType
 from .repository import ClipboardRepository
 from config import Config
+from PIL import Image
 from utils.hash_utils import compute_content_hash
-from utils.image_utils import create_thumbnail
+from utils.image_utils import create_thumbnail, image_to_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class ClipboardMonitor(QObject):
         self._last_image_hash: Optional[str] = None
         self._monitoring = False
         self._add_counter = 0  # 计数器，每 50 次 add 才清理
+        self._image_executor = ThreadPoolExecutor(max_workers=1)
 
         # 使用轮询定时器代替 dataChanged 信号（Windows 上更可靠）
         self._poll_timer = QTimer(self)
@@ -61,6 +63,7 @@ class ClipboardMonitor(QObject):
         if self._monitoring:
             self._monitoring = False
             self._poll_timer.stop()
+            self._image_executor.shutdown(wait=True)
             logger.info("剪贴板监控已停止")
 
     def _poll_clipboard(self):
@@ -150,63 +153,79 @@ class ClipboardMonitor(QObject):
 
         self._last_image_hash = fast_hash
 
-        # hash 变化了，才做完整 PNG 编码
-        from PySide6.QtCore import QBuffer, QIODevice
+        # 将 QImage 转为原始 RGBA 字节（主线程，快速无压缩）
+        width, height = image.width(), image.height()
+        image = image.convertToFormat(QImage.Format.Format_RGBA8888)
+        bytes_per_line = image.bytesPerLine()
+        expected_bpl = width * 4
 
-        qbuffer = QBuffer()
-        qbuffer.open(QIODevice.WriteOnly)
-        if not image.save(qbuffer, "PNG"):
-            logger.warning("无法将图片保存为PNG格式")
-            return
-        image_data = bytes(qbuffer.data())
+        if bytes_per_line == expected_bpl:
+            raw_bytes = bytes(image.constBits())
+        else:
+            # 有行填充，逐行复制去除 padding
+            ptr = image.constBits()
+            raw_bytes = b"".join(
+                bytes(ptr[row * bytes_per_line: row * bytes_per_line + expected_bpl])
+                for row in range(height)
+            )
 
-        if not image_data:
-            return
-
-        # 检查图片大小限制
-        max_image_size_kb = Config.get_max_image_size_kb()
-        if max_image_size_kb > 0 and len(image_data) > max_image_size_kb * 1024:
-            logger.info(f"图片超过最大大小限制 ({len(image_data) // 1024}KB > {max_image_size_kb}KB)，跳过")
-            return
-
-        content_hash = compute_content_hash(image_data)
-        logger.info(f"检测到新图片: {image.width()}x{image.height()}")
-
-        # 检查是否已存在
-        existing = self.repository.get_by_hash(content_hash)
-        if existing:
-            return
-
-        # 创建缩略图
-        try:
-            thumbnail = create_thumbnail(image_data, Config.THUMBNAIL_SIZE)
-        except Exception as e:
-            logger.warning(f"创建缩略图失败: {e}")
-            thumbnail = None
-
-        item = ClipboardItem(
-            content_type=ContentType.IMAGE,
-            image_data=image_data,
-            image_thumbnail=thumbnail,
-            content_hash=content_hash,
-            preview=f"[图片 {image.width()}x{image.height()}]",
-            device_id=Config.get_device_id(),
-            device_name=Config.get_device_name(),
-            created_at=int(time.time() * 1000),
+        logger.info(f"检测到新图片: {width}x{height}，提交后台处理")
+        # 提交到后台线程执行 PNG 编码、缩略图、数据库写入
+        self._image_executor.submit(
+            self._process_image_background, raw_bytes, width, height
         )
 
+    def _process_image_background(self, raw_bytes: bytes, width: int, height: int):
+        """后台线程：PNG 编码、缩略图生成、数据库写入"""
         try:
+            pil_img = Image.frombytes("RGBA", (width, height), raw_bytes)
+            image_data = image_to_bytes(pil_img, format="PNG")
+
+            if not image_data:
+                return
+
+            # 检查图片大小限制
+            max_image_size_kb = Config.get_max_image_size_kb()
+            if max_image_size_kb > 0 and len(image_data) > max_image_size_kb * 1024:
+                logger.info(f"图片超过最大大小限制 ({len(image_data) // 1024}KB > {max_image_size_kb}KB)，跳过")
+                return
+
+            content_hash = compute_content_hash(image_data)
+
+            # 检查是否已存在
+            existing = self.repository.get_by_hash(content_hash)
+            if existing:
+                return
+
+            # 创建缩略图
+            try:
+                thumbnail = create_thumbnail(image_data, Config.THUMBNAIL_SIZE)
+            except Exception as e:
+                logger.warning(f"创建缩略图失败: {e}")
+                thumbnail = None
+
+            item = ClipboardItem(
+                content_type=ContentType.IMAGE,
+                image_data=image_data,
+                image_thumbnail=thumbnail,
+                content_hash=content_hash,
+                preview=f"[图片 {width}x{height}]",
+                device_id=Config.get_device_id(),
+                device_name=Config.get_device_name(),
+                created_at=int(time.time() * 1000),
+            )
+
             item_id = self.repository.add_item(item)
             item.id = item_id
 
             self._maybe_cleanup()
 
-            logger.info(f"保存图片成功: {image.width()}x{image.height()}")
-            self.item_added.emit(item)
+            logger.info(f"保存图片成功: {width}x{height}")
+            # 回到主线程发送信号
+            QTimer.singleShot(0, lambda: self.item_added.emit(item))
 
         except Exception as e:
-            logger.error(f"保存图片失败: {e}")
-            self.error_occurred.emit(f"保存失败: {e}")
+            logger.error(f"后台处理图片失败: {e}")
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
         if item.is_text and item.text_content:

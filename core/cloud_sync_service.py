@@ -22,6 +22,7 @@ class _SyncWorker(QObject):
     push_done = Signal(int)         # uploaded_count
     push_error = Signal(str, int, list)  # (message, status_code, failed_batch)
     quota_warning = Signal(int, int)
+    device_registered = Signal()    # 设备注册成功
 
     def __init__(self, cloud_api: CloudAPIClient, repository: ClipboardRepository):
         super().__init__()
@@ -124,6 +125,21 @@ class _SyncWorker(QObject):
         except Exception as e:
             logger.error(f"云端推送异常: {e}")
             self.push_error.emit(str(e), 0, batch)
+
+    @Slot()
+    def _do_register_device(self):
+        """在工作线程中注册设备"""
+        try:
+            success = self.cloud_api.register_device(
+                device_id=self._device_id,
+                device_name=self._device_name,
+                platform=platform.system(),
+            )
+            if success:
+                logger.info(f"设备已注册: {self._device_name}")
+                self.device_registered.emit()
+        except CloudAPIError as e:
+            logger.warning(f"设备注册失败: {e}")
 
     @Slot()
     def do_check_quota(self):
@@ -233,6 +249,7 @@ class CloudSyncService(QObject):
         self._worker.push_done.connect(self._on_push_done)
         self._worker.push_error.connect(self._on_push_error)
         self._worker.quota_warning.connect(self.quota_warning)
+        self._worker.device_registered.connect(lambda: setattr(self, '_device_registered', True))
         self._worker_thread.start()
 
         # 拉取定时器
@@ -296,20 +313,12 @@ class CloudSyncService(QObject):
     # ========== 设备注册 ==========
 
     def _register_device(self):
-        """向云端注册当前设备"""
+        """向云端注册当前设备（在工作线程执行，避免阻塞启动）"""
         if self._device_registered:
             return
-        try:
-            success = self.cloud_api.register_device(
-                device_id=self._device_id,
-                device_name=self._device_name,
-                platform=platform.system(),
-            )
-            if success:
-                self._device_registered = True
-                logger.info(f"设备已注册: {self._device_name}")
-        except CloudAPIError as e:
-            logger.warning(f"设备注册失败: {e}")
+        QMetaObject.invokeMethod(
+            self._worker, "_do_register_device", Qt.QueuedConnection,
+        )
 
     # ========== 拉取逻辑 ==========
 

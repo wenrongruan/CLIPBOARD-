@@ -143,6 +143,62 @@ class PluginBase(ABC):
         """获取插件配置（由框架自动从 config.json 加载）"""
         return getattr(self, '_config', {})
 
+    def get_cloud_client(self):
+        """获取已认证的云端 API 客户端（由框架注入，单例复用）
+
+        返回 CloudAPIClient 实例，如果未登录则返回 None。
+        插件不需要自行管理 token，框架会自动处理刷新。
+        """
+        return getattr(self, '_cloud_client', None)
+
+    def check_credits(self, required: float) -> bool:
+        """检查用户积分是否足够
+
+        参数:
+            required: 所需积分数量
+        返回:
+            True 表示余额充足，False 表示不足或未登录
+        """
+        client = self.get_cloud_client()
+        if not client:
+            return False
+        return client.check_credits(required)
+
+    def deduct_credits(self, amount: float, reason: str, task_uuid: str = "") -> dict:
+        """扣除用户积分
+
+        参数:
+            amount: 扣除数量
+            reason: 扣除原因（如 "AI 生图"）
+            task_uuid: 关联的任务 UUID（可选）
+        返回:
+            {"success": bool, "remaining": float, "transaction_id": str}
+        异常:
+            RuntimeError: 未登录时调用
+        """
+        client = self.get_cloud_client()
+        if not client:
+            raise RuntimeError("未登录，无法扣除积分")
+        return client.deduct_credits(
+            amount=amount,
+            reason=reason,
+            plugin_id=self.get_id(),
+            task_uuid=task_uuid,
+        )
+
+    def get_balance(self) -> dict:
+        """获取当前积分余额
+
+        返回:
+            {"balance": float, "frozen": float}
+        异常:
+            RuntimeError: 未登录时调用
+        """
+        client = self.get_cloud_client()
+        if not client:
+            raise RuntimeError("未登录，无法查询余额")
+        return client.get_balance()
+
 
 class PluginTestHelper:
     """插件开发者测试工具"""
