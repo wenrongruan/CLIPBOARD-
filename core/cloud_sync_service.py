@@ -365,6 +365,9 @@ class CloudSyncService(QObject):
         self._pulling = False
         if status_code == 401:
             logger.warning("云端认证失败，请重新登录")
+            # 停止轮询，避免反复刷 401 日志
+            self._pull_timer.stop()
+            self._push_timer.stop()
             self.sync_error.emit("云端认证失败，请在设置中重新登录")
         else:
             logger.error(f"云端拉取失败: {message}")

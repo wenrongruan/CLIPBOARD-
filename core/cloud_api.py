@@ -163,6 +163,13 @@ class CloudAPIClient:
                 return True
             else:
                 logger.warning(f"Token 刷新失败: {response.status_code}")
+                if response.status_code == 401:
+                    # refresh_token 也过期了，清除本地 token 使 UI 反映真实状态
+                    self._access_token = None
+                    self._refresh_token_str = None
+                    Config.set_cloud_access_token("")
+                    Config.set_cloud_refresh_token("")
+                    logger.info("Refresh token 已过期，已清除本地登录态")
                 return False
         except Exception as e:
             logger.warning(f"Token 刷新异常: {e}")
