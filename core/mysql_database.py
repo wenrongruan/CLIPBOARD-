@@ -6,6 +6,8 @@ import threading
 from typing import Optional, Callable, Any
 from contextlib import contextmanager
 
+from .base_database import AbstractDatabaseManager
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -16,7 +18,7 @@ except ImportError:
     logger.warning("pymysql 未安装，MySQL 功能不可用")
 
 
-class MySQLDatabaseManager:
+class MySQLDatabaseManager(AbstractDatabaseManager):
     """MySQL 数据库管理器"""
 
     SCHEMA_VERSION = 2

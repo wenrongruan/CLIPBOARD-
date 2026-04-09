@@ -16,8 +16,8 @@ class SyncService(QObject):
 
     # 自适应轮询参数
     _MIN_INTERVAL_MS = 1000   # 有新数据时重置到 1s
-    _MAX_INTERVAL_MS = 10000  # 无新数据时最大间隔 10s
-    _INTERVAL_STEP_MS = 1000  # 每次无数据增加 1s
+    _MAX_INTERVAL_MS = 30000  # 无新数据时最大间隔 30s
+    _INTERVAL_STEP_MS = 2000  # 每次无数据增加 2s
 
     def __init__(self, repository: ClipboardRepository, parent=None):
         super().__init__(parent)

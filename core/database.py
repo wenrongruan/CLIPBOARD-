@@ -7,10 +7,12 @@ from pathlib import Path
 from typing import Optional, Callable, Any
 from contextlib import contextmanager
 
+from .base_database import AbstractDatabaseManager
+
 logger = logging.getLogger(__name__)
 
 
-class DatabaseManager:
+class DatabaseManager(AbstractDatabaseManager):
     SCHEMA_VERSION = 2
 
     CREATE_TABLE_SQL = """

@@ -38,29 +38,35 @@ class _SyncWorker(QObject):
             data = self.cloud_api.sync(since_id=last_sync_id, device_id=self._device_id)
             items_data = data.get("items", [])
 
-            new_items = []
-            cloud_id_pairs = []
-            max_server_id = last_sync_id
-
+            # 第一遍：解析所有条目，收集 content_hash
+            parsed_items = []
             for item_data in items_data:
                 server_id = item_data.get("id", 0)
                 item = self._server_item_to_local(item_data)
                 if item is None:
-                    # 解析失败：不更新 sync_id，防止数据丢失
                     logger.warning(f"跳过无法解析的服务端条目 id={server_id}")
                     continue
+                parsed_items.append((server_id, item))
 
-                existing = self.repository.get_by_hash(item.content_hash)
+            # 批量查询已存在的 hash（替代逐条 get_by_hash，减少 N 次查询为 1 次）
+            all_hashes = [item.content_hash for _, item in parsed_items]
+            existing_map = self.repository.get_existing_hashes(all_hashes)
+
+            new_items = []
+            cloud_id_pairs = []
+            max_server_id = last_sync_id
+
+            for server_id, item in parsed_items:
+                existing = existing_map.get(item.content_hash)
                 if existing is None:
                     item_id = self.repository.add_item(item)
                     item.id = item_id
                     new_items.append(item)
                     if server_id and item_id:
                         cloud_id_pairs.append((item_id, server_id))
-                elif existing and not existing.is_cloud_synced and server_id:
+                elif not existing.is_cloud_synced and server_id:
                     cloud_id_pairs.append((existing.id, server_id))
 
-                # 只在成功解析后才更新 max_server_id
                 if server_id > max_server_id:
                     max_server_id = server_id
 
@@ -223,8 +229,8 @@ class CloudSyncService(QObject):
 
     # 自适应轮询参数（与 SyncService 一致）
     _MIN_INTERVAL_MS = 1000
-    _MAX_INTERVAL_MS = 10000
-    _INTERVAL_STEP_MS = 1000
+    _MAX_INTERVAL_MS = 30000
+    _INTERVAL_STEP_MS = 2000
 
     # 上传批次大小
     _UPLOAD_BATCH_SIZE = 20

@@ -2,6 +2,7 @@ import logging
 import time
 from typing import List, Optional, Tuple, Union, Any
 
+from .base_database import AbstractDatabaseManager
 from .database import DatabaseManager
 from .models import ClipboardItem, ContentType
 
@@ -30,7 +31,7 @@ class ClipboardRepository:
         "created_at, is_starred, cloud_id"
     )
 
-    def __init__(self, db_manager: Union[DatabaseManager, "MySQLDatabaseManager"]):
+    def __init__(self, db_manager: AbstractDatabaseManager):
         self.db = db_manager
         # 检测数据库类型以选择正确的占位符
         self._is_mysql = MYSQL_AVAILABLE and isinstance(db_manager, MySQLDatabaseManager)
@@ -118,6 +119,31 @@ class ClipboardRepository:
             if row:
                 return ClipboardItem.from_db_row(row)
             return None
+
+        return self.db.execute_read(operation)
+
+    def get_existing_hashes(self, hashes: list) -> dict:
+        """批量查询已存在的 content_hash，返回 {hash: ClipboardItem}"""
+        if not hashes:
+            return {}
+
+        def operation(conn) -> dict:
+            result = {}
+            # SQLite 参数上限 999，分批查询
+            batch_size = 500
+            for i in range(0, len(hashes), batch_size):
+                batch = hashes[i:i + batch_size]
+                placeholders = ",".join("?" * len(batch))
+                sql = f"""
+                    SELECT {self._SELECT_FIELDS_NO_IMAGE}
+                    FROM clipboard_items
+                    WHERE content_hash IN ({placeholders})
+                """
+                rows = self._fetchall(conn, sql, tuple(batch))
+                for row in rows:
+                    item = ClipboardItem.from_db_row(row)
+                    result[item.content_hash] = item
+            return result
 
         return self.db.execute_read(operation)
 
