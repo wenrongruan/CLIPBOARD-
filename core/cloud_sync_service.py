@@ -5,7 +5,7 @@ import platform
 from collections import deque
 from typing import Optional
 
-from PySide6.QtCore import QObject, Signal, QTimer, QThread, Slot, QMetaObject, Qt, Q_ARG
+from PySide6.QtCore import QObject, Signal, QTimer, QThread, Slot, QMetaObject, Qt
 
 from .models import ClipboardItem, ContentType
 from .repository import ClipboardRepository
@@ -217,6 +217,10 @@ class CloudSyncService(QObject):
     upload_completed = Signal(int)       # 上传成功的 item 数量
     quota_warning = Signal(int, int)     # (当前已用, 最大额度)
 
+    # 内部信号：跨线程调度 worker 方法（避免 Q_ARG 不支持 list 类型）
+    _trigger_push = Signal(list)
+    _trigger_pull = Signal(int)
+
     # 自适应轮询参数（与 SyncService 一致）
     _MIN_INTERVAL_MS = 1000
     _MAX_INTERVAL_MS = 10000
@@ -250,6 +254,9 @@ class CloudSyncService(QObject):
         self._worker.push_error.connect(self._on_push_error)
         self._worker.quota_warning.connect(self.quota_warning)
         self._worker.device_registered.connect(lambda: setattr(self, '_device_registered', True))
+        # 用信号槽替代 QMetaObject.invokeMethod + Q_ARG 传递 list
+        self._trigger_push.connect(self._worker.do_push, Qt.QueuedConnection)
+        self._trigger_pull.connect(self._worker.do_pull, Qt.QueuedConnection)
         self._worker_thread.start()
 
         # 拉取定时器
@@ -327,10 +334,7 @@ class CloudSyncService(QObject):
         if not self._running or self._pulling:
             return
         self._pulling = True
-        QMetaObject.invokeMethod(
-            self._worker, "do_pull", Qt.QueuedConnection,
-            Q_ARG(int, self._last_sync_id),
-        )
+        self._trigger_pull.emit(self._last_sync_id)
 
     @Slot(list, int)
     def _on_pull_done(self, new_items: list, max_server_id: int):
@@ -389,10 +393,7 @@ class CloudSyncService(QObject):
         while self._pending_upload_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
             batch.append(self._pending_upload_queue.popleft())
 
-        QMetaObject.invokeMethod(
-            self._worker, "do_push", Qt.QueuedConnection,
-            Q_ARG(list, batch),
-        )
+        self._trigger_push.emit(batch)
 
     @Slot(int)
     def _on_push_done(self, uploaded_count: int):

@@ -4,19 +4,22 @@ AI 图片生成插件
 """
 
 import base64
+import logging
 import os
 import subprocess
 import sys
+import tempfile
 import uuid
+
+logger = logging.getLogger(__name__)
 
 from core.plugin_api import PluginBase, PluginAction, PluginResult, PluginResultAction
 from core.models import ClipboardItem, ContentType
 
 # chat_image_gen 项目默认路径
-DEFAULT_CHAT_IMAGE_GEN_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "..", "chat_image_gen"
-)
+DEFAULT_CHAT_IMAGE_GEN_PATH = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "chat_image_gen"
+))
 
 
 class AIImageGenPlugin(PluginBase):
@@ -139,7 +142,7 @@ class AIImageGenPlugin(PluginBase):
         )
 
     def _open_studio(self, item):
-        """启动完整的 chat_image_gen 窗口（子进程方式）。"""
+        """启动完整的 chat_image_gen 窗口（子进程方式），传递剪贴板内容。"""
         if not self.get_cloud_client():
             return PluginResult(success=False, error_message="未登录 CLIPBOARD- 账户，请在设置中登录")
 
@@ -164,14 +167,26 @@ class AIImageGenPlugin(PluginBase):
             "--cloud-url", Config.get_cloud_api_url(),
         ]
 
+        # 传递剪贴板内容到工作台
+        if item.content_type == ContentType.IMAGE and item.image_data:
+            # 图片写入临时文件，子进程启动后加载为参考图
+            try:
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".png", prefix="clipboard_studio_", delete=False
+                )
+                tmp.write(item.image_data)
+                tmp.close()
+                cmd.extend(["--init-image", tmp.name])
+            except Exception:
+                logger.warning("临时图片文件写入失败", exc_info=True)
+        elif item.content_type == ContentType.TEXT and item.text_content:
+            cmd.extend(["--init-prompt", item.text_content])
+
         subprocess.Popen(cmd, env=env, cwd=gen_path)
 
-        # 使用 SAVE 而非 COPY，避免污染用户剪贴板
         return PluginResult(
             success=True,
-            content_type=ContentType.TEXT,
-            text_content="已打开 AI 生图工作台",
-            action=PluginResultAction.SAVE,
+            action=PluginResultAction.NONE,
         )
 
     def _get_gen_client(self):

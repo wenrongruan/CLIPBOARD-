@@ -46,6 +46,23 @@ from .styles import MAIN_STYLE
 logger = logging.getLogger(__name__)
 
 
+def _restore_cloud_api_from_config():
+    """从已保存的 token 恢复 CloudAPIClient，失败返回 None"""
+    if not Config.get_cloud_access_token():
+        return None
+    try:
+        from core.cloud_api import CloudAPIClient
+        client = CloudAPIClient(Config.get_cloud_api_url())
+        client.set_tokens(
+            Config.get_cloud_access_token(),
+            Config.get_cloud_refresh_token(),
+        )
+        return client
+    except Exception:
+        logger.warning("从已保存 token 恢复 CloudAPIClient 失败", exc_info=True)
+        return None
+
+
 class PluginConfigDialog(QDialog):
     """根据 config_schema 自动生成的插件配置对话框"""
 
@@ -785,15 +802,13 @@ class SettingsDialog(QDialog):
         cloud_layout.addWidget(self._cloud_content_container, 1)
 
         # 如果没有传入 cloud_api，但配置中有已保存的 token，则创建客户端
-        if not self._cloud_api and Config.get_cloud_access_token():
-            from core.cloud_api import CloudAPIClient
-            self._cloud_api = CloudAPIClient(Config.get_cloud_api_url())
-            self._cloud_api.set_tokens(
-                Config.get_cloud_access_token(),
-                Config.get_cloud_refresh_token(),
-            )
+        if not self._cloud_api:
+            self._cloud_api = _restore_cloud_api_from_config()
 
         if self._cloud_api and self._cloud_api.is_authenticated:
+            # 确保已认证的 cloud_api 注入到 PluginManager
+            if self._plugin_manager:
+                self._plugin_manager.set_cloud_client(self._cloud_api)
             self._show_cloud_logged_in()
         else:
             self._show_cloud_login_form()
@@ -869,6 +884,10 @@ class SettingsDialog(QDialog):
 
         self.accept()
 
+    def get_cloud_api(self):
+        """返回当前的云端 API 客户端（可能在对话框中登录后更新）"""
+        return self._cloud_api
+
     def get_settings(self) -> dict:
         edge_map = {0: "right", 1: "left", 2: "top", 3: "bottom"}
         db_settings = self._current_db_settings()
@@ -915,6 +934,10 @@ class MainWindow(EdgeHiddenWindow):
         self.sync_service = sync_service
         self.plugin_manager = plugin_manager
         self.cloud_api = cloud_api
+
+        # 如果没有传入 cloud_api，但有已保存的 token，则创建客户端
+        if not self.cloud_api:
+            self.cloud_api = _restore_cloud_api_from_config()
 
         # 将 cloud_api 注入到 PluginManager，使插件可以复用登录态
         if self.plugin_manager and self.cloud_api:
@@ -1254,7 +1277,14 @@ class MainWindow(EdgeHiddenWindow):
 
     def _show_settings(self):
         dialog = SettingsDialog(self, plugin_manager=self.plugin_manager, cloud_api=self.cloud_api)
-        if dialog.exec() == QDialog.Accepted:
+        result = dialog.exec()
+        # 无论确认还是取消，都同步登录状态（用户可能在对话框中登录了云端）
+        dialog_cloud_api = dialog.get_cloud_api()
+        if dialog_cloud_api and dialog_cloud_api.is_authenticated:
+            self.cloud_api = dialog_cloud_api
+            if self.plugin_manager:
+                self.plugin_manager.set_cloud_client(self.cloud_api)
+        if result == QDialog.Accepted:
             settings = dialog.get_settings()
             need_restart = False
 
@@ -1506,6 +1536,10 @@ class MainWindow(EdgeHiddenWindow):
             return
 
         # 根据 action 处理结果
+        if result.action == PluginResultAction.NONE:
+            self.copy_feedback_label.hide()
+            return
+
         if result.action == PluginResultAction.COPY:
             # 复制到剪贴板
             temp_item = ClipboardItem(

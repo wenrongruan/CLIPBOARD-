@@ -20,6 +20,7 @@ from .models import ClipboardItem, ContentType
 
 class PluginResultAction(Enum):
     """插件执行结果的处理方式"""
+    NONE = "none"        # 不做任何处理（如仅打开外部程序）
     COPY = "copy"        # 将结果复制到系统剪贴板
     SAVE = "save"        # 将结果保存为新的剪贴板条目
     REPLACE = "replace"  # 替换原有条目的内容
@@ -57,7 +58,7 @@ class PluginResult:
         # cancelled 隐含 success=False
         if self.cancelled:
             self.success = False
-        if self.success and self.text_content is None and self.image_data is None:
+        if self.success and self.action != PluginResultAction.NONE and self.text_content is None and self.image_data is None:
             raise ValueError("PluginResult: success=True requires text_content or image_data")
 
 
