@@ -768,15 +768,25 @@ class SettingsDialog(QDialog):
             self.profile_combo.removeItem(self.profile_combo.currentIndex())
 
     def _current_db_settings(self) -> dict:
-        """从 UI 中读取当前数据库配置"""
+        """从 UI 中读取当前数据库配置（密码不写入 profile，走安全存储）"""
         db_type = "sqlite" if self.db_type_group.checkedId() == 0 else "mysql"
+        # 密码通过 Config.set_mysql_config 存入 keyring，不写入 settings.json
+        password = self.mysql_password_edit.text()
+        if password:
+            Config.set_mysql_config(
+                host=self.mysql_host_edit.text() or "localhost",
+                port=self.mysql_port_spin.value(),
+                user=self.mysql_user_edit.text(),
+                password=password,
+                database=self.mysql_database_edit.text() or "clipboard",
+            )
         return {
             "db_type": db_type,
             "database_path": self.db_path_edit.text(),
             "mysql_host": self.mysql_host_edit.text() or "localhost",
             "mysql_port": self.mysql_port_spin.value(),
             "mysql_user": self.mysql_user_edit.text(),
-            "mysql_password": self.mysql_password_edit.text(),
+            "mysql_password": "",
             "mysql_database": self.mysql_database_edit.text() or "clipboard",
         }
 

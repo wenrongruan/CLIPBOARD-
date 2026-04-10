@@ -25,9 +25,15 @@ class CloudAPIClient:
     # 允许下载图片的域名白名单（presigned URL 可能来自 CDN/S3）
     _ALLOWED_DOWNLOAD_DOMAINS = {
         "www.jlike.com",
+        "api.jlike.com",
         "s3.amazonaws.com",
         "s3.us-east-1.amazonaws.com",
         "storage.googleapis.com",
+        "aliyuncs.com",
+        "oss-cn-hangzhou.aliyuncs.com",
+        "oss-cn-shanghai.aliyuncs.com",
+        "oss-cn-beijing.aliyuncs.com",
+        "oss-cn-shenzhen.aliyuncs.com",
     }
 
     def __init__(self, base_url: str):
@@ -42,6 +48,10 @@ class CloudAPIClient:
         """从外部设置 tokens（如从配置文件加载）"""
         self._access_token = access_token if access_token else None
         self._refresh_token_str = refresh_token if refresh_token else None
+
+    def get_tokens(self) -> tuple:
+        """返回 (access_token, refresh_token)"""
+        return self._access_token or "", self._refresh_token_str or ""
 
     @property
     def is_authenticated(self) -> bool:
@@ -100,7 +110,10 @@ class CloudAPIClient:
                 error_data = response.json()
                 message = error_data.get("error", error_data.get("detail", f"服务器错误 ({response.status_code})"))
             except Exception:
+                body_preview = response.text[:200] if response.text else ""
                 message = f"服务器错误 ({response.status_code})"
+                if body_preview:
+                    logger.debug(f"错误响应体: {body_preview}")
             raise CloudAPIError(message, response.status_code)
 
         return response
@@ -291,7 +304,7 @@ class CloudAPIClient:
         """获取当前用户的积分余额
         返回: {"balance": float, "frozen": float}
         """
-        response = self._request("GET", "/api/v1/credits/balance")
+        response = self._request("GET", "/api/v1/credits")
         return response.json()
 
     def deduct_credits(self, amount: float, reason: str, plugin_id: str = "", task_uuid: str = "") -> dict:

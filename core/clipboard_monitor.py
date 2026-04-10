@@ -226,6 +226,7 @@ class ClipboardMonitor(QObject):
 
         except Exception as e:
             logger.error(f"后台处理图片失败: {e}")
+            QTimer.singleShot(0, lambda: self.error_occurred.emit(f"图片保存失败: {e}"))
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
         if item.is_text and item.text_content:

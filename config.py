@@ -78,7 +78,9 @@ class Config:
                         try:
                             with open(config_file, "r", encoding="utf-8") as f:
                                 cls._settings = json.load(f)
-                        except (json.JSONDecodeError, IOError):
+                        except (json.JSONDecodeError, IOError) as e:
+                            import logging
+                            logging.getLogger(__name__).error(f"配置文件损坏或无法读取 ({config_file}): {e}")
                             cls._settings = {}
                     else:
                         cls._settings = {}
@@ -230,7 +232,7 @@ class Config:
     # ========== 云端配置 ==========
 
     # 允许的 API 域名白名单
-    _ALLOWED_API_DOMAINS = {"www.jlike.com", "localhost", "127.0.0.1"}
+    _ALLOWED_API_DOMAINS = {"www.jlike.com", "api.jlike.com", "localhost", "127.0.0.1"}
 
     @classmethod
     def get_cloud_api_url(cls) -> str:

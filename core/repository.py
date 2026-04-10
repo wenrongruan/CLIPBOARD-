@@ -49,7 +49,8 @@ class ClipboardRepository:
                 )
                 return cursor.fetchone() is not None
             return self.db.execute_read(operation)
-        except Exception:
+        except (OSError, Exception) as e:
+            logger.debug(f"FTS 检测失败: {e}")
             return False
 
     def _execute_write(self, conn, sql: str, params: tuple = ()) -> tuple:

@@ -368,10 +368,21 @@ class CloudSyncService(QObject):
             # 停止轮询，避免反复刷 401 日志
             self._pull_timer.stop()
             self._push_timer.stop()
+            self._auth_failed = True
             self.sync_error.emit("云端认证失败，请在设置中重新登录")
         else:
             logger.error(f"云端拉取失败: {message}")
             self.sync_error.emit(message)
+
+    def restart_after_reauth(self):
+        """重新登录后恢复同步定时器"""
+        if self._running and getattr(self, '_auth_failed', False):
+            self._auth_failed = False
+            self._current_interval = self._MIN_INTERVAL_MS
+            self._pull_timer.setInterval(self._current_interval)
+            self._pull_timer.start()
+            self._push_timer.start()
+            logger.info("认证恢复，同步定时器已重启")
 
     def _increase_interval(self):
         """无新数据时，逐步增加轮询间隔"""
