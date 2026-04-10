@@ -1,6 +1,8 @@
 """云�� API 客户端，封装所有与云端服务器的 HTTP 通信"""
 
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -59,11 +61,29 @@ class CloudAPIClient:
         return bool(self._access_token)
 
     def _save_tokens(self, access_token: str, refresh_token: str):
-        """持久化 tokens 到配置"""
+        """持久化 tokens 到配置和 auth.json"""
         self._access_token = access_token
         self._refresh_token_str = refresh_token
         Config.set_cloud_access_token(access_token)
         Config.set_cloud_refresh_token(refresh_token)
+        self._update_auth_json(access_token, refresh_token)
+
+    def _update_auth_json(self, access_token: str, refresh_token: str):
+        """同步更新 ~/.shared_clipboard/auth.json，供 chat_image_gen 等外部工具复用登录态。"""
+        try:
+            auth_dir = Path.home() / ".shared_clipboard"
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            auth_file = auth_dir / "auth.json"
+            data = {
+                "api_base_url": self._base_url,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+            }
+            auth_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            logger.warning("更新 auth.json 失败", exc_info=True)
 
     # ========== 统一请求方法 ==========
 
@@ -182,6 +202,7 @@ class CloudAPIClient:
                     self._refresh_token_str = None
                     Config.set_cloud_access_token("")
                     Config.set_cloud_refresh_token("")
+                    self._update_auth_json("", "")
                     logger.info("Refresh token 已过期，已清除本地登录态")
                 return False
         except Exception as e:
@@ -200,6 +221,7 @@ class CloudAPIClient:
         Config.set_cloud_access_token("")
         Config.set_cloud_refresh_token("")
         Config.set_cloud_user_email("")
+        self._update_auth_json("", "")
         logger.info("已退出云端登录")
 
     # ========== 剪贴板操作 ==========
@@ -328,6 +350,31 @@ class CloudAPIClient:
             return available >= required
         except CloudAPIError:
             return False
+
+    # ========== AI 生图接口 ==========
+
+    def ai_generate(self, provider: str, model: str, prompt: str, task_uuid: str,
+                    size: str = "2K", aspect_ratio: str = "1:1", n: int = 1,
+                    **extra) -> dict:
+        """提交 AI 生图任务。Gemini 同步返回结果，万相返回 task_uuid 待轮询。"""
+        payload = {
+            "provider": provider, "model": model, "prompt": prompt,
+            "task_uuid": task_uuid, "images": [], "size": size,
+            "aspect_ratio": aspect_ratio, "n": n,
+        }
+        payload.update(extra)
+        response = self._request("POST", "/api/v1/ai/generate", json=payload)
+        return response.json()
+
+    def ai_poll_task(self, task_uuid: str) -> dict:
+        """查询 AI 生图任务状态（万相异步轮询用）。"""
+        response = self._request("GET", f"/api/v1/ai/task/{task_uuid}")
+        return response.json()
+
+    def ai_cancel_task(self, task_uuid: str) -> dict:
+        """取消 AI 生图任务。"""
+        response = self._request("POST", f"/api/v1/ai/task/{task_uuid}/cancel")
+        return response.json()
 
     # ========== 设备接口 ==========
 

@@ -600,19 +600,6 @@ class SettingsDialog(QDialog):
             status_label.setStyleSheet("color: #f87171; font-size: 11px;")
             info_layout.addWidget(status_label)
 
-        # 权限标签
-        perms = info.get("permissions", [])
-        perm_map = {
-            "network": t("plugin_perm_network"),
-            "file_read": t("plugin_perm_file_read"),
-            "file_write": t("plugin_perm_file_write"),
-        }
-        sensitive = [perm_map[p] for p in perms if p in perm_map]
-        if sensitive:
-            perm_label = QLabel("  ".join(f"⚠ {s}" for s in sensitive))
-            perm_label.setObjectName("permissionTag")
-            info_layout.addWidget(perm_label)
-
         row_layout.addLayout(info_layout, 1)
 
         # 设置按钮（仅有 config_schema 的插件）
@@ -859,7 +846,6 @@ class SettingsDialog(QDialog):
         # 将 cloud_api 注入到 PluginManager，使插件可以使用认证和扣点功能
         if self._plugin_manager and self._cloud_api:
             self._plugin_manager.set_cloud_client(self._cloud_api)
-        self._save_clipboard_auth_file()
 
     def _on_accept(self):
         """确认保存设置前进行验证"""
@@ -896,25 +882,6 @@ class SettingsDialog(QDialog):
                 return
 
         self.accept()
-
-    def _save_clipboard_auth_file(self):
-        """将当前 token 写入 ~/.shared_clipboard/auth.json，供 chat_image_gen 独立启动时复用登录态。"""
-        if not self._cloud_api or not self._cloud_api.is_authenticated:
-            return
-        try:
-            auth_dir = Path.home() / ".shared_clipboard"
-            auth_dir.mkdir(parents=True, exist_ok=True)
-            access_token, refresh_token = self._cloud_api.get_tokens()
-            data = {
-                "api_base_url": Config.get_cloud_api_url(),
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-            }
-            (auth_dir / "auth.json").write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            logger.warning("保存 auth.json 失败", exc_info=True)
 
     def get_cloud_api(self):
         """返回当前的云端 API 客户端（可能在对话框中登录后更新）"""
@@ -1361,8 +1328,11 @@ class MainWindow(EdgeHiddenWindow):
                 db_changed = True
             elif new_db_type != Config.get_db_type():
                 db_changed = True
-            elif new_db_type == "sqlite" and settings["database_path"] != Config.get_database_path():
-                db_changed = True
+            elif new_db_type == "sqlite":
+                # 空字符串表示使用默认路径，归一化后再比较
+                new_path = settings["database_path"] or Config.get_database_path()
+                if new_path != Config.get_database_path():
+                    db_changed = True
             elif new_db_type == "mysql":
                 mysql_config = Config.get_mysql_config()
                 if (settings["mysql_host"] != mysql_config["host"] or

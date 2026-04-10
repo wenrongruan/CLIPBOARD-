@@ -3,7 +3,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
@@ -28,11 +28,13 @@ class SubscriptionWidget(QWidget):
     """订阅状态组件，显示当前套餐、用量和管理按钮"""
 
     logout_completed = QtSignal()  # 退出登录完成信号
+    _subscription_loaded = QtSignal(object)  # 后台线程加载完成信号
 
     def __init__(self, cloud_api: CloudAPIClient, parent=None):
         super().__init__(parent)
         self.cloud_api = cloud_api
         self._executor: ThreadPoolExecutor | None = None
+        self._subscription_loaded.connect(self._on_subscription_loaded)
         self._setup_ui()
         self._load_subscription()
 
@@ -175,7 +177,7 @@ class SubscriptionWidget(QWidget):
 
         future = self._executor.submit(self._fetch_subscription)
         future.add_done_callback(
-            lambda f: QTimer.singleShot(0, lambda: self._on_subscription_loaded(f))
+            lambda f: self._subscription_loaded.emit(f)
         )
 
     def _fetch_subscription(self) -> dict:
@@ -211,8 +213,8 @@ class SubscriptionWidget(QWidget):
             self.status_label.setText(status_map.get(status, status))
 
             # 用量 — 兼容扁平和嵌套格式
-            usage = sub.get("usage", {})
-            if isinstance(usage, dict):
+            usage = sub.get("usage")
+            if isinstance(usage, dict) and usage:
                 items_count = usage.get("items_count", 0)
                 devices_count = usage.get("devices_count", 0)
             else:
