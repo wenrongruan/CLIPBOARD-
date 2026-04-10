@@ -1,0 +1,9 @@
+{
+    "id": "smart_text",
+    "name": "智能文本",
+    "version": "1.0.0",
+    "description": "文本格式转换、编码解码、JSON处理等实用工具集",
+    "author": "SharedClipboard",
+    "entry_point": "plugin.py",
+    "min_app_version": "1.1.0"
+}
