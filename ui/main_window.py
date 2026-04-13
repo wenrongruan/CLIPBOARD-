@@ -917,6 +917,8 @@ class SettingsDialog(QDialog):
 
 class MainWindow(EdgeHiddenWindow):
     quit_requested = Signal()  # 退出信号
+    # 内部信号：worker 线程加载完整图片后回到主线程执行剪贴板写入
+    _image_load_done = Signal(object)
 
     def __init__(
         self,
@@ -1048,6 +1050,9 @@ class MainWindow(EdgeHiddenWindow):
         self._feedback_timer.timeout.connect(self.copy_feedback_label.hide)
 
     def _connect_signals(self):
+        # 跨线程：图片加载完成 → 主线程写入剪贴板
+        self._image_load_done.connect(self._handle_image_loaded)
+
         # 剪贴板监控信号
         self.clipboard_monitor.item_added.connect(self._on_item_added)
 
@@ -1153,21 +1158,35 @@ class MainWindow(EdgeHiddenWindow):
             self.copy_feedback_label.style().polish(self.copy_feedback_label)
             self.copy_feedback_label.show()
 
-            future = self._copy_executor.submit(self.repository.get_item_by_id, item.id)
+            item_id = item.id
+            repo = self.repository
+            signal = self._image_load_done
 
-            def _on_loaded(f):
+            def _load():
+                # worker 线程没有 Qt 事件循环，必须用信号切回主线程
                 try:
-                    full_item = f.result()
-                    success = self.clipboard_monitor.copy_to_clipboard(full_item) if full_item else False
+                    full = repo.get_item_by_id(item_id)
                 except Exception as e:
                     logger.error(f"加载图片失败: {e}")
-                    success = False
-                self._show_copy_feedback(success)
+                    full = None
+                signal.emit(full)
 
-            future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_loaded(f)))
+            self._copy_executor.submit(_load)
             return
 
         success = self.clipboard_monitor.copy_to_clipboard(item)
+        self._show_copy_feedback(success)
+
+    def _handle_image_loaded(self, full_item):
+        """主线程槽：图片加载完成后写入剪贴板"""
+        success = False
+        if full_item and getattr(full_item, "image_data", None):
+            try:
+                success = self.clipboard_monitor.copy_to_clipboard(full_item)
+            except Exception as e:
+                logger.error(f"写入剪贴板失败: {e}")
+        elif full_item:
+            logger.warning(f"图片 id={full_item.id} 无完整数据，可能云端尚未下载")
         self._show_copy_feedback(success)
 
     def _on_item_delete(self, item: ClipboardItem):
@@ -1335,10 +1354,13 @@ class MainWindow(EdgeHiddenWindow):
                     db_changed = True
             elif new_db_type == "mysql":
                 mysql_config = Config.get_mysql_config()
+                # 密码空表示"未在本次会话修改"（_current_db_settings 不回传密码），
+                # 仅当用户实际填入了新密码且与 keyring 中不同才算变更
+                pw_changed = bool(settings["mysql_password"]) and settings["mysql_password"] != mysql_config["password"]
                 if (settings["mysql_host"] != mysql_config["host"] or
                     settings["mysql_port"] != mysql_config["port"] or
                     settings["mysql_user"] != mysql_config["user"] or
-                    settings["mysql_password"] != mysql_config["password"] or
+                    pw_changed or
                     settings["mysql_database"] != mysql_config["database"]):
                     db_changed = True
 

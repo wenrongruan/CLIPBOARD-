@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -11,6 +12,9 @@ import httpx
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+# 连接 8s / 读取 15s / 写入 15s / 连接池 15s —— 避免默认 30s 导致登录卡太久
+_DEFAULT_TIMEOUT = httpx.Timeout(connect=8.0, read=15.0, write=15.0, pool=15.0)
 
 
 class CloudAPIError(Exception):
@@ -42,7 +46,7 @@ class CloudAPIClient:
         self._base_url = base_url.rstrip("/")
         self._access_token: Optional[str] = None
         self._refresh_token_str: Optional[str] = None
-        self._client = httpx.Client(base_url=self._base_url, timeout=30.0, verify=True)
+        self._client = httpx.Client(base_url=self._base_url, timeout=_DEFAULT_TIMEOUT, verify=True)
 
     # ========== Token 管理 ==========
 
@@ -64,9 +68,15 @@ class CloudAPIClient:
         """持久化 tokens 到配置和 auth.json"""
         self._access_token = access_token
         self._refresh_token_str = refresh_token
+        t0 = time.time()
         Config.set_cloud_access_token(access_token)
+        logger.warning(f"[Login] access_token 持久化耗时 {time.time()-t0:.2f}s")
+        t0 = time.time()
         Config.set_cloud_refresh_token(refresh_token)
+        logger.warning(f"[Login] refresh_token 持久化耗时 {time.time()-t0:.2f}s")
+        t0 = time.time()
         self._update_auth_json(access_token, refresh_token)
+        logger.warning(f"[Login] auth.json 写入耗时 {time.time()-t0:.2f}s")
 
     def _update_auth_json(self, access_token: str, refresh_token: str):
         """同步更新 ~/.shared_clipboard/auth.json，供 chat_image_gen 等外部工具复用登录态。"""

@@ -1,10 +1,11 @@
 """可复用的云端登录表单组件"""
 
 import re
+import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QFormLayout,
@@ -17,8 +18,11 @@ from core.cloud_api import CloudAPIClient, CloudAPIError
 
 logger = logging.getLogger(__name__)
 
-# 模块级单例线程池，避免每次登录创建新的 Executor
-_executor = ThreadPoolExecutor(max_workers=1)
+# 兜底超时：若 20 秒内 worker 线程没有发回结果，强制重置 UI 并提示
+_LOGIN_WATCHDOG_MS = 20_000
+
+# 模块级单例线程池，避免每次登录创建新的 Executor；max_workers=2 防止前一个任务卡死阻塞新任务
+_executor = ThreadPoolExecutor(max_workers=2)
 
 
 class CloudLoginWidget(QWidget):
@@ -26,12 +30,17 @@ class CloudLoginWidget(QWidget):
 
     login_succeeded = Signal(dict)   # 登录成功，携带 API 返回结果
     login_failed = Signal(str)       # 登录失败，携带错误消息
-    _login_done = Signal(object)     # 内部信号：后台线程 -> 主线程
+    # 内部信号：后台线程 -> 主线程，传 (result_dict_or_None, error_message_or_empty)
+    _login_done = Signal(object, str)
 
     def __init__(self, cloud_api: CloudAPIClient, parent=None):
         super().__init__(parent)
         self.cloud_api = cloud_api
         self._login_done.connect(self._handle_login_result)
+        self._current_request_id = 0
+        self._watchdog = QTimer(self)
+        self._watchdog.setSingleShot(True)
+        self._watchdog.timeout.connect(self._on_login_timeout)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -92,24 +101,48 @@ class CloudLoginWidget(QWidget):
         self.status_label.setText("")
 
         api = self.cloud_api
+        self._current_request_id += 1
+        request_id = self._current_request_id
+        signal = self._login_done
 
         def _login_task():
-            return api.login(email, password)
+            t0 = time.time()
+            logger.warning(f"[Login#{request_id}] 开始请求云端登录 ({email})")
+            try:
+                result = api.login(email, password)
+                logger.warning(f"[Login#{request_id}] 登录成功，耗时 {time.time()-t0:.2f}s")
+                signal.emit(result or {}, "")
+            except CloudAPIError as e:
+                logger.warning(f"[Login#{request_id}] 登录失败（API 错误）: {e}，耗时 {time.time()-t0:.2f}s")
+                signal.emit(None, str(e))
+            except Exception as e:
+                logger.warning(f"[Login#{request_id}] 登录失败（未知错误）: {e!r}，耗时 {time.time()-t0:.2f}s", exc_info=True)
+                signal.emit(None, f"连接失败: {e}")
 
-        future = _executor.submit(_login_task)
-        future.add_done_callback(lambda f: self._login_done.emit(f))
+        _executor.submit(_login_task)
+        self._watchdog.start(_LOGIN_WATCHDOG_MS)
 
-    def _handle_login_result(self, future):
+    def _on_login_timeout(self):
+        """watchdog：worker 线程超时未返回，强制重置 UI"""
+        logger.warning(f"[Login#{self._current_request_id}] 登录超时未返回，重置 UI")
+        # 作废当前 request，避免迟到的结果覆盖
+        self._current_request_id += 1
+        self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.status_label.setText("登录超时，请检查网络后重试")
+        self._set_loading(False)
+        self.login_failed.emit("登录超时")
+
+    def _handle_login_result(self, result, error_msg: str):
         """在主线程中处理登录结果"""
-        try:
-            result = future.result()
-            self.status_label.setStyleSheet("color: #4ade80; font-size: 12px;")
-            self.status_label.setText("登录成功！")
-            self.login_btn.setText("已登录")
-            self.login_succeeded.emit(result if result else {})
-        except Exception as e:
-            msg = str(e) if isinstance(e, CloudAPIError) else f"连接失败: {e}"
+        self._watchdog.stop()
+        if error_msg:
             self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
-            self.status_label.setText(msg)
+            self.status_label.setText(error_msg)
             self._set_loading(False)
-            self.login_failed.emit(msg)
+            self.login_failed.emit(error_msg)
+            return
+
+        self.status_label.setStyleSheet("color: #4ade80; font-size: 12px;")
+        self.status_label.setText("登录成功！")
+        self.login_btn.setText("已登录")
+        self.login_succeeded.emit(result if isinstance(result, dict) else {})
