@@ -1,20 +1,33 @@
+"""本地同步服务 — 轮询共享数据库,拉取其他设备写入的条目。
+
+状态机:
+- STOPPED:未启动。
+- UNINITIALIZED:已启动但游标未初始化(首次 get_latest_id 失败,下一轮重试)。
+- POLLING_FAST:有新数据,使用最短轮询间隔。
+- POLLING_SLOW:无新数据,轮询间隔已退避。
+
+`_state` 是唯一的生命周期标志;in-flight bool 在当前实现中不需要(所有工作
+都在主线程的 QTimer tick 内完成)。
+"""
+
 import logging
 from enum import Enum
-from typing import List
+from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, QTimer
 
 from .models import ClipboardItem
 from .repository import ClipboardRepository
-from config import Config
+from config import settings, update_settings, SYNC_INTERVAL_MS
 
 logger = logging.getLogger(__name__)
 
 
 class SyncState(Enum):
     STOPPED = "stopped"
-    POLLING_FAST = "polling_fast"  # 最短轮询间隔（有新数据）
-    POLLING_SLOW = "polling_slow"  # 已退避到较长间隔
+    UNINITIALIZED = "uninitialized"
+    POLLING_FAST = "polling_fast"
+    POLLING_SLOW = "polling_slow"
 
 
 class SyncService(QObject):
@@ -29,66 +42,70 @@ class SyncService(QObject):
     def __init__(self, repository: ClipboardRepository, parent=None):
         super().__init__(parent)
         self.repository = repository
-        self._last_sync_id = Config.get_last_sync_id()
-        self._device_id = Config.get_device_id()
-        self._running = False
+        s = settings()
+        self._last_sync_id = s.last_sync_id
+        self._device_id = s.device_id
+        self._state: SyncState = SyncState.STOPPED
         self._current_interval = self._MIN_INTERVAL_MS
-        self._initialized = False
 
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._check_for_updates)
 
     @property
     def state(self) -> SyncState:
-        if not self._running:
-            return SyncState.STOPPED
-        if self._current_interval == self._MIN_INTERVAL_MS:
-            return SyncState.POLLING_FAST
-        return SyncState.POLLING_SLOW
+        return self._state
 
-    def start(self, interval_ms: int = None):
+    def _transition(self, new_state: SyncState) -> None:
+        if new_state != self._state:
+            logger.debug(f"SyncService: {self._state.value} -> {new_state.value}")
+            self._state = new_state
+
+    def start(self, interval_ms: Optional[int] = None):
+        if self._state != SyncState.STOPPED:
+            logger.debug(f"SyncService.start 被忽略,当前状态: {self._state.value}")
+            return
         if interval_ms is None:
-            interval_ms = Config.SYNC_INTERVAL_MS
+            interval_ms = SYNC_INTERVAL_MS
 
-        if not self._running:
-            self._running = True
-            # 初始化时获取最新ID
-            try:
-                latest_id = self.repository.get_latest_id()
-                if latest_id > self._last_sync_id:
-                    self._last_sync_id = latest_id
-                    Config.set_last_sync_id(latest_id)
-                self._initialized = True
-            except Exception as e:
-                self._initialized = False
-                logger.warning(
-                    f"获取最新ID失败，同步服务将在下一轮重试初始化，避免重复推送历史条目: {e}"
-                )
+        # 启动时获取最新ID,把游标对齐到当前库尾,避免首轮把历史条目全当新数据
+        try:
+            latest_id = self.repository.get_latest_id()
+            if latest_id > self._last_sync_id:
+                self._last_sync_id = latest_id
+                update_settings(last_sync_id=latest_id)
+            self._transition(SyncState.POLLING_FAST)
+        except Exception as e:
+            self._transition(SyncState.UNINITIALIZED)
+            logger.warning(
+                f"获取最新ID失败,同步服务将在下一轮重试初始化,避免重复推送历史条目: {e}"
+            )
 
-            self._sync_timer.start(interval_ms)
-            logger.info(f"同步服务已启动，间隔 {interval_ms}ms")
+        self._current_interval = self._MIN_INTERVAL_MS
+        self._sync_timer.start(interval_ms)
+        logger.info(f"同步服务已启动,间隔 {interval_ms}ms")
 
     def stop(self):
-        if self._running:
-            self._running = False
-            self._sync_timer.stop()
-            logger.info("同步服务已停止")
+        if self._state == SyncState.STOPPED:
+            return
+        self._sync_timer.stop()
+        self._transition(SyncState.STOPPED)
+        logger.info("同步服务已停止")
 
     def _check_for_updates(self):
-        if not self._running:
+        if self._state == SyncState.STOPPED:
             return
 
-        # 启动时初始化失败的情况下，先尝试重新初始化游标，避免把全部历史条目视为新数据
-        if not self._initialized:
+        # 启动初始化失败的情况下,每轮重试一次,避免把全部历史条目视为新数据
+        if self._state == SyncState.UNINITIALIZED:
             try:
                 latest_id = self.repository.get_latest_id()
                 if latest_id > self._last_sync_id:
                     self._last_sync_id = latest_id
-                    Config.set_last_sync_id(latest_id)
-                self._initialized = True
+                    update_settings(last_sync_id=latest_id)
+                self._transition(SyncState.POLLING_FAST)
                 logger.info("同步服务延迟初始化成功")
             except Exception as e:
-                logger.warning(f"同步服务尚未就绪，跳过本轮同步: {e}")
+                logger.warning(f"同步服务尚未就绪,跳过本轮同步: {e}")
                 return
 
         try:
@@ -97,19 +114,17 @@ class SyncService(QObject):
             )
 
             if new_items:
-                # 更新同步ID
                 self._last_sync_id = max(item.id for item in new_items)
-                Config.set_last_sync_id(self._last_sync_id)
-
+                update_settings(last_sync_id=self._last_sync_id)
                 logger.debug(f"发现 {len(new_items)} 条来自其他设备的新记录")
                 self.new_items_available.emit(new_items)
 
-                # 有新数据，重置为最短间隔
+                # 有新数据,重置为最短间隔并进入 FAST 状态
                 if self._current_interval != self._MIN_INTERVAL_MS:
                     self._current_interval = self._MIN_INTERVAL_MS
                     self._sync_timer.setInterval(self._current_interval)
+                self._transition(SyncState.POLLING_FAST)
             else:
-                # 无新数据，逐步增加间隔
                 new_interval = min(
                     self._current_interval + self._INTERVAL_STEP_MS,
                     self._MAX_INTERVAL_MS,
@@ -117,21 +132,26 @@ class SyncService(QObject):
                 if new_interval != self._current_interval:
                     self._current_interval = new_interval
                     self._sync_timer.setInterval(self._current_interval)
+                # 一旦退避过就进入 SLOW 状态(直到有新数据才回 FAST)
+                if self._current_interval > self._MIN_INTERVAL_MS:
+                    self._transition(SyncState.POLLING_SLOW)
 
         except Exception as e:
             logger.error(f"同步检查失败: {e}")
             self.sync_error.emit(str(e))
 
     def force_sync(self):
+        if self._state == SyncState.STOPPED:
+            return
         self._check_for_updates()
 
     def advance_sync_id(self, new_id: int):
-        """将同步游标前进到指定 ID，避免已知条目被重复通知"""
+        """将同步游标前进到指定 ID,避免已知条目被重复通知"""
         if new_id > self._last_sync_id:
             self._last_sync_id = new_id
-            Config.set_last_sync_id(new_id)
+            update_settings(last_sync_id=new_id)
 
     def reset_sync_position(self):
         self._last_sync_id = 0
-        Config.set_last_sync_id(0)
+        update_settings(last_sync_id=0)
         logger.info("同步位置已重置")

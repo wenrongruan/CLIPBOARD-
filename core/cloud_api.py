@@ -11,7 +11,14 @@ from urllib.parse import urlparse
 
 import httpx
 
-from config import Config
+from config import (
+    settings,
+    update_settings,
+    get_cloud_access_token,
+    set_cloud_access_token,
+    get_cloud_refresh_token,
+    set_cloud_refresh_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +108,8 @@ class CloudAPIClient:
         self._access_token = access_token
         self._refresh_token_str = refresh_token
         t0 = time.time()
-        Config.set_cloud_access_token(access_token)
-        Config.set_cloud_refresh_token(refresh_token)
+        set_cloud_access_token(access_token)
+        set_cloud_refresh_token(refresh_token)
         self._update_auth_json(access_token, refresh_token)
         logger.debug(f"[Login] token 持久化总耗时 {time.time()-t0:.2f}s")
 
@@ -189,7 +196,7 @@ class CloudAPIClient:
         refresh = data.get("refresh_token", "")
         if access and refresh:
             self._save_tokens(access, refresh)
-            Config.set_cloud_user_email(email)
+            update_settings(cloud_user_email=email)
         else:
             logger.warning(f"认证响应中缺少 token: access={bool(access)}, refresh={bool(refresh)}")
             raise CloudAPIError("登录成功但服务端未返回有效 token，请重试")
@@ -248,8 +255,8 @@ class CloudAPIClient:
             # refresh_token 已过期/失效，清除本地登录态使 UI 反映真实状态
             self._access_token = None
             self._refresh_token_str = None
-            Config.set_cloud_access_token("")
-            Config.set_cloud_refresh_token("")
+            set_cloud_access_token("")
+            set_cloud_refresh_token("")
             self._update_auth_json("", "")
             logger.info("Refresh token 已过期，已清除本地登录态")
         return False
@@ -263,9 +270,9 @@ class CloudAPIClient:
 
         self._access_token = None
         self._refresh_token_str = None
-        Config.set_cloud_access_token("")
-        Config.set_cloud_refresh_token("")
-        Config.set_cloud_user_email("")
+        set_cloud_access_token("")
+        set_cloud_refresh_token("")
+        update_settings(cloud_user_email="")
         self._update_auth_json("", "")
         logger.info("已退出云端登录")
 
@@ -486,11 +493,11 @@ def get_cloud_client(create_if_missing: bool = True) -> Optional[CloudAPIClient]
         return _cloud_client_singleton
     if not create_if_missing:
         return None
-    access = Config.get_cloud_access_token()
+    access = get_cloud_access_token()
     # 始终创建实例（即使未登录也需要提供登录表单用）
-    client = CloudAPIClient(Config.get_cloud_api_url())
+    client = CloudAPIClient(settings().cloud_api_url)
     if access:
-        client.set_tokens(access, Config.get_cloud_refresh_token())
+        client.set_tokens(access, get_cloud_refresh_token())
     _cloud_client_singleton = client
     return client
 

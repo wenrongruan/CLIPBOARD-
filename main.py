@@ -14,7 +14,12 @@ from PySide6.QtGui import QDesktopServices
 
 IS_MACOS = platform.system() == "Darwin"
 
-from config import Config
+from config import (
+    settings,
+    flush_settings,
+    get_cloud_access_token,
+    get_effective_hotkey,
+)
 from i18n import t, set_language
 from core.db_factory import create_database_manager
 from core.repository import ClipboardRepository
@@ -127,7 +132,7 @@ class ClipboardApp:
         self.app.setQuitOnLastWindowClosed(False)  # 托盘模式
 
         # 初始化语言设置
-        set_language(Config.get_language())
+        set_language(settings().language)
 
         # macOS 特定设置
         if IS_MACOS:
@@ -188,7 +193,7 @@ class ClipboardApp:
         self.cloud_api = None
         self.cloud_sync_service = None
         self._cloud_sync_error = None
-        if Config.get_cloud_access_token():
+        if get_cloud_access_token():
             try:
                 from core.cloud_sync_service import CloudSyncService
                 from core.cloud_api import get_cloud_client
@@ -282,7 +287,7 @@ class ClipboardApp:
             logger.warning("pynput 未安装，全局热键功能不可用")
             return
 
-        hotkey = Config.get_hotkey()
+        hotkey = get_effective_hotkey()
         if not hotkey:
             return
 
@@ -354,7 +359,7 @@ class ClipboardApp:
         except Exception:
             pass
         # 刷新延迟写入的配置
-        Config.flush()
+        flush_settings()
         # 关闭持久数据库连接
         if hasattr(self.db_manager, 'close'):
             self.db_manager.close()

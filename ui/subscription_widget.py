@@ -54,8 +54,8 @@ class SubscriptionWidget(QWidget):
         account_layout = QFormLayout(account_group)
         account_layout.setSpacing(10)
 
-        from config import Config
-        email = Config.get_cloud_user_email()
+        from config import settings
+        email = settings().cloud_user_email
 
         self.email_label = QLabel(email or "未登录")
         self.email_label.setStyleSheet("color: #e8e8e8;")

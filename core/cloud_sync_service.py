@@ -1,18 +1,34 @@
-"""云端同步服务 — 通过 REST API 与云端服务器双向同步剪贴板数据"""
+"""云端同步服务 — 通过 REST API 与云端服务器双向同步剪贴板数据。
+
+生命周期状态机(CloudSyncState):
+- STOPPED:未启动或已停止。
+- RUNNING:已启动且认证有效,拉取/推送定时器在跑。
+- AUTH_FAILED:401 后进入,定时器已停,等待 `restart_after_reauth()` 恢复。
+
+`_pulling` / `_pushing` 是正交的 "HTTP 请求在途" 标志,不属于生命周期状态;
+`_device_registered` 同理,是初始化子流程标志。
+"""
 
 import logging
 import platform
 from collections import deque
+from enum import Enum
 from typing import Optional
 
 from PySide6.QtCore import QObject, Signal, QTimer, QThread, Slot, QMetaObject, Qt
 
-from .models import ClipboardItem, ContentType
+from .models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
 from .repository import ClipboardRepository
 from .cloud_api import CloudAPIClient, CloudAPIError
-from config import Config
+from config import settings, update_settings, SYNC_INTERVAL_MS
 
 logger = logging.getLogger(__name__)
+
+
+class CloudSyncState(Enum):
+    STOPPED = "stopped"
+    RUNNING = "running"
+    AUTH_FAILED = "auth_failed"
 
 
 class _SyncWorker(QObject):
@@ -28,8 +44,9 @@ class _SyncWorker(QObject):
         super().__init__()
         self.cloud_api = cloud_api
         self.repository = repository
-        self._device_id = Config.get_device_id()
-        self._device_name = Config.get_device_name()
+        s = settings()
+        self._device_id = s.device_id
+        self._device_name = s.device_name
 
     @Slot(int)
     def do_pull(self, last_sync_id: int):
@@ -100,13 +117,13 @@ class _SyncWorker(QObject):
     def do_push(self, batch: list):
         """将本地条目推送到云端（在工作线程中执行）"""
         try:
-            # 转换为上传格式
+            # 转换为上传格式(根据子类决定 text_content 字段)
             upload_items = []
             image_items = []
             for item in batch:
                 item_dict = {
                     "content_type": item.content_type.value,
-                    "text_content": item.text_content,
+                    "text_content": item.text_content if isinstance(item, TextClipboardItem) else None,
                     "content_hash": item.content_hash,
                     "preview": item.preview or "",
                     "device_id": item.device_id,
@@ -115,7 +132,7 @@ class _SyncWorker(QObject):
                     "is_starred": item.is_starred,
                 }
                 upload_items.append(item_dict)
-                if item.is_image and item.image_data:
+                if isinstance(item, ImageClipboardItem) and item.image_data:
                     image_items.append(item)
 
             server_items = self.cloud_api.upload_items(upload_items)
@@ -183,17 +200,15 @@ class _SyncWorker(QObject):
     def _server_item_to_local(self, data: dict) -> Optional[ClipboardItem]:
         """将服务端返回的 item 数据转换为本地 ClipboardItem
 
+        根据服务端 content_type 分派到 TextClipboardItem / ImageClipboardItem 子类。
         图片类型下载失败时返回 None（调用方会跳过该条目且不推进游标，下次重试）
         """
         try:
             content_type_str = data.get("content_type", "text")
             content_type = ContentType(content_type_str)
 
-            item = ClipboardItem(
-                content_type=content_type,
-                text_content=data.get("text_content"),
-                image_data=None,
-                image_thumbnail=None,
+            # 共享元数据（基类字段），供子类构造复用
+            common_kwargs = dict(
                 content_hash=data.get("content_hash", ""),
                 preview=data.get("preview", ""),
                 device_id=data.get("device_id", ""),
@@ -202,28 +217,42 @@ class _SyncWorker(QObject):
                 is_starred=data.get("is_starred", False),
             )
 
-            if content_type == ContentType.IMAGE:
-                server_id = data.get("id")
-                if not server_id:
-                    logger.warning("服务端图片条目缺少 id，无法下载")
+            if content_type == ContentType.TEXT:
+                return TextClipboardItem(
+                    **common_kwargs,
+                    text_content=data.get("text_content") or "",
+                )
+
+            # 图片条目：先构造空 image_data 占位，再尝试下载
+            item = ImageClipboardItem(
+                **common_kwargs,
+                image_data=None,
+                image_thumbnail=None,
+            )
+            server_id = data.get("id")
+            if not server_id:
+                logger.warning("服务端图片条目缺少 id，无法下载")
+                return None
+            if not self._download_image(item, server_id):
+                # 下载失败且未达到永久放弃阈值 → 返回 None，下次重试
+                if not self._is_permanently_skipped(server_id):
                     return None
-                if not self._download_image(item, server_id):
-                    # 下载失败且未达到永久放弃阈值 → 返回 None，下次重试
-                    if not self._is_permanently_skipped(server_id):
-                        return None
-                    # 已达阈值：允许进入本地库（text_content/preview 至少保留），
-                    # 避免同步游标被永久卡住；但 image_data 仍为 None
-                    logger.error(
-                        f"图片下载持续失败达 {self._MAX_IMAGE_RETRY} 次 (server_id={server_id})，放弃重试并写入空图片占位"
-                    )
+                # 已达阈值：允许进入本地库（preview 至少保留），
+                # 避免同步游标被永久卡住；但 image_data 仍为 None
+                logger.error(
+                    f"图片下载持续失败达 {self._MAX_IMAGE_RETRY} 次 (server_id={server_id})，放弃重试并写入空图片占位"
+                )
 
             return item
         except Exception as e:
             logger.error(f"转换服务端数据失败: {e}, data={data}")
             return None
 
-    def _download_image(self, item: ClipboardItem, server_id: int) -> bool:
-        """下载云端图片；成功返回 True，失败返回 False"""
+    def _download_image(self, item: ImageClipboardItem, server_id: int) -> bool:
+        """下载云端图片；成功返回 True，失败返回 False
+
+        签名改为 ImageClipboardItem：image_data/image_thumbnail 仅该子类拥有。
+        """
         try:
             image_data = self.cloud_api.download_image(server_id)
             if image_data:
@@ -254,7 +283,8 @@ class _SyncWorker(QObject):
         counter = getattr(self, '_skip_retry_counter', {})
         return counter.get(server_id, 0) >= self._MAX_IMAGE_RETRY
 
-    def _upload_image_for_item(self, item: ClipboardItem, server_id: int):
+    def _upload_image_for_item(self, item: ImageClipboardItem, server_id: int):
+        """上传图片到云端（仅对 ImageClipboardItem 调用，调用方已做类型过滤）"""
         if not item.image_data:
             return
         try:
@@ -296,13 +326,14 @@ class CloudSyncService(QObject):
         super().__init__(parent)
         self.repository = repository
         self.cloud_api = cloud_api
-        self._device_id = Config.get_device_id()
-        self._device_name = Config.get_device_name()
-        self._last_sync_id = Config.get_cloud_last_sync_id()
-        self._running = False
+        s = settings()
+        self._device_id = s.device_id
+        self._device_name = s.device_name
+        self._last_sync_id = s.cloud_last_sync_id
+        self._state: CloudSyncState = CloudSyncState.STOPPED
         self._current_interval = self._MIN_INTERVAL_MS
-        self._pulling = False  # 防止重叠请求
-        self._pushing = False
+        self._pulling = False  # 正交的 in-flight 标志:拉取请求是否在途
+        self._pushing = False  # 同上,推送请求
 
         # 待上传队列（离线队列）— 仅存新增条目，保证新数据不被失败重试挤出
         self._pending_upload_queue: deque = deque(maxlen=500)
@@ -337,37 +368,53 @@ class CloudSyncService(QObject):
         self._device_registered = False
         self._quota_check_counter = 0
 
+    @property
+    def state(self) -> CloudSyncState:
+        return self._state
+
+    def _transition(self, new_state: CloudSyncState) -> None:
+        if new_state != self._state:
+            logger.debug(f"CloudSyncService: {self._state.value} -> {new_state.value}")
+            self._state = new_state
+
     def start(self, interval_ms: int = None):
         """启动云端同步服务"""
         if interval_ms is None:
-            interval_ms = Config.SYNC_INTERVAL_MS
+            interval_ms = SYNC_INTERVAL_MS
 
-        if not self._running:
-            self._running = True
+        if self._state != CloudSyncState.STOPPED:
+            logger.debug(f"CloudSyncService.start 被忽略,当前状态: {self._state.value}")
+            return
 
-            # 注册设备
-            self._register_device()
+        self._transition(CloudSyncState.RUNNING)
 
-            # 启动拉取定时器
-            self._pull_timer.start(interval_ms)
+        # 注册设备
+        self._register_device()
 
-            # 推送定时器间隔为拉取的 2 倍
-            self._push_timer.start(interval_ms * 2)
+        # 启动拉取定时器
+        self._pull_timer.start(interval_ms)
 
-            logger.info(f"云端同步服务已启动，拉取间隔 {interval_ms}ms")
+        # 推送定时器间隔为拉取的 2 倍
+        self._push_timer.start(interval_ms * 2)
+
+        logger.info(f"云端同步服务已启动,拉取间隔 {interval_ms}ms")
 
     def stop(self):
         """停止云端同步服务"""
-        if self._running:
-            self._running = False
-            self._pull_timer.stop()
-            self._push_timer.stop()
-            self._worker_thread.quit()
-            self._worker_thread.wait(3000)
-            logger.info("云端同步服务已停止")
+        if self._state == CloudSyncState.STOPPED:
+            return
+        self._transition(CloudSyncState.STOPPED)
+        self._pull_timer.stop()
+        self._push_timer.stop()
+        self._worker_thread.quit()
+        self._worker_thread.wait(3000)
+        logger.info("云端同步服务已停止")
 
     def force_sync(self):
-        """强制立即同步（拉取 + 推送）"""
+        """强制立即同步(拉取 + 推送)"""
+        if self._state != CloudSyncState.RUNNING:
+            logger.debug(f"force_sync 被忽略,当前状态: {self._state.value}")
+            return
         self._pulling = False
         self._pushing = False
         self._pull_from_cloud()
@@ -376,7 +423,7 @@ class CloudSyncService(QObject):
     def reset_sync_position(self):
         """重置同步位置"""
         self._last_sync_id = 0
-        Config.set_cloud_last_sync_id(0)
+        update_settings(cloud_last_sync_id=0)
         logger.info("云端同步位置已重置")
 
     def enqueue_upload(self, item: ClipboardItem):
@@ -403,8 +450,8 @@ class CloudSyncService(QObject):
     # ========== 拉取逻辑 ==========
 
     def _pull_from_cloud(self):
-        """从云端拉取新记录（主线程调度，实际 HTTP 在工作线程执行）"""
-        if not self._running or self._pulling:
+        """从云端拉取新记录(主线程调度,实际 HTTP 在工作线程执行)"""
+        if self._state != CloudSyncState.RUNNING or self._pulling:
             return
         self._pulling = True
         self._trigger_pull.emit(self._last_sync_id)
@@ -415,7 +462,7 @@ class CloudSyncService(QObject):
         self._pulling = False
         if max_server_id > self._last_sync_id:
             self._last_sync_id = max_server_id
-            Config.set_cloud_last_sync_id(self._last_sync_id)
+            update_settings(cloud_last_sync_id=self._last_sync_id)
 
         if new_items:
             logger.debug(f"从云端拉取了 {len(new_items)} 条新记录")
@@ -428,28 +475,29 @@ class CloudSyncService(QObject):
 
     @Slot(str, int)
     def _on_pull_error(self, message: str, status_code: int):
-        """拉取失败回调（主线程）"""
+        """拉取失败回调(主线程)"""
         self._pulling = False
         if status_code == 401:
-            logger.warning("云端认证失败，请重新登录")
-            # 停止轮询，避免反复刷 401 日志
+            logger.warning("云端认证失败,请重新登录")
+            # 停止轮询,避免反复刷 401 日志
             self._pull_timer.stop()
             self._push_timer.stop()
-            self._auth_failed = True
-            self.sync_error.emit("云端认证失败，请在设置中重新登录")
+            self._transition(CloudSyncState.AUTH_FAILED)
+            self.sync_error.emit("云端认证失败,请在设置中重新登录")
         else:
             logger.error(f"云端拉取失败: {message}")
             self.sync_error.emit(message)
 
     def restart_after_reauth(self):
         """重新登录后恢复同步定时器"""
-        if self._running and getattr(self, '_auth_failed', False):
-            self._auth_failed = False
-            self._current_interval = self._MIN_INTERVAL_MS
-            self._pull_timer.setInterval(self._current_interval)
-            self._pull_timer.start()
-            self._push_timer.start()
-            logger.info("认证恢复，同步定时器已重启")
+        if self._state != CloudSyncState.AUTH_FAILED:
+            return
+        self._transition(CloudSyncState.RUNNING)
+        self._current_interval = self._MIN_INTERVAL_MS
+        self._pull_timer.setInterval(self._current_interval)
+        self._pull_timer.start()
+        self._push_timer.start()
+        logger.info("认证恢复,同步定时器已重启")
 
     def _increase_interval(self):
         """无新数据时，逐步增加轮询间隔"""
@@ -464,8 +512,8 @@ class CloudSyncService(QObject):
     # ========== 推送逻辑 ==========
 
     def _push_to_cloud(self):
-        """将本地待上传条目推送到云端（主线程调度，实际 HTTP 在工作线程执行）"""
-        if not self._running or self._pushing:
+        """将本地待上传条目推送到云端(主线程调度,实际 HTTP 在工作线程执行)"""
+        if self._state != CloudSyncState.RUNNING or self._pushing:
             return
         if not self._pending_upload_queue and not self._retry_queue:
             return

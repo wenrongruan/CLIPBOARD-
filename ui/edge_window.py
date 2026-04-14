@@ -5,7 +5,16 @@ from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, 
 from PySide6.QtGui import QCursor, QScreen, QMouseEvent
 from PySide6.QtWidgets import QWidget, QApplication
 
-from config import Config
+from config import (
+    settings,
+    update_settings,
+    set_dock_edge as set_dock_edge_config,
+    WINDOW_WIDTH,
+    WINDOW_HEIGHT,
+    HIDDEN_MARGIN,
+    TRIGGER_ZONE,
+    ANIMATION_DURATION,
+)
 
 
 class EdgeHiddenWindow(QWidget):
@@ -33,17 +42,18 @@ class EdgeHiddenWindow(QWidget):
             self.setAttribute(Qt.WA_TranslucentBackground, False)
 
         # 尺寸配置
-        self._window_width = Config.WINDOW_WIDTH
-        self._window_height = Config.WINDOW_HEIGHT
-        self._hidden_margin = Config.HIDDEN_MARGIN
-        self._trigger_zone = Config.TRIGGER_ZONE
+        self._window_width = WINDOW_WIDTH
+        self._window_height = WINDOW_HEIGHT
+        self._hidden_margin = HIDDEN_MARGIN
+        self._trigger_zone = TRIGGER_ZONE
 
-        # 停靠边缘
-        self._dock_edge = Config.get_dock_edge()
+        # 停靠边缘 / 悬浮态
+        s = settings()
+        self._dock_edge = s.dock_edge
 
         # 动画
         self._animation = QPropertyAnimation(self, b"geometry")
-        self._animation.setDuration(Config.ANIMATION_DURATION)
+        self._animation.setDuration(ANIMATION_DURATION)
         self._animation.setEasingCurve(QEasingCurve.OutCubic)
 
         # 状态
@@ -52,7 +62,7 @@ class EdgeHiddenWindow(QWidget):
         self._show_protection = False  # 显示保护期，防止立即隐藏
 
         # 悬浮模式（脱离边缘吸附，自由定位）
-        self._is_floating = Config.get_is_floating()
+        self._is_floating = s.is_floating
 
         # 拖动支持
         self._dragging = False
@@ -78,7 +88,7 @@ class EdgeHiddenWindow(QWidget):
             return
 
         if self._is_floating:
-            pos = Config.get_floating_position()
+            pos = settings().floating_position
             if pos and len(pos) == 2:
                 x, y = pos
                 # 校验位置是否在屏幕内
@@ -90,7 +100,7 @@ class EdgeHiddenWindow(QWidget):
                     return
             # 保存的位置无效，回退到吸附模式
             self._is_floating = False
-            Config.set_is_floating(False)
+            update_settings(is_floating=False)
 
         self._move_to_hidden_position(screen_rect)
         self.show()
@@ -111,8 +121,8 @@ class EdgeHiddenWindow(QWidget):
         if edge in ("left", "right", "top", "bottom"):
             self._dock_edge = edge
             self._is_floating = False
-            Config.set_is_floating(False)
-            Config.set_dock_edge(edge)
+            update_settings(is_floating=False)
+            set_dock_edge_config(edge)
             # 重新定位
             screen_rect = self._get_screen_rect()
             if not screen_rect.isEmpty():
@@ -299,7 +309,7 @@ class EdgeHiddenWindow(QWidget):
     def hide_window(self):
         self._is_pinned = False
         self._is_floating = False
-        Config.set_is_floating(False)
+        update_settings(is_floating=False)
         self._show_protection = False
         self._slide_out()
 
@@ -385,7 +395,7 @@ class EdgeHiddenWindow(QWidget):
 
         if distance <= SNAP_THRESHOLD:
             self._is_floating = False
-            Config.set_is_floating(False)
+            update_settings(is_floating=False)
             if nearest_edge != self._dock_edge:
                 self.set_dock_edge(nearest_edge)
             else:
@@ -393,9 +403,8 @@ class EdgeHiddenWindow(QWidget):
         else:
             self._is_floating = True
             self._is_pinned = True
-            Config.set_is_floating(True)
             pos = self.geometry().topLeft()
-            Config.set_floating_position(pos.x(), pos.y())
+            update_settings(is_floating=True, floating_position=(pos.x(), pos.y()))
 
     def _snap_to_nearest_edge(self):
         """吸附到最近的屏幕边缘（强制吸附，不进入悬浮）"""
@@ -404,7 +413,7 @@ class EdgeHiddenWindow(QWidget):
             return
 
         self._is_floating = False
-        Config.set_is_floating(False)
+        update_settings(is_floating=False)
 
         nearest_edge, _ = self._nearest_edge_and_distance(screen_rect)
         if nearest_edge != self._dock_edge:

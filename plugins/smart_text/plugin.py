@@ -9,7 +9,7 @@ import re
 import urllib.parse
 
 from core.plugin_api import PluginBase, PluginAction, PluginResult, PluginResultAction
-from core.models import ContentType
+from core.models import ContentType, TextClipboardItem
 
 
 class SmartTextPlugin(PluginBase):
@@ -51,7 +51,9 @@ class SmartTextPlugin(PluginBase):
         ]
 
     def execute(self, action_id, item, progress_callback=None, cancel_check=None):
-        if not item.text_content:
+        # 插件仅声明支持 ContentType.TEXT，框架理应只派发 TextClipboardItem；
+        # 这里用 isinstance 做类型收缩以安全访问 text_content（不是文本则拒绝执行）
+        if not isinstance(item, TextClipboardItem) or not item.text_content:
             return PluginResult(success=False, error_message="无文本内容")
 
         text = item.text_content

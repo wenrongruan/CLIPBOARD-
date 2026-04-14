@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, List, Optional
 
-from .models import ClipboardItem, ContentType
+from .models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
 
 
 class PluginResultAction(Enum):
@@ -221,16 +221,23 @@ class PluginTestHelper:
         content_type: ContentType = ContentType.TEXT,
         image_data: Optional[bytes] = None,
     ) -> ClipboardItem:
-        """创建测试用 ClipboardItem"""
-        return ClipboardItem(
+        """创建测试用 ClipboardItem（根据 content_type 分派到具体子类）"""
+        common_kwargs = dict(
             id=1,
-            content_type=content_type,
-            text_content=text if content_type == ContentType.TEXT else None,
-            image_data=image_data,
             content_hash="test_hash_000000000000000000000000",
             preview=text[:50] if text else "[test image]",
             device_id="test_device",
             device_name="Test Device",
+        )
+        if content_type == ContentType.TEXT:
+            return TextClipboardItem(
+                **common_kwargs,
+                text_content=text or "",
+            )
+        return ImageClipboardItem(
+            **common_kwargs,
+            image_data=image_data,
+            image_thumbnail=None,
         )
 
     @staticmethod

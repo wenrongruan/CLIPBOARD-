@@ -9,6 +9,7 @@
 - 插件日志初始化
 """
 
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -21,12 +22,39 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
-from config import Config
+from config import (
+    APP_VERSION,
+    get_config_dir,
+    get_user_plugins_dir,
+    is_plugin_enabled,
+)
 from i18n import t
 from .models import ClipboardItem
 from .plugin_api import PluginBase, PluginAction, PluginResult
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+@contextlib.contextmanager
+def _project_root_in_syspath():
+    """临时将项目根加入 sys.path,退出时恢复原状。
+
+    插件在 `exec_module` 阶段会执行顶层 import,需要能解析 `core.*`/`config`
+    等项目内模块。永久 insert 会污染全局命名空间,因此只在加载窗口内生效。
+    """
+    already_present = _PROJECT_ROOT in sys.path
+    if not already_present:
+        sys.path.insert(0, _PROJECT_ROOT)
+    try:
+        yield
+    finally:
+        if not already_present:
+            try:
+                sys.path.remove(_PROJECT_ROOT)
+            except ValueError:
+                pass
 
 
 class PluginWorker(QThread):
@@ -189,10 +217,11 @@ class PluginManager(QObject):
                 f"plugins.{plugin_id}", str(module_path)
             )
             module = importlib.util.module_from_spec(spec)
-            # 确保插件能 import core 模块
-            if str(Path(__file__).parent.parent) not in sys.path:
-                sys.path.insert(0, str(Path(__file__).parent.parent))
-            spec.loader.exec_module(module)
+            # 插件需要 `from core.xxx`/`from config` 等导入项目根模块。
+            # 用 contextmanager 临时将项目根加入 sys.path,加载完立即恢复,
+            # 避免污染全局命名空间(不同插件可能引入同名模块)。
+            with _project_root_in_syspath():
+                spec.loader.exec_module(module)
         except Exception as e:
             logger.exception(f"Failed to import plugin {plugin_id}")
             self._plugin_status[plugin_id] = {
@@ -278,7 +307,7 @@ class PluginManager(QObject):
                 "version": manifest.get("version", "?"),
                 "description": manifest.get("description", ""),
                 "author": manifest.get("author", ""),
-                "enabled": Config.is_plugin_enabled(plugin_id),
+                "enabled": is_plugin_enabled(plugin_id),
                 "status": status_info.get("status", "unknown"),
                 "status_message": status_info.get("message", ""),
                 "permissions": manifest.get("permissions", []),
@@ -290,7 +319,7 @@ class PluginManager(QObject):
         return result
 
     def is_plugin_enabled(self, plugin_id: str) -> bool:
-        return Config.is_plugin_enabled(plugin_id)
+        return is_plugin_enabled(plugin_id)
 
     def get_plugin_name(self, plugin_id: str) -> str:
         """返回插件显示名称"""
@@ -306,7 +335,7 @@ class PluginManager(QObject):
         """
         groups = {}
         for plugin_id, plugin in self._plugins.items():
-            if not Config.is_plugin_enabled(plugin_id):
+            if not is_plugin_enabled(plugin_id):
                 continue
             try:
                 matching_actions = [
@@ -459,7 +488,7 @@ class PluginManager(QObject):
         builtin_dir = app_root / "plugins"
         dirs.append(builtin_dir)
         # 用户安装插件
-        user_dir = Config.get_user_plugins_dir()
+        user_dir = get_user_plugins_dir()
         if user_dir != builtin_dir:
             dirs.append(user_dir)
         # exe 同级目录的 plugins（方便不重新编译就添加插件）
@@ -475,7 +504,7 @@ class PluginManager(QObject):
             return True
         try:
             min_parts = tuple(int(x) for x in min_ver.split("."))
-            app_parts = tuple(int(x) for x in Config.APP_VERSION.split("."))
+            app_parts = tuple(int(x) for x in APP_VERSION.split("."))
             return app_parts >= min_parts
         except (ValueError, AttributeError):
             return True
@@ -502,7 +531,7 @@ class PluginManager(QObject):
         plugin_logger = logging.getLogger(f"plugin.{plugin_id}")
         # 避免重复添加 handler
         if not plugin_logger.handlers:
-            log_dir = Config.get_config_dir() / "logs"
+            log_dir = get_config_dir() / "logs"
             log_dir.mkdir(exist_ok=True)
             handler = RotatingFileHandler(
                 str(log_dir / f"plugin_{plugin_id}.log"),
@@ -518,7 +547,7 @@ class PluginManager(QObject):
         return plugin_logger
 
     def _load_plugin_config(self, plugin_id: str) -> dict:
-        config_path = Config.get_config_dir() / "plugins" / plugin_id / "config.json"
+        config_path = get_config_dir() / "plugins" / plugin_id / "config.json"
         if config_path.exists():
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
@@ -529,7 +558,7 @@ class PluginManager(QObject):
 
     def _save_plugin_config(self, plugin_id: str, config: dict):
         try:
-            config_dir = Config.get_config_dir() / "plugins" / plugin_id
+            config_dir = get_config_dir() / "plugins" / plugin_id
             config_dir.mkdir(parents=True, exist_ok=True)
             with open(config_dir / "config.json", "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)

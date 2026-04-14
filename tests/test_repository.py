@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 from core.database import DatabaseManager
 from core.repository import ClipboardRepository
-from core.models import ClipboardItem, ContentType
+from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
 
 
 @pytest.fixture
@@ -21,8 +21,8 @@ def repo(tmp_path):
 
 
 def _make_item(text="hello", hash_suffix="", device_id="dev1", starred=False):
-    return ClipboardItem(
-        content_type=ContentType.TEXT,
+    """构造测试用文本条目（TextClipboardItem 是 sealed union 的文本变体）"""
+    return TextClipboardItem(
         text_content=text,
         content_hash=f"hash_{text}_{hash_suffix}",
         preview=text[:50],

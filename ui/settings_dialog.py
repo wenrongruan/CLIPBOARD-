@@ -10,7 +10,18 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from config import Config
+from config import (
+    settings,
+    update_settings,
+    get_cloud_access_token,
+    get_effective_hotkey,
+    get_effective_database_path,
+    get_mysql_config,
+    set_mysql_config,
+    set_plugin_enabled,
+    get_user_plugins_dir,
+    get_config_dir,
+)
 from i18n import t, get_languages
 from .plugin_config_dialog import PluginConfigDialog
 from .styles import MAIN_STYLE
@@ -20,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def _restore_cloud_api_from_config():
     """返回全局 CloudAPIClient（仅在已登录时返回非 None）。"""
-    if not Config.get_cloud_access_token():
+    if not get_cloud_access_token():
         return None
     try:
         from core.cloud_api import get_cloud_client
@@ -74,7 +85,7 @@ class SettingsDialog(QDialog):
         languages = get_languages()
         self._language_codes = list(languages.keys())
         self.language_combo.addItems(list(languages.values()))
-        current_lang = Config.get_language()
+        current_lang = settings().language
         if current_lang in self._language_codes:
             self.language_combo.setCurrentIndex(self._language_codes.index(current_lang))
         general_layout.addRow(t("language"), self.language_combo)
@@ -82,13 +93,13 @@ class SettingsDialog(QDialog):
         self.dock_combo = QComboBox()
         self.dock_combo.addItems([t("dock_right"), t("dock_left"), t("dock_top"), t("dock_bottom")])
         edge_map = {"right": 0, "left": 1, "top": 2, "bottom": 3}
-        current_edge = Config.get_dock_edge()
+        current_edge = settings().dock_edge
         self.dock_combo.setCurrentIndex(edge_map.get(current_edge, 0))
         general_layout.addRow(t("dock_position"), self.dock_combo)
 
         hotkey_layout = QHBoxLayout()
         self.hotkey_edit = QLineEdit()
-        self.hotkey_edit.setText(Config.get_hotkey())
+        self.hotkey_edit.setText(get_effective_hotkey())
         self.hotkey_edit.setPlaceholderText(t("hotkey_placeholder"))
         hotkey_layout.addWidget(self.hotkey_edit)
 
@@ -113,8 +124,8 @@ class SettingsDialog(QDialog):
 
         self.profile_combo = QComboBox()
         self.profile_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        profiles = Config.get_db_profiles()
-        active = Config.get_active_profile()
+        profiles = dict(settings().db_profiles)
+        active = settings().active_profile
         for name in profiles:
             self.profile_combo.addItem(name)
         if active in profiles:
@@ -156,7 +167,7 @@ class SettingsDialog(QDialog):
         self.db_type_group.addButton(self.sqlite_card, 0)
         self.db_type_group.addButton(self.mysql_card, 1)
 
-        current_db_index = 0 if Config.get_db_type() == "sqlite" else 1
+        current_db_index = 0 if settings().db_type == "sqlite" else 1
         self.db_type_group.button(current_db_index).setChecked(True)
         self.db_type_group.idClicked.connect(self._on_db_type_changed)
 
@@ -167,7 +178,7 @@ class SettingsDialog(QDialog):
 
         path_layout = QHBoxLayout()
         self.db_path_edit = QLineEdit()
-        self.db_path_edit.setText(Config.get_database_path())
+        self.db_path_edit.setText(get_effective_database_path())
         self.db_path_edit.setPlaceholderText(t("path_placeholder"))
         path_layout.addWidget(self.db_path_edit)
 
@@ -181,7 +192,7 @@ class SettingsDialog(QDialog):
         self.mysql_group = QGroupBox(t("mysql_config"))
         mysql_layout = QFormLayout(self.mysql_group)
 
-        mysql_config = Config.get_mysql_config()
+        mysql_config = get_mysql_config()
 
         self.mysql_host_edit = QLineEdit()
         self.mysql_host_edit.setText(mysql_config["host"])
@@ -235,23 +246,23 @@ class SettingsDialog(QDialog):
         filter_group_layout.setSpacing(8)
 
         self.save_text_check = QCheckBox(t("save_text"))
-        self.save_text_check.setChecked(Config.get_save_text())
+        self.save_text_check.setChecked(settings().save_text)
         filter_group_layout.addRow(self.save_text_check)
 
         self.save_images_check = QCheckBox(t("save_images"))
-        self.save_images_check.setChecked(Config.get_save_images())
+        self.save_images_check.setChecked(settings().save_images)
         filter_group_layout.addRow(self.save_images_check)
 
         self.max_text_length_spin = QSpinBox()
         self.max_text_length_spin.setRange(0, 10000000)
-        self.max_text_length_spin.setValue(Config.get_max_text_length())
+        self.max_text_length_spin.setValue(settings().max_text_length)
         self.max_text_length_spin.setSpecialValueText(t("unlimited"))
         self.max_text_length_spin.setSuffix(f" {t('characters')}")
         filter_group_layout.addRow(t("max_text_length"), self.max_text_length_spin)
 
         self.max_image_size_spin = QSpinBox()
         self.max_image_size_spin.setRange(0, 102400)
-        self.max_image_size_spin.setValue(Config.get_max_image_size_kb())
+        self.max_image_size_spin.setValue(settings().max_image_size_kb)
         self.max_image_size_spin.setSpecialValueText(t("unlimited"))
         self.max_image_size_spin.setSuffix(" KB")
         filter_group_layout.addRow(t("max_image_size"), self.max_image_size_spin)
@@ -264,12 +275,12 @@ class SettingsDialog(QDialog):
 
         self.max_items_spin = QSpinBox()
         self.max_items_spin.setRange(100, 100000)
-        self.max_items_spin.setValue(Config.get_max_items())
+        self.max_items_spin.setValue(settings().max_items)
         storage_group_layout.addRow(t("max_items"), self.max_items_spin)
 
         self.retention_days_spin = QSpinBox()
         self.retention_days_spin.setRange(0, 3650)
-        self.retention_days_spin.setValue(Config.get_retention_days())
+        self.retention_days_spin.setValue(settings().retention_days)
         self.retention_days_spin.setSpecialValueText(t("never_cleanup"))
         self.retention_days_spin.setSuffix(f" {t('days')}")
         storage_group_layout.addRow(t("retention_days"), self.retention_days_spin)
@@ -277,7 +288,7 @@ class SettingsDialog(QDialog):
         self.poll_interval_spin = QSpinBox()
         self.poll_interval_spin.setRange(100, 5000)
         self.poll_interval_spin.setSingleStep(100)
-        self.poll_interval_spin.setValue(Config.get_poll_interval_ms())
+        self.poll_interval_spin.setValue(settings().poll_interval_ms)
         self.poll_interval_spin.setSuffix(" ms")
         storage_group_layout.addRow(t("poll_interval"), self.poll_interval_spin)
 
@@ -449,12 +460,12 @@ class SettingsDialog(QDialog):
         return row
 
     def _toggle_plugin(self, plugin_id: str, enabled: bool):
-        Config.set_plugin_enabled(plugin_id, enabled)
+        set_plugin_enabled(plugin_id, enabled)
 
     def _open_plugins_dir(self):
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Config.get_user_plugins_dir())))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(get_user_plugins_dir())))
 
     def _reload_plugins(self):
         if hasattr(self, '_plugin_manager') and self._plugin_manager:
@@ -464,7 +475,7 @@ class SettingsDialog(QDialog):
     def _open_plugin_logs(self):
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
-        log_dir = Config.get_config_dir() / "logs"
+        log_dir = get_config_dir() / "logs"
         log_dir.mkdir(exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir)))
 
@@ -500,7 +511,7 @@ class SettingsDialog(QDialog):
         elif platform.system() == "Darwin" and os.path.exists("/Volumes"):
             start_dir = "/Volumes"
         else:
-            start_dir = Config.get_database_path()
+            start_dir = get_effective_database_path()
 
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -539,7 +550,7 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, t("error"), f"{str(e)}")
 
     def _on_profile_changed(self, name: str):
-        profiles = Config.get_db_profiles()
+        profiles = settings().db_profiles
         profile = profiles.get(name)
         if not profile:
             return
@@ -558,21 +569,21 @@ class SettingsDialog(QDialog):
         if not ok or not name.strip():
             return
         name = name.strip()
-        profiles = Config.get_db_profiles()
+        profiles = dict(settings().db_profiles)
         if name in profiles:
             QMessageBox.warning(self, t("warning"), t("profile_exists"))
             return
         profiles[name] = self._current_db_settings()
-        Config.set_db_profiles(profiles)
+        update_settings(db_profiles=profiles)
         self.profile_combo.addItem(name)
         self.profile_combo.setCurrentText(name)
 
     def _delete_profile(self):
         name = self.profile_combo.currentText()
-        profiles = Config.get_db_profiles()
+        profiles = dict(settings().db_profiles)
         if len(profiles) <= 1:
             return
-        if name == Config.get_active_profile():
+        if name == settings().active_profile:
             QMessageBox.warning(self, t("warning"), t("cannot_delete_active"))
             return
         reply = QMessageBox.question(
@@ -581,7 +592,7 @@ class SettingsDialog(QDialog):
         )
         if reply == QMessageBox.Yes:
             del profiles[name]
-            Config.set_db_profiles(profiles)
+            update_settings(db_profiles=profiles)
             self.profile_combo.removeItem(self.profile_combo.currentIndex())
 
     def _current_db_settings(self) -> dict:
@@ -589,7 +600,7 @@ class SettingsDialog(QDialog):
         db_type = "sqlite" if self.db_type_group.checkedId() == 0 else "mysql"
         password = self.mysql_password_edit.text()
         if password:
-            Config.set_mysql_config(
+            set_mysql_config(
                 host=self.mysql_host_edit.text() or "localhost",
                 port=self.mysql_port_spin.value(),
                 user=self.mysql_user_edit.text(),
@@ -714,9 +725,9 @@ class SettingsDialog(QDialog):
         language = self._language_codes[self.language_combo.currentIndex()]
 
         profile_name = self.profile_combo.currentText()
-        profiles = Config.get_db_profiles()
+        profiles = dict(settings().db_profiles)
         profiles[profile_name] = db_settings
-        Config.set_db_profiles(profiles)
+        update_settings(db_profiles=profiles)
 
         result = {
             "language": language,

@@ -1,5 +1,5 @@
 from core.plugin_api import PluginBase, PluginAction, PluginResult, PluginResultAction
-from core.models import ClipboardItem, ContentType
+from core.models import ClipboardItem, TextClipboardItem, ContentType
 
 
 class UppercasePlugin(PluginBase):
@@ -20,7 +20,8 @@ class UppercasePlugin(PluginBase):
         ]
 
     def execute(self, action_id, item, progress_callback=None, cancel_check=None):
-        if action_id == "to_upper" and item.text_content:
+        # 通过 isinstance 做类型收缩后，才能安全访问 text_content
+        if action_id == "to_upper" and isinstance(item, TextClipboardItem) and item.text_content:
             if progress_callback:
                 progress_callback(50, "转换中...")
             result_text = item.text_content.upper()

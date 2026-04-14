@@ -14,7 +14,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from core.plugin_api import PluginBase, PluginAction, PluginResult, PluginResultAction
-from core.models import ContentType
+from core.models import ContentType, TextClipboardItem, ImageClipboardItem
 
 # chat_image_gen.py 的路径
 CHAT_IMAGE_GEN_DIR = r"E:\python\chat_image_gen"
@@ -98,11 +98,12 @@ class AIImageGenPlugin(PluginBase):
 
         temp_file = None
         try:
-            if item.content_type == ContentType.TEXT and item.text_content:
+            # 基于 isinstance 做类型收缩，再访问子类专属字段
+            if isinstance(item, TextClipboardItem) and item.text_content:
                 # 文字内容 → 作为提示词
                 cmd += ["--init-prompt", item.text_content]
 
-            elif item.content_type == ContentType.IMAGE and item.image_data:
+            elif isinstance(item, ImageClipboardItem) and item.image_data:
                 # 图片内容 → 保存临时文件，作为附件
                 temp_file = tempfile.NamedTemporaryFile(
                     suffix=".png", prefix="clipboard_img_", delete=False

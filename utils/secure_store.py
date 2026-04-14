@@ -192,16 +192,16 @@ def delete_credential(key: str):
 
 def _write_to_config(key: str, value: str):
     """写入配置文件（用于 DPAPI/base64 回退）"""
-    from config import Config
-    Config.set_setting(f"_secure_{key}", value)
+    from config import set_raw_setting
+    set_raw_setting(f"_secure_{key}", value)
 
 
 def _read_from_config(key: str) -> str:
     """从配置文件读取"""
-    from config import Config
+    from config import get_raw_setting
     # 先尝试新的 _secure_ 前缀键
-    value = Config.get_setting(f"_secure_{key}", "")
+    value = get_raw_setting(f"_secure_{key}", "")
     if value:
         return value
     # 兼容旧的明文键名
-    return Config.get_setting(key, "")
+    return get_raw_setting(key, "")

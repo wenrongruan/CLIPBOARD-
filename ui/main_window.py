@@ -20,12 +20,23 @@ from PySide6.QtWidgets import (
     QProgressDialog,
 )
 
-from core.models import ClipboardItem
+from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
 from core.plugin_api import PluginResult, PluginResultAction
-from config import Config
+from config import (
+    PAGE_SIZE,
+    settings,
+    update_settings,
+    load_settings_dict,
+    save_settings_dict,
+    get_cloud_access_token,
+    get_effective_hotkey,
+    get_effective_database_path,
+    get_mysql_config,
+    apply_profile,
+)
 from i18n import t, set_language, get_language
 from .edge_window import EdgeHiddenWindow
 from .clipboard_item import ClipboardItemWidget
@@ -37,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 def _restore_cloud_api_from_config():
     """返回全局 CloudAPIClient（仅在已登录时返回非 None，用于向后兼容旧调用点）。"""
-    if not Config.get_cloud_access_token():
+    if not get_cloud_access_token():
         return None
     try:
         from core.cloud_api import get_cloud_client
@@ -80,7 +91,7 @@ class MainWindow(EdgeHiddenWindow):
 
         self._current_page = 0
         self._total_pages = 1
-        self._page_size = Config.PAGE_SIZE
+        self._page_size = PAGE_SIZE
         self._search_query = ""
         self._starred_only = False
         self._items: List[ClipboardItem] = []
@@ -414,7 +425,8 @@ class MainWindow(EdgeHiddenWindow):
                 logger.error(f"加载图片以保存失败: {e}", exc_info=True)
                 signal.emit(False, path, str(e))
                 return
-            if not full or not full.image_data:
+            # 必须是 ImageClipboardItem 且有图片数据才能保存
+            if not isinstance(full, ImageClipboardItem) or not full.image_data:
                 signal.emit(False, path, "image_load_failed")
                 return
             try:
@@ -488,65 +500,66 @@ class MainWindow(EdgeHiddenWindow):
             if self.plugin_manager:
                 self.plugin_manager.set_cloud_client(self.cloud_api)
         if result == QDialog.Accepted:
-            settings = dialog.get_settings()
+            dlg_settings = dialog.get_settings()
             need_restart = False
+            current_snapshot = settings()
 
             # 语言变更
-            new_language = settings["language"]
-            if new_language != Config.get_language():
-                Config.set_language(new_language)
+            new_language = dlg_settings["language"]
+            if new_language != current_snapshot.language:
+                update_settings(language=new_language)
                 set_language(new_language)
                 need_restart = True
 
             # 应用停靠边缘
-            new_edge = settings["dock_edge"]
-            if new_edge != Config.get_dock_edge():
+            new_edge = dlg_settings["dock_edge"]
+            if new_edge != current_snapshot.dock_edge:
                 self.set_dock_edge(new_edge)
 
             # 热键变更
-            new_hotkey = settings["hotkey"]
-            if new_hotkey != Config.get_hotkey():
-                Config.set_hotkey(new_hotkey)
+            new_hotkey = dlg_settings["hotkey"]
+            if new_hotkey != get_effective_hotkey():
+                update_settings(hotkey=new_hotkey)
                 need_restart = True
 
             # 过滤与存储设置（批量更新，只写一次磁盘）
-            new_poll_interval = settings["poll_interval_ms"]
-            poll_changed = new_poll_interval != Config.get_poll_interval_ms()
+            new_poll_interval = dlg_settings["poll_interval_ms"]
+            poll_changed = new_poll_interval != current_snapshot.poll_interval_ms
 
-            current_settings = Config.load_settings()
+            current_settings = load_settings_dict()
             for key in ("save_text", "save_images", "max_text_length",
                         "max_image_size_kb", "max_items", "retention_days",
                         "poll_interval_ms"):
-                current_settings[key] = settings[key]
-            Config.save_settings(current_settings)
+                current_settings[key] = dlg_settings[key]
+            save_settings_dict(current_settings)
 
             if poll_changed:
                 self.clipboard_monitor.update_poll_interval(new_poll_interval)
 
             # Profile / 数据库变更检测
-            new_profile = settings.get("active_profile", "")
-            new_db_type = settings["db_type"]
+            new_profile = dlg_settings.get("active_profile", "")
+            new_db_type = dlg_settings["db_type"]
             db_changed = False
 
-            if new_profile != Config.get_active_profile():
+            if new_profile != current_snapshot.active_profile:
                 db_changed = True
-            elif new_db_type != Config.get_db_type():
+            elif new_db_type != current_snapshot.db_type:
                 db_changed = True
             elif new_db_type == "sqlite":
                 # 空字符串表示使用默认路径，归一化后再比较
-                new_path = settings["database_path"] or Config.get_database_path()
-                if new_path != Config.get_database_path():
+                new_path = dlg_settings["database_path"] or get_effective_database_path()
+                if new_path != get_effective_database_path():
                     db_changed = True
             elif new_db_type == "mysql":
-                mysql_config = Config.get_mysql_config()
+                mysql_config = get_mysql_config()
                 # 密码空表示"未在本次会话修改"（_current_db_settings 不回传密码），
                 # 仅当用户实际填入了新密码且与 keyring 中不同才算变更
-                pw_changed = bool(settings["mysql_password"]) and settings["mysql_password"] != mysql_config["password"]
-                if (settings["mysql_host"] != mysql_config["host"] or
-                    settings["mysql_port"] != mysql_config["port"] or
-                    settings["mysql_user"] != mysql_config["user"] or
+                pw_changed = bool(dlg_settings["mysql_password"]) and dlg_settings["mysql_password"] != mysql_config["password"]
+                if (dlg_settings["mysql_host"] != mysql_config["host"] or
+                    dlg_settings["mysql_port"] != mysql_config["port"] or
+                    dlg_settings["mysql_user"] != mysql_config["user"] or
                     pw_changed or
-                    settings["mysql_database"] != mysql_config["database"]):
+                    dlg_settings["mysql_database"] != mysql_config["database"]):
                     db_changed = True
 
             if db_changed:
@@ -560,7 +573,7 @@ class MainWindow(EdgeHiddenWindow):
                 ) == QMessageBox.Yes
 
                 # 应用 profile 并保存配置
-                Config.apply_profile(new_profile)
+                apply_profile(new_profile)
 
                 if migrate:
                     self._do_migration()
@@ -577,25 +590,14 @@ class MainWindow(EdgeHiddenWindow):
     def _do_migration(self):
         """在工作线程中执行数据库迁移，避免阻塞 UI"""
         from core.migration import DatabaseMigrator
-        from core.database import DatabaseManager
+        from core.db_factory import create_database_manager
         from core.repository import ClipboardRepository
         from PySide6.QtCore import QThread, Signal as QSignal
 
-        # 创建目标库连接
+        # 目标库按当前已切换的 Config(apply_profile 已落盘)创建
         try:
-            db_type = Config.get_db_type()
-            if db_type == "sqlite":
-                target_db = DatabaseManager(Config.get_database_path())
-                target_repo = ClipboardRepository(target_db)
-            else:
-                from core.mysql_database import MySQLDatabaseManager
-                mysql_config = Config.get_mysql_config()
-                target_db = MySQLDatabaseManager(
-                    mysql_config["host"], mysql_config["port"],
-                    mysql_config["user"], mysql_config["password"],
-                    mysql_config["database"],
-                )
-                target_repo = ClipboardRepository(target_db)
+            target_db = create_database_manager()
+            target_repo = ClipboardRepository(target_db)
         except Exception as e:
             QMessageBox.critical(
                 self, t("error"), t("migration_failed", error=str(e))
@@ -711,9 +713,9 @@ class MainWindow(EdgeHiddenWindow):
     def _run_plugin_action(self, plugin_id: str, action_id: str, item: ClipboardItem):
         """执行插件动作"""
         # 获取完整数据（图片需要从数据库加载）
-        if item.is_image:
+        if isinstance(item, ImageClipboardItem):
             full_item = self.repository.get_item_by_id(item.id)
-            if full_item and full_item.image_data:
+            if isinstance(full_item, ImageClipboardItem) and full_item.image_data:
                 item = full_item
             else:
                 self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
@@ -750,31 +752,43 @@ class MainWindow(EdgeHiddenWindow):
             return
 
         if result.action == PluginResultAction.COPY:
-            # 复制到剪贴板
-            temp_item = ClipboardItem(
-                content_type=result.content_type,
-                text_content=result.text_content,
-                image_data=result.image_data,
-            )
+            # 复制到剪贴板：根据插件结果的 content_type 分派到具体子类
+            if result.content_type == ContentType.TEXT:
+                temp_item: ClipboardItem = TextClipboardItem(
+                    text_content=result.text_content or "",
+                )
+            else:
+                temp_item = ImageClipboardItem(
+                    image_data=result.image_data,
+                    image_thumbnail=None,
+                )
             self.clipboard_monitor.copy_to_clipboard(temp_item)
             self._show_plugin_feedback(t("copied_to_clipboard"), "copyFeedbackSuccess")
 
         elif result.action == PluginResultAction.SAVE:
-            # 保存为新条目
+            # 保存为新条目：按插件结果 content_type 分派到具体子类
             from utils.hash_utils import compute_content_hash
             hash_content = result.text_content or result.image_data
             if not hash_content:
                 self._show_plugin_feedback("❌ 插件返回空内容", "copyFeedbackError")
                 return
-            new_item = ClipboardItem(
-                content_type=result.content_type,
-                text_content=result.text_content,
-                image_data=result.image_data,
+            common_kwargs = dict(
                 content_hash=compute_content_hash(hash_content),
                 preview=(result.text_content or "")[:100],
-                device_id=Config.get_device_id(),
-                device_name=Config.get_device_name(),
+                device_id=settings().device_id,
+                device_name=settings().device_name,
             )
+            if result.content_type == ContentType.TEXT:
+                new_item: ClipboardItem = TextClipboardItem(
+                    **common_kwargs,
+                    text_content=result.text_content or "",
+                )
+            else:
+                new_item = ImageClipboardItem(
+                    **common_kwargs,
+                    image_data=result.image_data,
+                    image_thumbnail=None,
+                )
             self.repository.add_item(new_item)
             self._load_items()
             self._show_plugin_feedback(t("plugin_saved_entry"), "copyFeedbackSuccess")

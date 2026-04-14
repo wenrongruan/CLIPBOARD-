@@ -8,9 +8,9 @@ from PySide6.QtCore import QObject, Signal, QTimer, Qt
 from PySide6.QtGui import QClipboard, QImage
 from PySide6.QtWidgets import QApplication
 
-from .models import ClipboardItem, ContentType
+from .models import ClipboardItem, TextClipboardItem, ImageClipboardItem
 from .repository import ClipboardRepository
-from config import Config
+from config import settings, THUMBNAIL_SIZE
 from PIL import Image
 from utils.hash_utils import compute_content_hash
 from utils.image_utils import create_thumbnail, image_to_bytes
@@ -52,17 +52,17 @@ class ClipboardMonitor(QObject):
             if self._add_counter < 50:
                 return
             self._add_counter = 0
-        self.repository.cleanup_old_items(Config.get_max_items())
-        retention_days = Config.get_retention_days()
-        if retention_days > 0:
-            self.repository.cleanup_expired_items(retention_days)
+        s = settings()
+        self.repository.cleanup_old_items(s.max_items)
+        if s.retention_days > 0:
+            self.repository.cleanup_expired_items(s.retention_days)
 
     def start(self):
         if not self._monitoring:
             self._monitoring = True
             # 记录当前剪贴板内容，避免启动时重复保存
             self._last_text = self.clipboard.text()
-            self._poll_timer.start(Config.get_poll_interval_ms())
+            self._poll_timer.start(settings().poll_interval_ms)
             logger.info("剪贴板监控已启动 (轮询模式)")
 
     def update_poll_interval(self, interval_ms: int):
@@ -89,9 +89,10 @@ class ClipboardMonitor(QObject):
                 return
 
             # 优先检查图片
-            if mime_data.hasImage() and Config.get_save_images():
+            s = settings()
+            if mime_data.hasImage() and s.save_images:
                 self._handle_image()
-            elif mime_data.hasText() and Config.get_save_text():
+            elif mime_data.hasText() and s.save_text:
                 self._handle_text()
 
             # 成功一次 → 重置失败计数
@@ -135,7 +136,7 @@ class ClipboardMonitor(QObject):
         self._last_text = text
 
         # 检查文本长度限制
-        max_text_length = Config.get_max_text_length()
+        max_text_length = settings().max_text_length
         if max_text_length > 0 and len(text) > max_text_length:
             logger.info(f"文本超过最大长度限制 ({len(text)} > {max_text_length})，跳过")
             return
@@ -149,13 +150,13 @@ class ClipboardMonitor(QObject):
         if existing:
             return
 
-        # 创建新记录
-        item = ClipboardItem(
-            content_type=ContentType.TEXT,
+        # 创建新记录（文本类型,使用 TextClipboardItem 变体）
+        s = settings()
+        item = TextClipboardItem(
             text_content=text,
             content_hash=content_hash,
-            device_id=Config.get_device_id(),
-            device_name=Config.get_device_name(),
+            device_id=s.device_id,
+            device_name=s.device_name,
             created_at=int(time.time() * 1000),
         )
         item.preview = item.get_display_preview()
@@ -224,7 +225,7 @@ class ClipboardMonitor(QObject):
                 return
 
             # 检查图片大小限制
-            max_image_size_kb = Config.get_max_image_size_kb()
+            max_image_size_kb = settings().max_image_size_kb
             if max_image_size_kb > 0 and len(image_data) > max_image_size_kb * 1024:
                 logger.info(f"图片超过最大大小限制 ({len(image_data) // 1024}KB > {max_image_size_kb}KB)，跳过")
                 return
@@ -238,19 +239,20 @@ class ClipboardMonitor(QObject):
 
             # 创建缩略图
             try:
-                thumbnail = create_thumbnail(image_data, Config.THUMBNAIL_SIZE)
+                thumbnail = create_thumbnail(image_data, THUMBNAIL_SIZE)
             except Exception as e:
                 logger.warning(f"创建缩略图失败: {e}")
                 thumbnail = None
 
-            item = ClipboardItem(
-                content_type=ContentType.IMAGE,
+            # 创建新记录（图片类型,使用 ImageClipboardItem 变体）
+            s = settings()
+            item = ImageClipboardItem(
                 image_data=image_data,
                 image_thumbnail=thumbnail,
                 content_hash=content_hash,
                 preview=f"[图片 {width}x{height}]",
-                device_id=Config.get_device_id(),
-                device_name=Config.get_device_name(),
+                device_id=s.device_id,
+                device_name=s.device_name,
                 created_at=int(time.time() * 1000),
             )
 
@@ -268,11 +270,12 @@ class ClipboardMonitor(QObject):
             QTimer.singleShot(0, lambda: self.error_occurred.emit(f"图片保存失败: {e}"))
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
-        if item.is_text and item.text_content:
+        # 通过 isinstance 做类型收缩后再访问子类专属字段,避免 AttributeError
+        if isinstance(item, TextClipboardItem) and item.text_content:
             self._last_text = item.text_content
             self.clipboard.setText(item.text_content)
             return True
-        elif item.is_image and item.image_data:
+        if isinstance(item, ImageClipboardItem) and item.image_data:
             image = QImage()
             image.loadFromData(item.image_data)
             # 使用 _fast_image_hash 计算 hash 以匹配 _handle_image 的检测逻辑
