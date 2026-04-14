@@ -51,6 +51,8 @@ class MainWindow(EdgeHiddenWindow):
     quit_requested = Signal()  # 退出信号
     # 内部信号：worker 线程加载完整图片后回到主线程执行剪贴板写入
     _image_load_done = Signal(object)
+    # 内部信号：保存图片任务完成后回到主线程弹提示 (success: bool, path: str, error: str)
+    _save_image_done = Signal(bool, str, str)
 
     def __init__(
         self,
@@ -84,6 +86,7 @@ class MainWindow(EdgeHiddenWindow):
         self._items: List[ClipboardItem] = []
         self._copy_executor = ThreadPoolExecutor(max_workers=1)
         self._cloud_executor = ThreadPoolExecutor(max_workers=1)
+        self._load_error_notified = False
 
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
@@ -184,6 +187,8 @@ class MainWindow(EdgeHiddenWindow):
     def _connect_signals(self):
         # 跨线程：图片加载完成 → 主线程写入剪贴板
         self._image_load_done.connect(self._handle_image_loaded)
+        # 跨线程：保存图片完成 → 主线程弹提示
+        self._save_image_done.connect(self._handle_save_image_done)
 
         # 剪贴板监控信号
         self.clipboard_monitor.item_added.connect(self._on_item_added)
@@ -220,8 +225,27 @@ class MainWindow(EdgeHiddenWindow):
             self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
             self._update_list()
             self._update_pagination()
+            self._load_error_notified = False
         except Exception as e:
-            logger.error(f"加载剪贴板条目失败: {e}")
+            logger.error(f"加载剪贴板条目失败: {e}", exc_info=True)
+            self._items = []
+            self._total_pages = 1
+            try:
+                self._update_list()
+                self._update_pagination()
+                self.list_widget.clear()
+                placeholder = QListWidgetItem("加载失败，请查看日志或重启应用。")
+                placeholder.setFlags(Qt.NoItemFlags)
+                self.list_widget.addItem(placeholder)
+            except Exception:
+                logger.error("更新失败占位 UI 时出错", exc_info=True)
+            if not self._load_error_notified:
+                self._load_error_notified = True
+                QMessageBox.warning(
+                    self,
+                    t("error") if callable(t) else "错误",
+                    f"加载剪贴板条目失败：{e}\n\n请查看日志，必要时重启应用。",
+                )
 
     def _make_list_item(self, item: ClipboardItem):
         """创建 ClipboardItemWidget 和对应的 QListWidgetItem，连接信号"""
@@ -369,24 +393,53 @@ class MainWindow(EdgeHiddenWindow):
         self._load_items()
 
     def _on_item_save(self, item: ClipboardItem):
-        """保存图片到本地文件"""
-        full_item = self.repository.get_item_by_id(item.id)
-        if not full_item or not full_item.image_data:
-            QMessageBox.warning(self, t("error"), t("image_load_failed"))
-            return
-
+        """保存图片到本地文件（主线程仅取路径，IO 在工作线程）"""
         path, _ = QFileDialog.getSaveFileName(
             self,
             t("save_image"),
             "",
             "PNG (*.png);;JPEG (*.jpg);;All Files (*)",
         )
-        if path:
+        if not path:
+            return
+
+        item_id = item.id
+        repo = self.repository
+        signal = self._save_image_done
+
+        def _do_save():
+            try:
+                full = repo.get_item_by_id(item_id)
+            except Exception as e:
+                logger.error(f"加载图片以保存失败: {e}", exc_info=True)
+                signal.emit(False, path, str(e))
+                return
+            if not full or not full.image_data:
+                signal.emit(False, path, "image_load_failed")
+                return
             try:
                 with open(path, "wb") as f:
-                    f.write(full_item.image_data)
+                    f.write(full.image_data)
+                signal.emit(True, path, "")
             except Exception as e:
-                QMessageBox.critical(self, t("error"), t("save_failed", error=str(e)))
+                logger.error(f"写入图片文件失败: {e}", exc_info=True)
+                signal.emit(False, path, str(e))
+
+        self._copy_executor.submit(_do_save)
+
+    def _handle_save_image_done(self, success: bool, path: str, error: str):
+        """主线程槽：保存图片结果提示"""
+        if success:
+            QMessageBox.information(
+                self,
+                t("success") if callable(t) else "成功",
+                f"已保存到：{path}",
+            )
+        else:
+            if error == "image_load_failed":
+                QMessageBox.warning(self, t("error"), t("image_load_failed"))
+            else:
+                QMessageBox.critical(self, t("error"), t("save_failed", error=error))
 
     def _prepend_item(self, item: ClipboardItem):
         """在列表顶部插入单个新条目，避免全量重建"""

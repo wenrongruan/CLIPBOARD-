@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +82,19 @@ class AIImageGenPlugin(PluginBase):
         python = _find_python()
         cmd = [python, CHAT_IMAGE_GEN_SCRIPT]
 
-        # 传递云端认证信息（同时传 refresh_token，子进程可自行刷新）
+        # 通过 auth.json 传递登录态，避免 token 出现在命令行中被同机进程窥探
+        child_env = os.environ.copy()
         cloud_client = self.get_cloud_client()
         if cloud_client:
-            access_token, refresh_token = cloud_client.get_tokens()
-            base_url = cloud_client._base_url
-            if base_url and access_token:
-                cmd += ["--cloud-url", base_url, "--cloud-token", access_token]
-                if refresh_token:
-                    cmd += ["--cloud-refresh", refresh_token]
+            base_url = getattr(cloud_client, "_base_url", None)
+            if base_url:
+                cmd += ["--cloud-url", base_url]
+            auth_path = Path.home() / ".shared_clipboard" / "auth.json"
+            if auth_path.exists():
+                child_env["SHARED_CLIPBOARD_AUTH_FILE"] = str(auth_path)
+                logger.info("使用 auth.json 传递登录态: %s", auth_path)
+            else:
+                logger.warning("未找到 auth.json，子进程可能无法识别登录态: %s", auth_path)
 
         temp_file = None
         try:
@@ -113,6 +118,7 @@ class AIImageGenPlugin(PluginBase):
             subprocess.Popen(
                 cmd,
                 cwd=CHAT_IMAGE_GEN_DIR,
+                env=child_env,
                 creationflags=subprocess.CREATE_NO_WINDOW
                 if sys.platform == "win32"
                 else 0,

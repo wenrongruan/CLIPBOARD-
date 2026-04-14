@@ -40,11 +40,17 @@ class _SyncWorker(QObject):
 
             # 第一遍：解析所有条目，收集 content_hash
             parsed_items = []
+            skipped_server_ids = []
             for item_data in items_data:
                 server_id = item_data.get("id", 0)
                 item = self._server_item_to_local(item_data)
                 if item is None:
-                    logger.warning(f"跳过无法解析的服务端条目 id={server_id}")
+                    logger.warning(f"跳过服务端条目 id={server_id}（解析或图片下载失败，下次同步将重试）")
+                    # 记录跳过的 server_id，用于限制 max_server_id 不越过它
+                    if server_id:
+                        skipped_server_ids.append(server_id)
+                    # 多次失败后登记到永久跳过集合，避免无限阻塞同步游标
+                    self._register_skip(server_id)
                     continue
                 parsed_items.append((server_id, item))
 
@@ -69,6 +75,17 @@ class _SyncWorker(QObject):
 
                 if server_id > max_server_id:
                     max_server_id = server_id
+
+            # 若存在跳过的条目，游标只能推进到最小跳过 id - 1（避免越过重试目标）
+            # 但若该条目已被标记为“永久放弃”（超过重试次数），则允许越过
+            min_retryable_skip = min(
+                (sid for sid in skipped_server_ids if not self._is_permanently_skipped(sid)),
+                default=None,
+            )
+            if min_retryable_skip is not None:
+                max_server_id = min(max_server_id, min_retryable_skip - 1)
+                if max_server_id < last_sync_id:
+                    max_server_id = last_sync_id
 
             self.repository.set_cloud_ids_bulk(cloud_id_pairs)
             self.pull_done.emit(new_items, max_server_id)
@@ -159,8 +176,15 @@ class _SyncWorker(QObject):
         except CloudAPIError as e:
             logger.debug(f"配额检查失败: {e}")
 
+    # 图片下载失败重试计数：{server_id: fail_count}
+    # 超过 _MAX_IMAGE_RETRY 次后视为永久放弃，允许同步游标越过
+    _MAX_IMAGE_RETRY = 5
+
     def _server_item_to_local(self, data: dict) -> Optional[ClipboardItem]:
-        """将服务端返回的 item 数据转换为本地 ClipboardItem"""
+        """将服务端返回的 item 数据转换为本地 ClipboardItem
+
+        图片类型下载失败时返回 None（调用方会跳过该条目且不推进游标，下次重试）
+        """
         try:
             content_type_str = data.get("content_type", "text")
             content_type = ContentType(content_type_str)
@@ -180,23 +204,55 @@ class _SyncWorker(QObject):
 
             if content_type == ContentType.IMAGE:
                 server_id = data.get("id")
-                if server_id:
-                    self._download_image(item, server_id)
+                if not server_id:
+                    logger.warning("服务端图片条目缺少 id，无法下载")
+                    return None
+                if not self._download_image(item, server_id):
+                    # 下载失败且未达到永久放弃阈值 → 返回 None，下次重试
+                    if not self._is_permanently_skipped(server_id):
+                        return None
+                    # 已达阈值：允许进入本地库（text_content/preview 至少保留），
+                    # 避免同步游标被永久卡住；但 image_data 仍为 None
+                    logger.error(
+                        f"图片下载持续失败达 {self._MAX_IMAGE_RETRY} 次 (server_id={server_id})，放弃重试并写入空图片占位"
+                    )
 
             return item
         except Exception as e:
             logger.error(f"转换服务端数据失败: {e}, data={data}")
             return None
 
-    def _download_image(self, item: ClipboardItem, server_id: int):
+    def _download_image(self, item: ClipboardItem, server_id: int) -> bool:
+        """下载云端图片；成功返回 True，失败返回 False"""
         try:
             image_data = self.cloud_api.download_image(server_id)
             if image_data:
                 item.image_data = image_data
                 from utils.image_utils import create_thumbnail
                 item.image_thumbnail = create_thumbnail(image_data)
+                return True
+            logger.warning(f"下载云端图片为空 (server_id={server_id})")
+            return False
         except Exception as e:
             logger.warning(f"下载云端图片失败 (server_id={server_id}): {e}")
+            return False
+
+    def _register_skip(self, server_id: int):
+        """记录某 server_id 因图片/解析失败被跳过的次数"""
+        if not server_id:
+            return
+        counter = getattr(self, '_skip_retry_counter', None)
+        if counter is None:
+            counter = {}
+            self._skip_retry_counter = counter
+        counter[server_id] = counter.get(server_id, 0) + 1
+
+    def _is_permanently_skipped(self, server_id: int) -> bool:
+        """判断某 server_id 是否已达永久放弃阈值"""
+        if not server_id:
+            return True
+        counter = getattr(self, '_skip_retry_counter', {})
+        return counter.get(server_id, 0) >= self._MAX_IMAGE_RETRY
 
     def _upload_image_for_item(self, item: ClipboardItem, server_id: int):
         if not item.image_data:
@@ -248,8 +304,10 @@ class CloudSyncService(QObject):
         self._pulling = False  # 防止重叠请求
         self._pushing = False
 
-        # 待上传队列（离线队列）
+        # 待上传队列（离线队列）— 仅存新增条目，保证新数据不被失败重试挤出
         self._pending_upload_queue: deque = deque(maxlen=500)
+        # 失败重试队列 — 独立 maxlen，溢出时丢弃最旧重试项而非新数据
+        self._retry_queue: deque = deque(maxlen=50)
         self._dropped_count = 0  # 累计被离线队列挤出的条目数，仅用于告警节流
 
         # 工作线程 — HTTP 请求不再阻塞主线程
@@ -407,7 +465,9 @@ class CloudSyncService(QObject):
 
     def _push_to_cloud(self):
         """将本地待上传条目推送到云端（主线程调度，实际 HTTP 在工作线程执行）"""
-        if not self._running or not self._pending_upload_queue or self._pushing:
+        if not self._running or self._pushing:
+            return
+        if not self._pending_upload_queue and not self._retry_queue:
             return
 
         self._pushing = True
@@ -417,8 +477,10 @@ class CloudSyncService(QObject):
         if self._quota_check_counter % 10 == 1:
             QMetaObject.invokeMethod(self._worker, "do_check_quota", Qt.QueuedConnection)
 
-        # 取一批数据
+        # 优先处理重试队列，其次新数据
         batch = []
+        while self._retry_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
+            batch.append(self._retry_queue.popleft())
         while self._pending_upload_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
             batch.append(self._pending_upload_queue.popleft())
 
@@ -438,6 +500,16 @@ class CloudSyncService(QObject):
         logger.error(f"云端推送失败: {message}")
         # 配额不足时不重试
         if status_code != 403:
-            for item in reversed(failed_batch):
-                self._pending_upload_queue.appendleft(item)
+            # 失败批次进入独立 retry_queue，不挤占新数据队列
+            retry_max = self._retry_queue.maxlen
+            for item in failed_batch:
+                if len(self._retry_queue) >= retry_max:
+                    # retry_queue 已满，丢弃最旧重试项
+                    dropped = self._retry_queue.popleft()
+                    self._dropped_count += 1
+                    logger.warning(
+                        f"重试队列已满 ({retry_max})，丢弃最旧重试项 id={getattr(dropped, 'id', None)}，累计丢弃 {self._dropped_count}"
+                    )
+                    self.queue_overflow.emit(getattr(dropped, 'id', 0) or 0)
+                self._retry_queue.append(item)
         self.sync_error.emit(f"上传失败: {message}")

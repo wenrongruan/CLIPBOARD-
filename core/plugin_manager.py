@@ -387,32 +387,45 @@ class PluginManager(QObject):
         if self._active_worker:
             worker = self._active_worker
             self._active_worker = None
-            # 断开所有信号防止重复触发
+            # 断开 progress/error，但保留 finished 以便后续等待线程结束
             try:
                 worker.progress.disconnect()
-                worker.finished.disconnect()
                 worker.error.disconnect()
+            except RuntimeError:
+                pass
+            try:
+                worker.finished.disconnect()
             except RuntimeError:
                 pass
             # 安全清理: 等待线程结束后释放，设置超时防止泄漏
             if worker.isFinished():
                 worker.deleteLater()
-            else:
-                # 设置超时：如果 5 秒内线程未结束则强制清理
-                def _force_cleanup():
-                    if not worker.isFinished():
-                        logger.warning("插件工作线程超时未结束，强制终止")
-                        worker.terminate()
-                        worker.wait(1000)
-                    worker.deleteLater()
-                cleanup_timer = QTimer(self)
-                cleanup_timer.setSingleShot(True)
-                cleanup_timer.timeout.connect(_force_cleanup)
-                cleanup_timer.start(5000)
-                def _on_finished():
+                return
+
+            # 设置超时：如果 5 秒内线程未结束则强制清理
+            cleanup_timer = QTimer(self)
+            cleanup_timer.setSingleShot(True)
+
+            def _on_finished():
+                if cleanup_timer.isActive():
                     cleanup_timer.stop()
-                    worker.deleteLater()
-                worker.finished.connect(_on_finished)
+                worker.deleteLater()
+
+            def _force_cleanup():
+                if not worker.isFinished():
+                    logger.warning("plugin worker did not finish within 5s, terminating")
+                    worker.terminate()
+                    worker.wait(1000)
+                worker.deleteLater()
+
+            cleanup_timer.timeout.connect(_force_cleanup)
+            # 先连接 finished，再检查状态，避免 disconnect 与已 emit 的 finished 竞态
+            worker.finished.connect(_on_finished)
+            if worker.isFinished():
+                # 线程已在 disconnect 和 connect 之间结束，手动触发清理
+                _on_finished()
+            else:
+                cleanup_timer.start(5000)
 
     # ========== 配置 ==========
 

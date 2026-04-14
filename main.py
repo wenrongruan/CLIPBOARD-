@@ -187,6 +187,7 @@ class ClipboardApp:
         # 云端同步服务（叠加层，有 token 时自动启动）
         self.cloud_api = None
         self.cloud_sync_service = None
+        self._cloud_sync_error = None
         if Config.get_cloud_access_token():
             try:
                 from core.cloud_sync_service import CloudSyncService
@@ -200,7 +201,21 @@ class ClipboardApp:
 
                 logger.info("云端同步已启用（叠加模式）")
             except Exception as e:
-                logger.warning(f"云端同步启动失败: {e}")
+                logger.error(f"云端同步启动失败，已降级到本地存储: {e}", exc_info=True)
+                self.cloud_api = None
+                self.cloud_sync_service = None
+                self._cloud_sync_error = str(e)
+                # 通过托盘气泡提示用户：已登录但云端同步未生效
+                try:
+                    if hasattr(self, "tray_icon") and self.tray_icon is not None:
+                        self.tray_icon.showMessage(
+                            t("app_name"),
+                            "云端同步启动失败，已降级到本地存储。请检查网络或查看日志。",
+                            QSystemTrayIcon.MessageIcon.Warning,
+                            8000,
+                        )
+                except Exception as notify_err:
+                    logger.warning(f"托盘通知发送失败: {notify_err}")
 
         # 初始化插件管理器
         self.plugin_manager = PluginManager()

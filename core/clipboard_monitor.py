@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 class ClipboardMonitor(QObject):
     item_added = Signal(ClipboardItem)
     error_occurred = Signal(str)
+    monitor_unhealthy = Signal(str)
+    monitor_stopped = Signal(str)
+
+    # 连续失败阈值
+    _UNHEALTHY_THRESHOLD = 10
+    _STOP_THRESHOLD = 30
 
     def __init__(self, repository: ClipboardRepository, parent=None):
         super().__init__(parent)
@@ -32,6 +38,8 @@ class ClipboardMonitor(QObject):
         self._add_counter = 0  # 计数器，每 50 次 add 才清理
         self._counter_lock = threading.Lock()  # 保护 _add_counter 在主线程和图片后台线程的并发访问
         self._image_executor = ThreadPoolExecutor(max_workers=1)
+        self._consecutive_failures = 0
+        self._unhealthy_notified = False
 
         # 使用轮询定时器代替 dataChanged 信号（Windows 上更可靠）
         self._poll_timer = QTimer(self)
@@ -77,6 +85,7 @@ class ClipboardMonitor(QObject):
         try:
             mime_data = self.clipboard.mimeData()
             if mime_data is None:
+                self._consecutive_failures = 0
                 return
 
             # 优先检查图片
@@ -85,8 +94,34 @@ class ClipboardMonitor(QObject):
             elif mime_data.hasText() and Config.get_save_text():
                 self._handle_text()
 
+            # 成功一次 → 重置失败计数
+            if self._consecutive_failures or self._unhealthy_notified:
+                self._consecutive_failures = 0
+                self._unhealthy_notified = False
+
         except Exception as e:
-            logger.error(f"处理剪贴板内容时出错: {e}")
+            self._consecutive_failures += 1
+            if self._consecutive_failures == 1:
+                logger.error(f"处理剪贴板内容时出错: {e}", exc_info=True)
+            else:
+                logger.debug(f"处理剪贴板内容再次出错 (#{self._consecutive_failures}): {e}")
+
+            if (self._consecutive_failures >= self._UNHEALTHY_THRESHOLD
+                    and not self._unhealthy_notified):
+                self._unhealthy_notified = True
+                msg = f"剪贴板监控异常，已连续失败 {self._consecutive_failures} 次"
+                self.monitor_unhealthy.emit(msg)
+                self.error_occurred.emit(msg)
+
+            if self._consecutive_failures >= self._STOP_THRESHOLD:
+                logger.error(
+                    f"剪贴板监控连续失败 {self._consecutive_failures} 次，停止轮询"
+                )
+                self._poll_timer.stop()
+                self._monitoring = False
+                stop_msg = "剪贴板监控已停止，请重启应用或检查系统剪贴板权限"
+                self.monitor_stopped.emit(stop_msg)
+                self.error_occurred.emit(stop_msg)
 
     def _handle_text(self):
         text = self.clipboard.text()

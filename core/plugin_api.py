@@ -152,17 +152,28 @@ class PluginBase(ABC):
         """
         return getattr(self, '_cloud_client', None)
 
-    def check_credits(self, required: float) -> bool:
-        """检查用户积分是否足够
+    def check_credits(self, required: float):
+        """检查用户积分是否足够（三态返回）
 
         参数:
             required: 所需积分数量
         返回:
-            True 表示余额充足，False 表示不足或未登录
+            CreditCheckResult（见 core.cloud_api）：
+              - status == SUFFICIENT: 充足
+              - status == INSUFFICIENT: 不足（真的不够）
+              - status == QUERY_FAILED: 查询失败（网络/未登录/认证等）
+            向后兼容：CreditCheckResult 支持 bool() 判断，仅 SUFFICIENT 为 True。
+            插件应显式检查 .status 以区分"真不足"与"查询失败"，
+            给用户正确的提示（如"积分查询失败，请检查网络"）。
         """
+        from .cloud_api import CreditCheckResult, CreditCheckStatus
         client = self.get_cloud_client()
         if not client:
-            return False
+            return CreditCheckResult(
+                status=CreditCheckStatus.QUERY_FAILED,
+                reason="未登录云端账号",
+                status_code=401,
+            )
         return client.check_credits(required)
 
     def deduct_credits(self, amount: float, reason: str, task_uuid: str = "") -> dict:

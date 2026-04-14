@@ -172,12 +172,13 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
 
     def close(self):
         """关闭持久连接，供应用退出时调用"""
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
 
     def execute_with_retry(
         self,
@@ -185,6 +186,8 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         max_retries: int = 5,
     ) -> Any:
         """带重试的数据库操作"""
+        # TODO: 当前所有写操作串行化在单个持久连接上，高频写入会阻塞；
+        # 未来可改为连接池（如 DBUtils PooledDB）提升并发吞吐。
         last_error = None
         for attempt in range(max_retries):
             try:
@@ -208,7 +211,11 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         raise Exception(f"数据库操作失败，已重试{max_retries}次: {last_error}")
 
     def execute_read(self, operation: Callable) -> Any:
-        """执行只读操作"""
+        """执行只读操作
+
+        PyMySQL 连接非线程安全，必须在 self._lock 保护下完成整个查询，
+        并确保 operation 在锁内已将结果实体化（fetchall/list），不能返回仍依赖连接的 cursor。
+        """
         with self.get_connection() as conn:
             return operation(conn)
 

@@ -3,6 +3,8 @@
 import json
 import logging
 import time
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -23,6 +25,36 @@ class CloudAPIError(Exception):
     def __init__(self, message: str, status_code: int = 0):
         super().__init__(message)
         self.status_code = status_code
+
+
+class CreditCheckStatus(Enum):
+    """积分检查结果状态"""
+    SUFFICIENT = "sufficient"         # 余额充足
+    INSUFFICIENT = "insufficient"     # 余额不足
+    QUERY_FAILED = "query_failed"     # 查询失败（网络/认证等）
+
+
+@dataclass
+class CreditCheckResult:
+    """积分检查结果（三态）
+
+    - status: SUFFICIENT / INSUFFICIENT / QUERY_FAILED
+    - available: 查询成功时的可用余额；查询失败为 0
+    - reason: 查询失败时的原因描述（网络错误、认证失败等）
+    - status_code: 查询失败时的 HTTP 状态码（0 表示网络层错误）
+    """
+    status: CreditCheckStatus
+    available: float = 0.0
+    reason: str = ""
+    status_code: int = 0
+
+    @property
+    def ok(self) -> bool:
+        """兼容旧布尔契约：仅 SUFFICIENT 为 True"""
+        return self.status == CreditCheckStatus.SUFFICIENT
+
+    def __bool__(self) -> bool:
+        return self.ok
 
 
 class CloudAPIClient:
@@ -355,14 +387,41 @@ class CloudAPIClient:
         response = self._request("POST", "/api/v1/credits/deduct", json=payload)
         return response.json()
 
-    def check_credits(self, required: float) -> bool:
-        """检查积分是否足够"""
+    def check_credits(self, required: float) -> CreditCheckResult:
+        """检查积分是否足够（三态返回）
+
+        返回 CreditCheckResult：
+          - SUFFICIENT: 余额充足
+          - INSUFFICIENT: 余额不足（真的不够）
+          - QUERY_FAILED: 查询失败（网络/认证等异常），调用方应提示"查询失败"而非"不足"
+
+        注意：CreditCheckResult 支持 bool() 兼容旧契约（仅 SUFFICIENT 为 True），
+        但调用方应显式检查 .status 以区分"不足"与"查询失败"。
+        """
         try:
             data = self.get_balance()
-            available = data.get("balance", 0) - data.get("frozen", 0)
-            return available >= required
-        except CloudAPIError:
-            return False
+            available = float(data.get("balance", 0)) - float(data.get("frozen", 0))
+            if available >= required:
+                return CreditCheckResult(
+                    status=CreditCheckStatus.SUFFICIENT, available=available
+                )
+            return CreditCheckResult(
+                status=CreditCheckStatus.INSUFFICIENT, available=available
+            )
+        except CloudAPIError as e:
+            logger.warning(f"积分查询失败: {e}")
+            return CreditCheckResult(
+                status=CreditCheckStatus.QUERY_FAILED,
+                reason=str(e),
+                status_code=e.status_code,
+            )
+        except Exception as e:
+            logger.warning(f"积分查询异常: {e}")
+            return CreditCheckResult(
+                status=CreditCheckStatus.QUERY_FAILED,
+                reason=str(e),
+                status_code=0,
+            )
 
     # ========== AI 生图接口 ==========
 

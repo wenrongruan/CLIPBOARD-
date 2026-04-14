@@ -12,6 +12,33 @@ logger = logging.getLogger(__name__)
 
 _SERVICE_NAME = "SharedClipboard"
 
+# 当前实际使用的凭据存储后端：'keyring' / 'dpapi' / 'base64' / 'unknown'
+_active_backend: str = "unknown"
+_backend_warned: bool = False
+
+
+def _set_active_backend(backend: str):
+    """设置当前活动后端，首次降级时打 warning"""
+    global _active_backend, _backend_warned
+    if backend == _active_backend:
+        return
+    _active_backend = backend
+    if backend != "keyring" and not _backend_warned:
+        logger.warning(
+            "凭据存储已降级到 %s，安全等级低于系统钥匙串。", backend
+        )
+        _backend_warned = True
+
+
+def get_active_backend() -> str:
+    """返回当前凭据存储后端名称（'keyring' / 'dpapi' / 'base64' / 'unknown'）"""
+    return _active_backend
+
+
+def is_degraded() -> bool:
+    """当前凭据存储是否降级（非 keyring）"""
+    return _active_backend not in ("keyring", "unknown")
+
 
 class CredentialDecryptError(Exception):
     """已存在凭据但无法解密（DPAPI 解密失败、base64 损坏等）。
@@ -90,6 +117,7 @@ def store_credential(key: str, value: str):
     if _HAS_KEYRING:
         try:
             keyring.set_password(_SERVICE_NAME, key, value)
+            _set_active_backend("keyring")
             return
         except Exception as e:
             logger.warning(f"keyring 存储失败，回退到其他方式: {e}")
@@ -98,14 +126,15 @@ def store_credential(key: str, value: str):
         try:
             encrypted = _dpapi_encrypt(value)
             _write_to_config(key, encrypted)
+            _set_active_backend("dpapi")
             return
         except Exception as e:
             logger.warning(f"DPAPI 加密失败，回退到 base64 混淆: {e}")
 
     # 最后回退：base64 混淆（非真正加密，但防止肉眼直读）
-    logger.warning(f"凭据 '{key}' 使用 base64 混淆存储（非加密），建议安装 keyring 包")
     obfuscated = "b64:" + base64.b64encode(value.encode("utf-8")).decode("ascii")
     _write_to_config(key, obfuscated)
+    _set_active_backend("base64")
 
 
 def retrieve_credential(key: str) -> str:
@@ -114,6 +143,7 @@ def retrieve_credential(key: str) -> str:
         try:
             value = keyring.get_password(_SERVICE_NAME, key)
             if value is not None:
+                _set_active_backend("keyring")
                 return value
         except Exception as e:
             logger.warning(f"keyring 读取失败: {e}")
@@ -131,14 +161,18 @@ def retrieve_credential(key: str) -> str:
 
     if raw.startswith("dpapi:") and _HAS_DPAPI:
         try:
-            return _dpapi_decrypt(raw)
+            result = _dpapi_decrypt(raw)
+            _set_active_backend("dpapi")
+            return result
         except Exception as e:
             logger.error(f"DPAPI 解密凭据 '{key}' 失败: {e}")
             raise CredentialDecryptError(f"DPAPI 解密失败: {key}") from e
 
     if raw.startswith("b64:"):
         try:
-            return base64.b64decode(raw.removeprefix("b64:")).decode("utf-8")
+            result = base64.b64decode(raw.removeprefix("b64:")).decode("utf-8")
+            _set_active_backend("base64")
+            return result
         except Exception as e:
             logger.error(f"base64 解码凭据 '{key}' 失败: {e}")
             raise CredentialDecryptError(f"base64 解码失败: {key}") from e

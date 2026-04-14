@@ -33,6 +33,7 @@ class SyncService(QObject):
         self._device_id = Config.get_device_id()
         self._running = False
         self._current_interval = self._MIN_INTERVAL_MS
+        self._initialized = False
 
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._check_for_updates)
@@ -57,8 +58,12 @@ class SyncService(QObject):
                 if latest_id > self._last_sync_id:
                     self._last_sync_id = latest_id
                     Config.set_last_sync_id(latest_id)
+                self._initialized = True
             except Exception as e:
-                logger.warning(f"获取最新ID失败: {e}")
+                self._initialized = False
+                logger.warning(
+                    f"获取最新ID失败，同步服务将在下一轮重试初始化，避免重复推送历史条目: {e}"
+                )
 
             self._sync_timer.start(interval_ms)
             logger.info(f"同步服务已启动，间隔 {interval_ms}ms")
@@ -72,6 +77,19 @@ class SyncService(QObject):
     def _check_for_updates(self):
         if not self._running:
             return
+
+        # 启动时初始化失败的情况下，先尝试重新初始化游标，避免把全部历史条目视为新数据
+        if not self._initialized:
+            try:
+                latest_id = self.repository.get_latest_id()
+                if latest_id > self._last_sync_id:
+                    self._last_sync_id = latest_id
+                    Config.set_last_sync_id(latest_id)
+                self._initialized = True
+                logger.info("同步服务延迟初始化成功")
+            except Exception as e:
+                logger.warning(f"同步服务尚未就绪，跳过本轮同步: {e}")
+                return
 
         try:
             new_items = self.repository.get_new_items_since(

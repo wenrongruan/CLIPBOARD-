@@ -268,7 +268,29 @@ class SubscriptionWidget(QWidget):
         try:
             self.cloud_api.logout()
         except Exception as e:
+            # 服务端登出失败时不能静默清本地，否则用户以为已撤销但 token 仍有效
             logger.warning(f"退出登录异常: {e}")
+            force_reply = QMessageBox.question(
+                self,
+                "服务端未确认退出",
+                (
+                    "服务端未确认退出，可能因网络问题。\n"
+                    "如担心账号安全，请前往 jlike.com 手动撤销会话。\n\n"
+                    "是否仍在本地清除登录态？"
+                ),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if force_reply != QMessageBox.Yes:
+                return
+            self._reset_to_logged_out()
+            self.logout_completed.emit()
+            QMessageBox.information(
+                self,
+                "提示",
+                "已在本地清除登录态，但服务端会话可能仍有效，请自行到 jlike.com 撤销。",
+            )
+            return
 
         self._reset_to_logged_out()
         self.logout_completed.emit()
