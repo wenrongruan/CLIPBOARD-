@@ -1,4 +1,5 @@
 import logging
+from enum import Enum
 from typing import List
 
 from PySide6.QtCore import QObject, Signal, QTimer
@@ -8,6 +9,12 @@ from .repository import ClipboardRepository
 from config import Config
 
 logger = logging.getLogger(__name__)
+
+
+class SyncState(Enum):
+    STOPPED = "stopped"
+    POLLING_FAST = "polling_fast"  # 最短轮询间隔（有新数据）
+    POLLING_SLOW = "polling_slow"  # 已退避到较长间隔
 
 
 class SyncService(QObject):
@@ -29,6 +36,14 @@ class SyncService(QObject):
 
         self._sync_timer = QTimer(self)
         self._sync_timer.timeout.connect(self._check_for_updates)
+
+    @property
+    def state(self) -> SyncState:
+        if not self._running:
+            return SyncState.STOPPED
+        if self._current_interval == self._MIN_INTERVAL_MS:
+            return SyncState.POLLING_FAST
+        return SyncState.POLLING_SLOW
 
     def start(self, interval_ms: int = None):
         if interval_ms is None:

@@ -21,6 +21,10 @@ except ImportError:
 class MySQLDatabaseManager(AbstractDatabaseManager):
     """MySQL 数据库管理器"""
 
+    # 方言覆盖
+    placeholder = "%s"
+    is_mysql = True
+
     SCHEMA_VERSION = 2
 
     CREATE_TABLE_SQL = """
@@ -218,6 +222,32 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         except Exception as e:
             logger.error(f"数据库连接检查失败: {e}")
             return False
+
+    # ========== 方言透明的 SQL 执行（PyMySQL 用 %s 占位符，需 cursor 调用） ==========
+
+    @staticmethod
+    def _to_mysql(sql: str) -> str:
+        # Repository 用 ? 写 SQL，这里批量替换为 %s
+        return sql.replace("?", "%s") if "?" in sql else sql
+
+    def execute_write(self, conn, sql: str, params: tuple = ()):
+        with conn.cursor() as cursor:
+            cursor.execute(self._to_mysql(sql), params)
+            return cursor.rowcount, cursor.lastrowid
+
+    def fetch_one(self, conn, sql: str, params: tuple = ()):
+        with conn.cursor() as cursor:
+            cursor.execute(self._to_mysql(sql), params)
+            return cursor.fetchone()
+
+    def fetch_all(self, conn, sql: str, params: tuple = ()) -> list:
+        with conn.cursor() as cursor:
+            cursor.execute(self._to_mysql(sql), params)
+            return cursor.fetchall()
+
+    def execute_many(self, conn, sql: str, data: list):
+        with conn.cursor() as cursor:
+            cursor.executemany(self._to_mysql(sql), data)
 
     @staticmethod
     def test_connection(host: str, port: int, user: str, password: str, database: str = None) -> tuple[bool, str]:

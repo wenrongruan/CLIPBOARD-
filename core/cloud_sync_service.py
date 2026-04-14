@@ -222,6 +222,7 @@ class CloudSyncService(QObject):
     # 云端特有信号
     upload_completed = Signal(int)       # 上传成功的 item 数量
     quota_warning = Signal(int, int)     # (当前已用, 最大额度)
+    queue_overflow = Signal(int)         # 离线队列溢出，参数为被丢弃的条目 id
 
     # 内部信号：跨线程调度 worker 方法（避免 Q_ARG 不支持 list 类型）
     _trigger_push = Signal(list)
@@ -249,6 +250,7 @@ class CloudSyncService(QObject):
 
         # 待上传队列（离线队列）
         self._pending_upload_queue: deque = deque(maxlen=500)
+        self._dropped_count = 0  # 累计被离线队列挤出的条目数，仅用于告警节流
 
         # 工作线程 — HTTP 请求不再阻塞主线程
         self._worker_thread = QThread(self)
@@ -320,7 +322,14 @@ class CloudSyncService(QObject):
         logger.info("云端同步位置已重置")
 
     def enqueue_upload(self, item: ClipboardItem):
-        """将新条目加入上传队列"""
+        """将新条目加入上传队列；队列满时最旧条目被挤出并上报告警"""
+        if len(self._pending_upload_queue) >= self._pending_upload_queue.maxlen:
+            dropped = self._pending_upload_queue[0]
+            self._dropped_count += 1
+            logger.warning(
+                f"离线上传队列已满 ({self._pending_upload_queue.maxlen})，丢弃最旧条目 id={dropped.id}，累计丢弃 {self._dropped_count}"
+            )
+            self.queue_overflow.emit(dropped.id or 0)
         self._pending_upload_queue.append(item)
 
     # ========== 设备注册 ==========

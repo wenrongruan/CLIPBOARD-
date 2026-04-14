@@ -1,20 +1,11 @@
 import logging
 import time
-from typing import List, Optional, Tuple, Union, Any
+from typing import List, Optional, Tuple
 
 from .base_database import AbstractDatabaseManager
-from .database import DatabaseManager
-from .models import ClipboardItem, ContentType
+from .models import ClipboardItem
 
 logger = logging.getLogger(__name__)
-
-# 检查是否有 MySQL 支持
-try:
-    from .mysql_database import MySQLDatabaseManager
-    MYSQL_AVAILABLE = True
-except ImportError:
-    MYSQL_AVAILABLE = False
-    MySQLDatabaseManager = None
 
 
 class ClipboardRepository:
@@ -33,67 +24,38 @@ class ClipboardRepository:
 
     def __init__(self, db_manager: AbstractDatabaseManager):
         self.db = db_manager
-        # 检测数据库类型以选择正确的占位符
-        self._is_mysql = MYSQL_AVAILABLE and isinstance(db_manager, MySQLDatabaseManager)
-        # 检测 FTS5 是否可用
+        # 仅保留方言标识，SQL 执行全部委托给 db_manager
+        self._is_mysql = db_manager.is_mysql
         self._has_fts = self._detect_fts()
 
     def _detect_fts(self) -> bool:
-        """检测 FTS5 表是否存在"""
+        """检测 FTS5 表是否存在（仅 SQLite 适用）"""
         if self._is_mysql:
             return False
         try:
             def operation(conn):
-                cursor = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='clipboard_fts'"
+                row = self.db.fetch_one(
+                    conn,
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='clipboard_fts'",
                 )
-                return cursor.fetchone() is not None
+                return row is not None
             return self.db.execute_read(operation)
-        except (OSError, Exception) as e:
+        except Exception as e:
             logger.debug(f"FTS 检测失败: {e}")
             return False
 
+    # 方言透明的短别名，保持现有方法体的可读性
     def _execute_write(self, conn, sql: str, params: tuple = ()) -> tuple:
-        """执行写操作，返回 (rowcount, lastrowid)"""
-        if self._is_mysql:
-            sql = sql.replace("?", "%s")
-            with conn.cursor() as cursor:
-                cursor.execute(sql, params)
-                return cursor.rowcount, cursor.lastrowid
-        else:
-            cursor = conn.execute(sql, params)
-            return cursor.rowcount, cursor.lastrowid
+        return self.db.execute_write(conn, sql, params)
 
     def _fetchone(self, conn, sql: str, params: tuple = ()):
-        """获取单行结果（sqlite3.Row 或 dict）"""
-        if self._is_mysql:
-            sql = sql.replace("?", "%s")
-            with conn.cursor() as cursor:
-                cursor.execute(sql, params)
-                return cursor.fetchone()
-        else:
-            cursor = conn.execute(sql, params)
-            return cursor.fetchone()
+        return self.db.fetch_one(conn, sql, params)
 
     def _fetchall(self, conn, sql: str, params: tuple = ()) -> list:
-        """获取所有结果（sqlite3.Row 或 dict 列表）"""
-        if self._is_mysql:
-            sql = sql.replace("?", "%s")
-            with conn.cursor() as cursor:
-                cursor.execute(sql, params)
-                return cursor.fetchall()
-        else:
-            cursor = conn.execute(sql, params)
-            return cursor.fetchall()
+        return self.db.fetch_all(conn, sql, params)
 
     def _scalar(self, conn, sql: str, params: tuple = (), default=0):
-        """获取单个标量值，兼容 dict（MySQL）和 tuple（SQLite）"""
-        row = self._fetchone(conn, sql, params)
-        if row is None:
-            return default
-        if isinstance(row, dict):
-            return list(row.values())[0]
-        return row[0]
+        return self.db.fetch_scalar(conn, sql, params, default)
 
     def add_item(self, item: ClipboardItem) -> int:
         def operation(conn) -> int:
@@ -308,18 +270,14 @@ class ClipboardRepository:
             # 计算需要删除的数量
             delete_count = count - max_items
 
-            # 删除最旧的非收藏记录
+            # 删除最旧的非收藏记录（MySQL 不支持 DELETE 中引用子查询的同表，需走不同 SQL）
             if self._is_mysql:
-                # MySQL 不支持 DELETE 中使用 LIMIT 子查询，需要用不同方式
                 sql = """
                     DELETE FROM clipboard_items
                     WHERE is_starred = 0
                     ORDER BY created_at ASC
-                    LIMIT %s
+                    LIMIT ?
                 """
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, (delete_count,))
-                    deleted = cursor.rowcount
             else:
                 sql = """
                     DELETE FROM clipboard_items
@@ -330,8 +288,7 @@ class ClipboardRepository:
                         LIMIT ?
                     )
                 """
-                cursor = conn.execute(sql, (delete_count,))
-                deleted = cursor.rowcount
+            deleted, _ = self._execute_write(conn, sql, (delete_count,))
 
             logger.info(f"清理了 {deleted} 条旧记录")
             return deleted
@@ -403,14 +360,8 @@ class ClipboardRepository:
 
         def operation(conn):
             sql = "UPDATE clipboard_items SET cloud_id = ? WHERE id = ?"
-            if self._is_mysql:
-                sql = sql.replace("?", "%s")
             data = [(cloud_id, item_id) for item_id, cloud_id in pairs]
-            if self._is_mysql:
-                with conn.cursor() as cursor:
-                    cursor.executemany(sql, data)
-            else:
-                conn.executemany(sql, data)
+            self.db.execute_many(conn, sql, data)
 
         self.db.execute_with_retry(operation)
 

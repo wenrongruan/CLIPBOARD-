@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Optional
 from enum import Enum
 import logging
 import time
@@ -30,6 +30,11 @@ class ClipboardItem:
     def __post_init__(self):
         if self.id is not None and not self.content_hash:
             logger.warning(f"ClipboardItem(id={self.id}) 的 content_hash 为空")
+        # 不变式校验：类型与载荷一致
+        if self.content_type == ContentType.TEXT and self.text_content is None and self.id is None:
+            logger.debug("创建文本条目但 text_content 为 None")
+        if self.content_type == ContentType.IMAGE and self.image_data is None and self.image_thumbnail is None and self.id is None:
+            logger.debug("创建图片条目但缺少 image_data 与 image_thumbnail")
 
     @property
     def is_text(self) -> bool:
@@ -54,36 +59,22 @@ class ClipboardItem:
         return ""
 
     @classmethod
-    def from_db_row(cls, row: Union[dict, tuple]) -> "ClipboardItem":
-        if isinstance(row, dict):
-            return cls(
-                id=row["id"],
-                content_type=ContentType(row["content_type"]),
-                text_content=row.get("text_content"),
-                image_data=row.get("image_data"),
-                image_thumbnail=row.get("image_thumbnail"),
-                content_hash=row.get("content_hash", ""),
-                preview=row.get("preview", ""),
-                device_id=row.get("device_id", ""),
-                device_name=row.get("device_name", ""),
-                created_at=row.get("created_at", 0),
-                is_starred=bool(row.get("is_starred", False)),
-                cloud_id=row.get("cloud_id"),
-            )
-        # tuple 兼容路径（向后兼容）
+    def from_db_row(cls, row) -> "ClipboardItem":
+        # SQLite 的 sqlite3.Row 与 PyMySQL 的 DictCursor 都支持键下标访问
+        # Repository 的 _SELECT_FIELDS 统一包含全部列，可直接索引
         return cls(
-            id=row[0],
-            content_type=ContentType(row[1]),
-            text_content=row[2],
-            image_data=row[3],
-            image_thumbnail=row[4],
-            content_hash=row[5],
-            preview=row[6],
-            device_id=row[7],
-            device_name=row[8],
-            created_at=row[9],
-            is_starred=bool(row[10]),
-            cloud_id=row[11] if len(row) > 11 else None,
+            id=row["id"],
+            content_type=ContentType(row["content_type"]),
+            text_content=row["text_content"],
+            image_data=row["image_data"],
+            image_thumbnail=row["image_thumbnail"],
+            content_hash=row["content_hash"] or "",
+            preview=row["preview"] or "",
+            device_id=row["device_id"] or "",
+            device_name=row["device_name"] or "",
+            created_at=row["created_at"] or 0,
+            is_starred=bool(row["is_starred"]),
+            cloud_id=row["cloud_id"],
         )
 
     def to_db_tuple(self) -> tuple:

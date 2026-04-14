@@ -70,13 +70,9 @@ class CloudAPIClient:
         self._refresh_token_str = refresh_token
         t0 = time.time()
         Config.set_cloud_access_token(access_token)
-        logger.warning(f"[Login] access_token 持久化耗时 {time.time()-t0:.2f}s")
-        t0 = time.time()
         Config.set_cloud_refresh_token(refresh_token)
-        logger.warning(f"[Login] refresh_token 持久化耗时 {time.time()-t0:.2f}s")
-        t0 = time.time()
         self._update_auth_json(access_token, refresh_token)
-        logger.warning(f"[Login] auth.json 写入耗时 {time.time()-t0:.2f}s")
+        logger.debug(f"[Login] token 持久化总耗时 {time.time()-t0:.2f}s")
 
     def _update_auth_json(self, access_token: str, refresh_token: str):
         """同步更新 ~/.shared_clipboard/auth.json，供 chat_image_gen 等外部工具复用登录态。"""
@@ -186,7 +182,9 @@ class CloudAPIClient:
         return data
 
     def refresh_token(self) -> bool:
-        """使用 refresh_token 刷新 access_token，成功返回 True"""
+        """使用 refresh_token 刷新 access_token，成功返回 True。
+        仅在服务端明确返回 401/403 时才清除本地 token；网络错误保留 token 以便下次重试。
+        """
         if not self._refresh_token_str:
             return False
 
@@ -196,28 +194,33 @@ class CloudAPIClient:
                 json={"refresh_token": self._refresh_token_str},
                 timeout=15.0,
             )
-            if response.status_code == 200:
-                data = response.json()
-                self._save_tokens(
-                    data.get("token") or data.get("access_token", self._access_token),
-                    data.get("refresh_token", self._refresh_token_str),
-                )
-                logger.info("Token 刷新成功")
-                return True
-            else:
-                logger.warning(f"Token 刷新失败: {response.status_code}")
-                if response.status_code == 401:
-                    # refresh_token 也过期了，清除本地 token 使 UI 反映真实状态
-                    self._access_token = None
-                    self._refresh_token_str = None
-                    Config.set_cloud_access_token("")
-                    Config.set_cloud_refresh_token("")
-                    self._update_auth_json("", "")
-                    logger.info("Refresh token 已过期，已清除本地登录态")
-                return False
-        except Exception as e:
-            logger.warning(f"Token 刷新异常: {e}")
+        except httpx.HTTPError as e:
+            logger.warning(f"Token 刷新网络失败（保留本地 token 待下次重试）: {e}")
             return False
+
+        if response.status_code == 200:
+            try:
+                data = response.json()
+            except ValueError as e:
+                logger.warning(f"Token 刷新响应解析失败: {e}")
+                return False
+            self._save_tokens(
+                data.get("token") or data.get("access_token", self._access_token),
+                data.get("refresh_token", self._refresh_token_str),
+            )
+            logger.info("Token 刷新成功")
+            return True
+
+        logger.warning(f"Token 刷新失败: {response.status_code}")
+        if response.status_code in (401, 403):
+            # refresh_token 已过期/失效，清除本地登录态使 UI 反映真实状态
+            self._access_token = None
+            self._refresh_token_str = None
+            Config.set_cloud_access_token("")
+            Config.set_cloud_refresh_token("")
+            self._update_auth_json("", "")
+            logger.info("Refresh token 已过期，已清除本地登录态")
+        return False
 
     def logout(self):
         """退出登录，清除本地 tokens"""
@@ -407,3 +410,35 @@ class CloudAPIClient:
             self._client.close()
         except Exception:
             pass
+
+
+# ========== 全局单例 ==========
+# 为避免 main/MainWindow/SettingsDialog 各自 new CloudAPIClient 导致 token 不同步，
+# 所有 UI/服务层都应通过 get_cloud_client() 访问。
+_cloud_client_singleton: Optional[CloudAPIClient] = None
+
+
+def get_cloud_client(create_if_missing: bool = True) -> Optional[CloudAPIClient]:
+    """返回全局唯一的 CloudAPIClient，按需从已保存 token 恢复。
+    create_if_missing=False 时仅查，不会自动创建空壳客户端。
+    """
+    global _cloud_client_singleton
+    if _cloud_client_singleton is not None:
+        return _cloud_client_singleton
+    if not create_if_missing:
+        return None
+    access = Config.get_cloud_access_token()
+    # 始终创建实例（即使未登录也需要提供登录表单用）
+    client = CloudAPIClient(Config.get_cloud_api_url())
+    if access:
+        client.set_tokens(access, Config.get_cloud_refresh_token())
+    _cloud_client_singleton = client
+    return client
+
+
+def reset_cloud_client():
+    """关闭并清除单例（仅测试或完全退出时使用）"""
+    global _cloud_client_singleton
+    if _cloud_client_singleton is not None:
+        _cloud_client_singleton.close()
+        _cloud_client_singleton = None

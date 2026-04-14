@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 _SERVICE_NAME = "SharedClipboard"
 
+
+class CredentialDecryptError(Exception):
+    """已存在凭据但无法解密（DPAPI 解密失败、base64 损坏等）。
+    调用方应将此区别于 "凭据不存在"，通常意味着密钥环或加密 key 发生变化，需提示用户重新登录。"""
+
 # 尝试导入 keyring
 try:
     import keyring
@@ -128,15 +133,15 @@ def retrieve_credential(key: str) -> str:
         try:
             return _dpapi_decrypt(raw)
         except Exception as e:
-            logger.error(f"DPAPI 解密失败: {e}")
-            return ""
+            logger.error(f"DPAPI 解密凭据 '{key}' 失败: {e}")
+            raise CredentialDecryptError(f"DPAPI 解密失败: {key}") from e
 
     if raw.startswith("b64:"):
         try:
             return base64.b64decode(raw.removeprefix("b64:")).decode("utf-8")
         except Exception as e:
             logger.error(f"base64 解码凭据 '{key}' 失败: {e}")
-            return ""
+            raise CredentialDecryptError(f"base64 解码失败: {key}") from e
 
     return raw
 

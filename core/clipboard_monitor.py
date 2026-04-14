@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -29,6 +30,7 @@ class ClipboardMonitor(QObject):
         self._last_image_hash: Optional[str] = None
         self._monitoring = False
         self._add_counter = 0  # 计数器，每 50 次 add 才清理
+        self._counter_lock = threading.Lock()  # 保护 _add_counter 在主线程和图片后台线程的并发访问
         self._image_executor = ThreadPoolExecutor(max_workers=1)
 
         # 使用轮询定时器代替 dataChanged 信号（Windows 上更可靠）
@@ -36,14 +38,16 @@ class ClipboardMonitor(QObject):
         self._poll_timer.timeout.connect(self._poll_clipboard)
 
     def _maybe_cleanup(self):
-        """每 50 次 add 才执行一次清理"""
-        self._add_counter += 1
-        if self._add_counter >= 50:
+        """每 50 次 add 才执行一次清理（线程安全：图片后台线程也会调用）"""
+        with self._counter_lock:
+            self._add_counter += 1
+            if self._add_counter < 50:
+                return
             self._add_counter = 0
-            self.repository.cleanup_old_items(Config.get_max_items())
-            retention_days = Config.get_retention_days()
-            if retention_days > 0:
-                self.repository.cleanup_expired_items(retention_days)
+        self.repository.cleanup_old_items(Config.get_max_items())
+        retention_days = Config.get_retention_days()
+        if retention_days > 0:
+            self.repository.cleanup_expired_items(retention_days)
 
     def start(self):
         if not self._monitoring:

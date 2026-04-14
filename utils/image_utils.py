@@ -41,16 +41,26 @@ def compress_for_cloud(image_data: bytes, max_dimension: int = 2048) -> bytes:
     - 转换为 JPEG 格式（质量 85）
     - RGBA/P/LA 模式转 RGB
     """
-    with bytes_to_image(image_data) as img:
-        w, h = img.size
-
+    # resize/convert 返回新 Image 对象，旧对象由栈变量自然释放；此处手动 close 避免大图内存驻留
+    src = bytes_to_image(image_data)
+    try:
+        w, h = src.size
+        current = src
         if max(w, h) > max_dimension:
             ratio = max_dimension / max(w, h)
-            img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-
-        if img.mode in ('RGBA', 'P', 'LA'):
-            img = img.convert('RGB')
-
+            resized = src.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+            current = resized
+        if current.mode in ('RGBA', 'P', 'LA'):
+            converted = current.convert('RGB')
+            if current is not src:
+                current.close()
+            current = converted
         buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=85, optimize=True)
-        return buf.getvalue()
+        try:
+            current.save(buf, format='JPEG', quality=85, optimize=True)
+            return buf.getvalue()
+        finally:
+            if current is not src:
+                current.close()
+    finally:
+        src.close()

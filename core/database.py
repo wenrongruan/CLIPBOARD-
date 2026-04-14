@@ -215,3 +215,18 @@ class DatabaseManager(AbstractDatabaseManager):
         except Exception as e:
             logger.error(f"数据库连接检查失败: {e}")
             return False
+
+    # ========== 方言透明的 SQL 执行（sqlite3.Connection 原生支持 ?） ==========
+
+    def execute_write(self, conn, sql: str, params: tuple = ()):
+        cursor = conn.execute(sql, params)
+        return cursor.rowcount, cursor.lastrowid
+
+    def fetch_one(self, conn, sql: str, params: tuple = ()):
+        return conn.execute(sql, params).fetchone()
+
+    def fetch_all(self, conn, sql: str, params: tuple = ()) -> list:
+        return conn.execute(sql, params).fetchall()
+
+    def execute_many(self, conn, sql: str, data: list):
+        conn.executemany(sql, data)

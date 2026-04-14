@@ -5,12 +5,25 @@ import json
 import stat
 import uuid
 import logging
-import hashlib
 import platform
 import threading
+from enum import Enum
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+class SyncMode(str, Enum):
+    LOCAL = "local"
+    MYSQL = "mysql"
+    CLOUD = "cloud"
+
+    @classmethod
+    def parse(cls, value: str) -> "SyncMode":
+        try:
+            return cls(value)
+        except ValueError:
+            return cls.LOCAL
 
 
 class Config:
@@ -113,11 +126,17 @@ class Config:
 
     @classmethod
     def _schedule_save(cls):
-        """延迟写入：合并高频 set_setting 调用，最多延迟 2 秒"""
+        """延迟写入：合并高频 set_setting 调用，最多延迟 2 秒。
+        QTimer 必须在主线程创建/启动，非主线程调用时直接落盘。
+        """
         cls._save_dirty = True
-        # 如果在 Qt 事件循环中，使用 QTimer 延迟写入
         try:
-            from PySide6.QtCore import QTimer
+            from PySide6.QtCore import QTimer, QThread, QCoreApplication
+            app = QCoreApplication.instance()
+            # 未初始化 Qt 或当前不在主线程：直接落盘，避免跨线程使用 QTimer
+            if app is None or QThread.currentThread() is not app.thread():
+                cls._flush_to_disk()
+                return
             if cls._save_timer is None:
                 cls._save_timer = QTimer()
                 cls._save_timer.setSingleShot(True)
@@ -125,7 +144,6 @@ class Config:
             if not cls._save_timer.isActive():
                 cls._save_timer.start(2000)
         except (ImportError, RuntimeError):
-            # Qt 未初始化或无事件循环时直接写入
             cls._flush_to_disk()
 
     @classmethod
@@ -219,12 +237,18 @@ class Config:
     # ========== 同步模式配置 ==========
     @classmethod
     def get_sync_mode(cls) -> str:
-        """获取同步模式: local, mysql, cloud"""
-        return cls.get_setting("sync_mode", "local")
+        """获取同步模式: local, mysql, cloud（字符串形式，调用方兼容）"""
+        return cls.get_setting("sync_mode", SyncMode.LOCAL.value)
+
+    @classmethod
+    def get_sync_mode_enum(cls) -> SyncMode:
+        """获取同步模式的枚举形式，便于类型安全的分支判断"""
+        return SyncMode.parse(cls.get_sync_mode())
 
     @classmethod
     def set_sync_mode(cls, mode: str):
-        if mode in ("local", "mysql", "cloud"):
+        valid = {m.value for m in SyncMode}
+        if mode in valid:
             cls.set_setting("sync_mode", mode)
         else:
             logger.warning(f"无效的同步模式: {mode}")
@@ -258,9 +282,18 @@ class Config:
             raise ValueError(f"不允许的 API 域名: {hostname}")
 
     @classmethod
+    def _retrieve_credential_safe(cls, key: str) -> str:
+        """读取凭据；解密失败时返回空串但明确告警（调用方将视同未登录）。"""
+        from utils.secure_store import retrieve_credential, CredentialDecryptError
+        try:
+            return retrieve_credential(key)
+        except CredentialDecryptError as e:
+            logger.error(f"凭据 '{key}' 存在但无法解密，视同未登录: {e}")
+            return ""
+
+    @classmethod
     def get_cloud_access_token(cls) -> str:
-        from utils.secure_store import retrieve_credential
-        return retrieve_credential("cloud_access_token")
+        return cls._retrieve_credential_safe("cloud_access_token")
 
     @classmethod
     def set_cloud_access_token(cls, token: str):
@@ -269,8 +302,7 @@ class Config:
 
     @classmethod
     def get_cloud_refresh_token(cls) -> str:
-        from utils.secure_store import retrieve_credential
-        return retrieve_credential("cloud_refresh_token")
+        return cls._retrieve_credential_safe("cloud_refresh_token")
 
     @classmethod
     def set_cloud_refresh_token(cls, token: str):
@@ -312,12 +344,11 @@ class Config:
 
     @classmethod
     def get_mysql_config(cls) -> dict:
-        from utils.secure_store import retrieve_credential
         return {
             "host": cls.get_setting("mysql_host", "localhost"),
             "port": cls.get_setting("mysql_port", 3306),
             "user": cls.get_setting("mysql_user", ""),
-            "password": retrieve_credential("mysql_password"),
+            "password": cls._retrieve_credential_safe("mysql_password"),
             "database": cls.get_setting("mysql_database", "clipboard"),
         }
 

@@ -156,7 +156,7 @@ class PluginManager(QObject):
 
         # 动态导入（防止路径遍历攻击）
         entry_point = manifest.get("entry_point", "plugin.py")
-        if ".." in entry_point or os.path.isabs(entry_point):
+        if os.path.isabs(entry_point):
             logger.warning(f"Suspicious entry_point in {plugin_id}: {entry_point}")
             self._plugin_status[plugin_id] = {
                 "status": "error",
@@ -164,6 +164,18 @@ class PluginManager(QObject):
             }
             return
         module_path = plugin_path / entry_point
+        # resolve 后校验最终路径仍在插件目录内，防止 .. 或软链逃逸
+        try:
+            resolved_module = module_path.resolve(strict=False)
+            resolved_plugin = plugin_path.resolve(strict=False)
+            resolved_module.relative_to(resolved_plugin)
+        except (ValueError, OSError) as e:
+            logger.warning(f"Entry point escapes plugin dir in {plugin_id}: {entry_point} ({e})")
+            self._plugin_status[plugin_id] = {
+                "status": "error",
+                "message": f"入口路径越界: {entry_point}",
+            }
+            return
         if not module_path.exists():
             logger.warning(f"Entry point not found: {module_path}")
             self._plugin_status[plugin_id] = {

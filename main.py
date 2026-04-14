@@ -190,13 +190,9 @@ class ClipboardApp:
         if Config.get_cloud_access_token():
             try:
                 from core.cloud_sync_service import CloudSyncService
-                from core.cloud_api import CloudAPIClient
+                from core.cloud_api import get_cloud_client
 
-                self.cloud_api = CloudAPIClient(Config.get_cloud_api_url())
-                self.cloud_api.set_tokens(
-                    Config.get_cloud_access_token(),
-                    Config.get_cloud_refresh_token(),
-                )
+                self.cloud_api = get_cloud_client()
                 self.cloud_sync_service = CloudSyncService(self.repository, self.cloud_api)
 
                 # 监听剪贴板新增条目，自动加入云端上传队列
@@ -336,9 +332,12 @@ class ClipboardApp:
         if self.cloud_sync_service:
             self.cloud_sync_service.stop()
         self.tray_icon.hide()
-        # 关闭云端 API 客户端
-        if self.cloud_api is not None:
-            self.cloud_api.close()
+        # 关闭云端 API 客户端（统一通过 reset_cloud_client 清理单例）
+        try:
+            from core.cloud_api import reset_cloud_client
+            reset_cloud_client()
+        except Exception:
+            pass
         # 刷新延迟写入的配置
         Config.flush()
         # 关闭持久数据库连接
