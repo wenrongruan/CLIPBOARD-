@@ -97,7 +97,7 @@ class AppSettings:
     sync_mode: str = "local"
     last_sync_id: int = 0
     cloud_last_sync_id: int = 0
-    cloud_api_url: str = "https://api.jlike.com"
+    cloud_api_url: str = "https://www.jlike.com"
     cloud_user_email: str = ""
 
     # UI
@@ -131,6 +131,14 @@ _MYSQL_FLAT_KEYS = {f"mysql_{f.name}" for f in fields(MysqlConnection)}
 _APP_FIELD_NAMES = {f.name for f in fields(AppSettings)} - {"mysql"} | _MYSQL_FLAT_KEYS
 
 
+def _normalize_cloud_api_url(url: str) -> str:
+    # Why: 历史版本默认值误填 api.jlike.com(未部署子域),导致新装机订阅/同步全部 ConnectError。
+    # 读取 settings.json 时静默改写为 www.jlike.com,老用户升级后下次保存即自愈。
+    if url == "https://api.jlike.com":
+        return "https://www.jlike.com"
+    return url
+
+
 def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
     """返回 (AppSettings, raw_extras)。extras 包含未被 AppSettings schema 消费的键。"""
     extras = {k: v for k, v in data.items() if k not in _APP_FIELD_NAMES}
@@ -155,7 +163,7 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         sync_mode=data.get("sync_mode", "local"),
         last_sync_id=int(data.get("last_sync_id", 0)),
         cloud_last_sync_id=int(data.get("cloud_last_sync_id", 0)),
-        cloud_api_url=data.get("cloud_api_url", "https://www.jlike.com"),
+        cloud_api_url=_normalize_cloud_api_url(data.get("cloud_api_url", "https://www.jlike.com")),
         cloud_user_email=data.get("cloud_user_email", ""),
         dock_edge=data.get("dock_edge", "right"),
         hotkey=data.get("hotkey", ""),
