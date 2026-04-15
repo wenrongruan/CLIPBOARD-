@@ -69,8 +69,14 @@ class DatabaseManager(AbstractDatabaseManager):
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
-        self._lock = threading.Lock()
+        # Why: SQLite WAL 模式允许「多读 + 单写」并发，但前提是每个 reader
+        # 用自己的 connection。原先全局共享一条 connection + 全局锁，把
+        # 所有读写串行化掉了，UI 线程读列表会被同步线程的写入挡住。
+        # 改为每线程一份 connection；写操作在 SQLite 引擎层仍是串行
+        # （busy_timeout=30s + execute_with_retry 处理 BUSY）。
+        self._tls = threading.local()
+        self._all_conns: list[sqlite3.Connection] = []
+        self._conns_lock = threading.Lock()
         self._ensure_db_directory()
         self._init_database()
 
@@ -148,32 +154,35 @@ class DatabaseManager(AbstractDatabaseManager):
         conn.execute("PRAGMA temp_store=MEMORY")
         return conn
 
+    def _get_thread_conn(self) -> sqlite3.Connection:
+        """返回当前线程的 connection；首次访问时创建。
+        SQLite 是本地文件，连接稳定后不会被动断开，故省去每次取用前的 SELECT 1
+        健康检查；操作失败由 execute_with_retry 处理 BUSY，连接级异常向上传播。"""
+        conn = getattr(self._tls, "conn", None)
+        if conn is not None:
+            return conn
+        new_conn = self._create_connection()
+        self._tls.conn = new_conn
+        with self._conns_lock:
+            self._all_conns.append(new_conn)
+        return new_conn
+
     @contextmanager
     def get_connection(self) -> sqlite3.Connection:
-        """复用持久连接，仅在出错时重建。使用锁保证线程安全。"""
-        with self._lock:
-            if self._conn is None:
-                self._conn = self._create_connection()
-            else:
-                try:
-                    self._conn.execute("SELECT 1")
-                except Exception:
-                    try:
-                        self._conn.close()
-                    except Exception:
-                        pass
-                    self._conn = self._create_connection()
-            yield self._conn
+        """yield 当前线程独占的 connection（无全局锁，允许并发读）。"""
+        yield self._get_thread_conn()
 
     def close(self):
-        """关闭持久连接，供应用退出时调用"""
-        with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-                self._conn = None
+        """关闭所有线程的 connection，供应用退出时调用。"""
+        with self._conns_lock:
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self._tls = threading.local()
 
     def execute_with_retry(
         self,

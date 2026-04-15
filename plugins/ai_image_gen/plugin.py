@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,26 @@ def _locate_chat_image_gen():
         except OSError:
             continue
     return None, None
+
+
+def _schedule_temp_cleanup(paths: list[str], delay_seconds: int = 300) -> None:
+    """启动 daemon 线程，在 delay 后删除临时文件。
+    Why: subprocess.Popen 不等待，子进程读完临时文件就不再需要；不清理则
+    每次 AI 生图都会在系统 temp 目录留一份副本（含完整剪贴板内容），
+    长期运行会泄漏隐私。daemon 线程随主进程退出而终止。
+    """
+    if not paths:
+        return
+
+    def _cleanup() -> None:
+        time.sleep(delay_seconds)
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    threading.Thread(target=_cleanup, daemon=True, name="ai_temp_cleanup").start()
 
 
 def _find_python() -> str:
@@ -186,6 +208,9 @@ class AIImageGenPlugin(PluginBase):
                 if sys.platform == "win32"
                 else 0,
             )
+
+            # 子进程已开始读取临时文件；5 分钟后清理足够覆盖启动+读取窗口
+            _schedule_temp_cleanup(list(temp_files))
 
             return PluginResult(
                 success=True,

@@ -62,6 +62,8 @@ class MainWindow(EdgeHiddenWindow):
     _image_load_done = Signal(object)
     # 内部信号：保存图片任务完成后回到主线程弹提示 (success: bool, path: str, error: str)
     _save_image_done = Signal(bool, str, str)
+    # 内部信号：插件需要的完整图片加载完成 (plugin_id, action_id, full_item_or_none)
+    _plugin_item_loaded = Signal(str, str, object)
 
     def __init__(
         self,
@@ -198,6 +200,8 @@ class MainWindow(EdgeHiddenWindow):
         self._image_load_done.connect(self._handle_image_loaded)
         # 跨线程：保存图片完成 → 主线程弹提示
         self._save_image_done.connect(self._handle_save_image_done)
+        # 跨线程：插件所需完整图片加载完成 → 主线程派发给 plugin_manager
+        self._plugin_item_loaded.connect(self._handle_plugin_item_loaded)
 
         # 剪贴板监控信号
         self.clipboard_monitor.item_added.connect(self._on_item_added)
@@ -708,20 +712,48 @@ class MainWindow(EdgeHiddenWindow):
     # ========== 插件执行 ==========
 
     def _run_plugin_action(self, plugin_id: str, action_id: str, item: ClipboardItem):
-        """执行插件动作"""
-        # 获取完整数据（图片需要从数据库加载）
+        """执行插件动作。
+        Why: 图片完整数据需要从 SQLite 加载（可能数 MB BLOB），不能在主线程
+        同步阻塞 UI；通过 worker + signal 把 DB IO 切到后台线程。
+        """
         if isinstance(item, ImageClipboardItem):
-            full_item = self.repository.get_item_by_id(item.id)
-            if isinstance(full_item, ImageClipboardItem) and full_item.image_data:
-                item = full_item
-            else:
-                self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
-                return
+            self._show_plugin_feedback(
+                t("plugin_executing", name="...", percent=0),
+                "pluginProgress",
+                show_cancel=False,
+            )
+            item_id = item.id
+            repo = self.repository
+            signal = self._plugin_item_loaded
 
+            def _load():
+                try:
+                    full = repo.get_item_by_id(item_id)
+                except Exception as e:
+                    logger.error(f"加载插件所需图片失败: {e}", exc_info=True)
+                    full = None
+                signal.emit(plugin_id, action_id, full)
+
+            self._copy_executor.submit(_load)
+            return
+
+        self._dispatch_plugin_action(plugin_id, action_id, item)
+
+    def _handle_plugin_item_loaded(
+        self, plugin_id: str, action_id: str, full_item
+    ):
+        """主线程槽：插件所需的完整图片加载完成后派发"""
+        if not isinstance(full_item, ImageClipboardItem) or not full_item.image_data:
+            self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
+            return
+        self._dispatch_plugin_action(plugin_id, action_id, full_item)
+
+    def _dispatch_plugin_action(
+        self, plugin_id: str, action_id: str, item: ClipboardItem
+    ):
         if not self.plugin_manager.run_action(plugin_id, action_id, item):
             return  # 被拒绝（已有任务在执行）
 
-        # 显示进度
         plugin_name = self.plugin_manager.get_plugin_name(plugin_id)
         self._show_plugin_feedback(
             t("plugin_executing", name=plugin_name, percent=0),
