@@ -21,6 +21,7 @@ from config import (
     set_plugin_enabled,
     get_user_plugins_dir,
     get_config_dir,
+    MysqlConnection,
 )
 from i18n import t, get_languages
 from .plugin_config_dialog import PluginConfigDialog
@@ -534,7 +535,9 @@ class SettingsDialog(QDialog):
             host = self.mysql_host_edit.text() or "localhost"
             port = self.mysql_port_spin.value()
             user = self.mysql_user_edit.text()
-            password = self.mysql_password_edit.text()
+            # Why: 密码字段不预填(避免明文展示),重进对话框时 text() 为空。
+            # 为空则回退 keyring 里已保存的密码,否则用户每次打开都要重输一遍。
+            password = self.mysql_password_edit.text() or get_mysql_config().get("password", "")
             database = self.mysql_database_edit.text() or "clipboard"
 
             success, message = MySQLDatabaseManager.test_connection(
@@ -542,16 +545,16 @@ class SettingsDialog(QDialog):
             )
 
             if success:
-                QMessageBox.information(self, t("connection_success"), message)
+                QMessageBox.information(self, f"MySQL — {t('connection_success')}", message)
             else:
-                QMessageBox.warning(self, t("connection_failed"), message)
+                QMessageBox.warning(self, f"MySQL — {t('connection_failed')}", message)
         except ImportError:
             QMessageBox.warning(
                 self, t("missing_dependency"),
                 t("pymysql_required")
             )
         except Exception as e:
-            QMessageBox.critical(self, t("error"), f"{str(e)}")
+            QMessageBox.critical(self, f"MySQL — {t('error')}", f"{str(e)}")
 
     def _on_profile_changed(self, name: str):
         profiles = settings().db_profiles
@@ -693,7 +696,9 @@ class SettingsDialog(QDialog):
                 host = self.mysql_host_edit.text() or "localhost"
                 port = self.mysql_port_spin.value()
                 user = self.mysql_user_edit.text()
-                password = self.mysql_password_edit.text()
+                password_input = self.mysql_password_edit.text()
+                # 字段为空时用 keyring 已存密码测试连接(见 _test_mysql_connection 注释)
+                password = password_input or get_mysql_config().get("password", "")
                 database = self.mysql_database_edit.text() or "clipboard"
 
                 success, message = MySQLDatabaseManager.test_connection(
@@ -703,7 +708,7 @@ class SettingsDialog(QDialog):
                 if not success:
                     reply = QMessageBox.question(
                         self,
-                        t("connection_failed"),
+                        f"MySQL — {t('connection_failed')}",
                         t("save_anyway", message=message),
                         QMessageBox.Yes | QMessageBox.No,
                         QMessageBox.No,
@@ -717,16 +722,20 @@ class SettingsDialog(QDialog):
                 )
                 return
 
-            # Why: 真正确认保存时才将明文密码写入 keyring。若用户输入为空，
-            # 保留 keyring 中已有密码（set_mysql_config 会覆盖，空字符串会清除）。
-            if password:
-                try:
+            # Why: 仅当用户在字段里输入了新密码才写 keyring；字段为空则保留旧密码,
+            # 其他字段(host/user/database)即使密码没变也要落库。
+            try:
+                if password_input:
                     set_mysql_config(
                         host=host, port=port, user=user,
-                        password=password, database=database,
+                        password=password_input, database=database,
                     )
-                except Exception as e:
-                    logger.warning(f"保存 MySQL 配置到安全存储失败: {e}")
+                else:
+                    update_settings(mysql=MysqlConnection(
+                        host=host, port=port, user=user, database=database,
+                    ))
+            except Exception as e:
+                logger.warning(f"保存 MySQL 配置到安全存储失败: {e}")
 
         self.accept()
 

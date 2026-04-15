@@ -238,11 +238,12 @@ class SubscriptionWidget(QWidget):
             self.devices_label.setText(f"已注册设备: {devices_count}/{max_devices}")
 
         except CloudAPIError as e:
-            self.plan_label.setText("加载失败")
-            self.status_label.setText(str(e))
+            self.plan_label.setText("云端加载失败")
+            self.status_label.setText(f"云端: {e}")
             logger.warning(f"加载订阅信息失败: {e}")
         except Exception as e:
-            self.plan_label.setText("加载失败")
+            self.plan_label.setText("云端加载失败")
+            self.status_label.setText(f"云端异常: {e}")
             logger.error(f"加载订阅信息异常: {e}")
 
     def _open_pricing(self):

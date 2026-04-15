@@ -346,12 +346,14 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
             error_msg = e.args[1] if len(e.args) > 1 else str(e)
 
             if error_code == 1045:
-                return False, "认证失败：用户名或密码错误"
+                return False, f"MySQL 认证失败：用户名或密码错误（user={user}@{host}:{port}）"
             elif error_code == 2003:
-                return False, f"无法连接到 {host}:{port}，请检查主机和端口"
+                return False, f"MySQL 无法连接到 {host}:{port}，请检查主机和端口"
             elif error_code == 1049:
-                return False, f"数据库 '{database}' 不存在"
+                return False, f"MySQL 数据库 '{database}' 不存在（{host}:{port}）"
+            elif error_code == 1044:
+                return False, f"MySQL 用户 '{user}' 对数据库 '{database}' 没有访问权限"
             else:
-                return False, f"连接失败: {error_msg}"
+                return False, f"MySQL 连接失败: {error_msg}"
         except Exception as e:
-            return False, f"连接失败: {str(e)}"
+            return False, f"MySQL 连接失败: {str(e)}"
