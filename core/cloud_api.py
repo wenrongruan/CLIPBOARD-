@@ -2,6 +2,9 @@
 
 import json
 import logging
+import os
+import platform
+import stat
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -68,13 +71,14 @@ class CloudAPIClient:
     """云端 API 客户端，处理认证和所有 HTTP 请求"""
 
     # 允许下载图片的域名白名单（presigned URL 可能来自 CDN/S3）
+    # Why: aliyuncs.com 是阿里云公共父域，任何租户可注册子域，作为父域匹配会被绕过。
+    # 此处只保留精确 region 级 OSS 域名；若需自有 bucket 另行通过子域匹配（bucket.region.aliyuncs.com）。
     _ALLOWED_DOWNLOAD_DOMAINS = {
         "www.jlike.com",
         "api.jlike.com",
         "s3.amazonaws.com",
         "s3.us-east-1.amazonaws.com",
         "storage.googleapis.com",
-        "aliyuncs.com",
         "oss-cn-hangzhou.aliyuncs.com",
         "oss-cn-shanghai.aliyuncs.com",
         "oss-cn-beijing.aliyuncs.com",
@@ -114,19 +118,53 @@ class CloudAPIClient:
         logger.debug(f"[Login] token 持久化总耗时 {time.time()-t0:.2f}s")
 
     def _update_auth_json(self, access_token: str, refresh_token: str):
-        """同步更新 ~/.shared_clipboard/auth.json，供 chat_image_gen 等外部工具复用登录态。"""
+        """同步更新 ~/.shared_clipboard/auth.json，供 chat_image_gen 等外部工具复用登录态。
+
+        auth.json 含有有效的 access/refresh token，同机其他用户账号或进程读取即可
+        直接以当前用户身份访问云端 API。写入流程：
+          1. 先 atomic-write 到 .tmp，再 os.replace 到最终文件（避免写入中途被读到半文件）
+          2. 非 Windows 平台显式 chmod 0600，确保文件仅属主可读写
+          3. Windows 平台依赖 NTFS 默认 ACL 继承（用户 profile 下默认仅 SYSTEM/当前用户可读）
+        """
         try:
             auth_dir = Path.home() / ".shared_clipboard"
             auth_dir.mkdir(parents=True, exist_ok=True)
             auth_file = auth_dir / "auth.json"
+            tmp_file = auth_dir / "auth.json.tmp"
             data = {
                 "api_base_url": self._base_url,
                 "access_token": access_token,
                 "refresh_token": refresh_token,
             }
-            auth_file.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            serialized = json.dumps(data, ensure_ascii=False, indent=2)
+
+            # 非 Windows 平台：先以 0600 权限创建 tmp 文件再写入
+            if platform.system() != "Windows":
+                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                fd = os.open(str(tmp_file), flags, 0o600)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(serialized)
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    raise
+                try:
+                    os.chmod(tmp_file, stat.S_IRUSR | stat.S_IWUSR)
+                except OSError:
+                    pass
+            else:
+                tmp_file.write_text(serialized, encoding="utf-8")
+
+            os.replace(tmp_file, auth_file)
+
+            if platform.system() != "Windows":
+                try:
+                    os.chmod(auth_file, stat.S_IRUSR | stat.S_IWUSR)
+                except OSError:
+                    pass
         except Exception:
             logger.warning("更新 auth.json 失败", exc_info=True)
 

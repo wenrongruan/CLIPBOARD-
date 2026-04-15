@@ -51,8 +51,6 @@ class SmartTextPlugin(PluginBase):
         ]
 
     def execute(self, action_id, item, progress_callback=None, cancel_check=None):
-        # 插件仅声明支持 ContentType.TEXT，框架理应只派发 TextClipboardItem；
-        # 这里用 isinstance 做类型收缩以安全访问 text_content（不是文本则拒绝执行）
         if not isinstance(item, TextClipboardItem) or not item.text_content:
             return PluginResult(success=False, error_message="无文本内容")
 

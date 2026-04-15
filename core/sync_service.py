@@ -1,14 +1,4 @@
-"""本地同步服务 — 轮询共享数据库,拉取其他设备写入的条目。
-
-状态机:
-- STOPPED:未启动。
-- UNINITIALIZED:已启动但游标未初始化(首次 get_latest_id 失败,下一轮重试)。
-- POLLING_FAST:有新数据,使用最短轮询间隔。
-- POLLING_SLOW:无新数据,轮询间隔已退避。
-
-`_state` 是唯一的生命周期标志;in-flight bool 在当前实现中不需要(所有工作
-都在主线程的 QTimer tick 内完成)。
-"""
+"""本地同步服务:轮询共享数据库,拉取其他设备写入的条目。"""
 
 import logging
 from enum import Enum
@@ -72,7 +62,6 @@ class SyncService(QObject):
             latest_id = self.repository.get_latest_id()
             if latest_id > self._last_sync_id:
                 self._last_sync_id = latest_id
-                update_settings(last_sync_id=latest_id)
             self._transition(SyncState.POLLING_FAST)
         except Exception as e:
             self._transition(SyncState.UNINITIALIZED)
@@ -88,6 +77,8 @@ class SyncService(QObject):
         if self._state == SyncState.STOPPED:
             return
         self._sync_timer.stop()
+        # 退出时才落盘游标,避免热路径每秒 serialize 全量 settings
+        update_settings(last_sync_id=self._last_sync_id)
         self._transition(SyncState.STOPPED)
         logger.info("同步服务已停止")
 
@@ -101,7 +92,6 @@ class SyncService(QObject):
                 latest_id = self.repository.get_latest_id()
                 if latest_id > self._last_sync_id:
                     self._last_sync_id = latest_id
-                    update_settings(last_sync_id=latest_id)
                 self._transition(SyncState.POLLING_FAST)
                 logger.info("同步服务延迟初始化成功")
             except Exception as e:
@@ -115,7 +105,6 @@ class SyncService(QObject):
 
             if new_items:
                 self._last_sync_id = max(item.id for item in new_items)
-                update_settings(last_sync_id=self._last_sync_id)
                 logger.debug(f"发现 {len(new_items)} 条来自其他设备的新记录")
                 self.new_items_available.emit(new_items)
 
@@ -146,10 +135,10 @@ class SyncService(QObject):
         self._check_for_updates()
 
     def advance_sync_id(self, new_id: int):
-        """将同步游标前进到指定 ID,避免已知条目被重复通知"""
+        """将同步游标前进到指定 ID,避免已知条目被重复通知。
+        内存状态权威,落盘在 stop() 统一处理,避免热路径全量 settings 比较。"""
         if new_id > self._last_sync_id:
             self._last_sync_id = new_id
-            update_settings(last_sync_id=new_id)
 
     def reset_sync_position(self):
         self._last_sync_id = 0

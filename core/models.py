@@ -1,15 +1,8 @@
-"""剪贴板条目数据模型。
-
-设计为 sealed union:`ClipboardItem` 抽象基类承载共享元数据,
-`TextClipboardItem`/`ImageClipboardItem` 为两个终端变体。
-调用端应使用 `isinstance` 或 `match` 进行类型收缩后再访问载荷字段,
-而不是通过可空字段组合来推断类型——这样从类型系统层面消除
-"文本条目带 image_data"之类的不可能状态。
-"""
+"""剪贴板条目数据模型。"""
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Union
+from typing import ClassVar, Optional, Union
 import logging
 import time
 
@@ -24,6 +17,8 @@ class ContentType(Enum):
 @dataclass
 class ClipboardItem:
     """剪贴板条目抽象基类。不要直接实例化,使用子类。"""
+
+    content_type: ClassVar[ContentType]  # 子类必须覆盖
 
     id: Optional[int] = None
     content_hash: str = ""
@@ -54,20 +49,24 @@ class ClipboardItem:
     def is_cloud_synced(self) -> bool:
         return self.cloud_id is not None
 
-    @property
-    def content_type(self) -> ContentType:
-        """向持久化/序列化层暴露的判别标签。"""
-        if isinstance(self, TextClipboardItem):
-            return ContentType.TEXT
-        if isinstance(self, ImageClipboardItem):
-            return ContentType.IMAGE
-        raise TypeError(f"未知 ClipboardItem 子类: {type(self).__name__}")
-
     def get_display_preview(self, max_length: int = 100) -> str:
         raise NotImplementedError
 
-    def to_db_tuple(self) -> tuple:
+    def _payload_db_fields(self) -> tuple:
+        """子类返回 (text_content, image_data, image_thumbnail)。"""
         raise NotImplementedError
+
+    def to_db_tuple(self) -> tuple:
+        return (
+            self.content_type.value,
+            *self._payload_db_fields(),
+            self.content_hash,
+            self.preview,
+            self.device_id,
+            self.device_name,
+            self.created_at,
+            int(self.is_starred),
+        )
 
     @classmethod
     def from_db_row(cls, row) -> "ClipboardItem":
@@ -98,6 +97,8 @@ class ClipboardItem:
 
 @dataclass
 class TextClipboardItem(ClipboardItem):
+    content_type: ClassVar[ContentType] = ContentType.TEXT
+
     text_content: str = ""
 
     def get_display_preview(self, max_length: int = 100) -> str:
@@ -106,42 +107,22 @@ class TextClipboardItem(ClipboardItem):
             return text[:max_length] + "..."
         return text
 
-    def to_db_tuple(self) -> tuple:
-        return (
-            ContentType.TEXT.value,
-            self.text_content,
-            None,
-            None,
-            self.content_hash,
-            self.preview,
-            self.device_id,
-            self.device_name,
-            self.created_at,
-            int(self.is_starred),
-        )
+    def _payload_db_fields(self) -> tuple:
+        return (self.text_content, None, None)
 
 
 @dataclass
 class ImageClipboardItem(ClipboardItem):
+    content_type: ClassVar[ContentType] = ContentType.IMAGE
+
     image_data: Optional[bytes] = None
     image_thumbnail: Optional[bytes] = None
 
     def get_display_preview(self, max_length: int = 100) -> str:
         return "[图片]"
 
-    def to_db_tuple(self) -> tuple:
-        return (
-            ContentType.IMAGE.value,
-            None,
-            self.image_data,
-            self.image_thumbnail,
-            self.content_hash,
-            self.preview,
-            self.device_id,
-            self.device_name,
-            self.created_at,
-            int(self.is_starred),
-        )
+    def _payload_db_fields(self) -> tuple:
+        return (None, self.image_data, self.image_thumbnail)
 
 
 AnyClipboardItem = Union[TextClipboardItem, ImageClipboardItem]

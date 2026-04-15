@@ -1,16 +1,6 @@
-"""应用配置管理 — 基于 frozen dataclass 的类型安全 settings。
+"""应用配置管理:frozen AppSettings snapshot + 线程安全 SettingsStore。
 
-架构:
-- AppSettings / MysqlConnection: frozen dataclass,配置值的 immutable snapshot
-- SettingsStore: 线程安全的运行时管理器,负责加载、持久化、原子更新
-- 模块级便捷函数: settings() 获取当前 snapshot; update_settings(**kw) 原子写入
-- 凭据(token、password)走 keyring (utils.secure_store),不在 AppSettings 里
-- 模块级常量(APP_NAME、IS_WINDOWS、PAGE_SIZE 等)直接 from config import
-
-调用端迁移:
-- `Config.get_xxx()` → `settings().xxx`
-- `Config.set_xxx(v)` → `update_settings(xxx=v)`  (某些字段有 set_xxx helper 做校验)
-- `Config.XXX` 常量 → `XXX`(模块级)
+凭据(token、password)走 keyring (utils.secure_store),不在 AppSettings 里。
 """
 
 from __future__ import annotations
@@ -23,7 +13,7 @@ import re
 import stat
 import threading
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple
@@ -136,21 +126,14 @@ class AppSettings:
 
 # ============ 序列化 ============
 
-# 已知字段之外的键(如 secure_store 的 base64 fallback)存入 _raw_overrides,
-# 以便读写同一个 settings.json 而不丢失未知字段
+# mysql 字段在 JSON 里扁平化为 mysql_<name>,在 AppSettings 里是 MysqlConnection 嵌套
+_MYSQL_FLAT_KEYS = {f"mysql_{f.name}" for f in fields(MysqlConnection)}
+_APP_FIELD_NAMES = {f.name for f in fields(AppSettings)} - {"mysql"} | _MYSQL_FLAT_KEYS
+
+
 def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
     """返回 (AppSettings, raw_extras)。extras 包含未被 AppSettings schema 消费的键。"""
-    known = {
-        "device_id", "device_name", "database_path", "db_type",
-        "mysql_host", "mysql_port", "mysql_user", "mysql_database",
-        "sync_mode", "last_sync_id", "cloud_last_sync_id",
-        "cloud_api_url", "cloud_user_email",
-        "dock_edge", "hotkey", "is_floating", "floating_position", "language",
-        "save_text", "save_images", "max_text_length", "max_image_size_kb",
-        "max_items", "retention_days", "poll_interval_ms",
-        "active_profile", "db_profiles", "disabled_plugins",
-    }
-    extras = {k: v for k, v in data.items() if k not in known}
+    extras = {k: v for k, v in data.items() if k not in _APP_FIELD_NAMES}
 
     floating = data.get("floating_position")
     if isinstance(floating, (list, tuple)) and len(floating) == 2:
@@ -324,7 +307,7 @@ class SettingsStore:
         if changes:
             self._snapshot = replace(s, **changes)
             self._dirty = True
-            self._flush_to_disk_locked()
+            # 启动路径懒加载期间, 不在此处同步 I/O; flush 交给调用者或 _schedule_save
 
     def update(self, **kwargs) -> AppSettings:
         """原子更新一或多个字段。返回新 snapshot。"""
@@ -383,25 +366,39 @@ class SettingsStore:
         """导入完整 dict 并立即落盘。供 settings_dialog 批量写入。"""
         with self._lock:
             self._snapshot, self._extras = _snapshot_from_dict(data)
-            self._dirty = True
-            self._flush_to_disk_locked()
-            return self._snapshot
+            self._dirty = False
+            path, payload = self._capture_flush_payload_locked()
+            snapshot = self._snapshot
+        if payload is not None:
+            self._write_payload(path, payload)
+        return snapshot
 
     def flush(self) -> None:
         """手动触发落盘(应用退出时调用)。"""
         with self._lock:
-            if self._dirty:
-                self._flush_to_disk_locked()
+            if not self._dirty:
+                return
+            self._dirty = False
+            path, payload = self._capture_flush_payload_locked()
+        if payload is not None:
+            self._write_payload(path, payload)
 
-    def _flush_to_disk_locked(self) -> None:
+    def _capture_flush_payload_locked(self):
+        """锁内抓取 (path, serializable_dict) 快照。调用方持锁并负责写盘。"""
         if self._snapshot is None:
-            return
-        path = self._resolve_path()
-        data = _snapshot_to_dict(self._snapshot, self._extras)
+            return None, None
+        return self._resolve_path(), _snapshot_to_dict(self._snapshot, self._extras)
+
+    def _write_payload(self, path: Path, data: dict) -> None:
+        """锁外 I/O：写文件失败仅记录日志并重置 dirty，让下次修改重新触发落盘。
+
+        Why: 过去实现在 RLock 上手动 release/acquire，破坏重入语义；若持锁期间
+        抛异常，还会导致 finally 尝试 acquire 未持有的锁。改为"锁内快照、锁外 I/O"
+        的标准模式即可消除这类陷阱。
+        """
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            self._dirty = False
             if not IS_WINDOWS:
                 try:
                     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
@@ -409,6 +406,8 @@ class SettingsStore:
                     pass
         except IOError as e:
             logger.error(f"配置写入失败 ({path}): {e}")
+            with self._lock:
+                self._dirty = True
 
     def _schedule_save(self) -> None:
         """主线程用 QTimer 合并 2s 写入;非主线程/无 Qt 直接同步落盘。"""
@@ -416,8 +415,7 @@ class SettingsStore:
             from PySide6.QtCore import QTimer, QThread, QCoreApplication
             app = QCoreApplication.instance()
             if app is None or QThread.currentThread() is not app.thread():
-                with self._lock:
-                    self._flush_to_disk_locked()
+                self._sync_flush()
                 return
             if self._save_timer is None:
                 self._save_timer = QTimer()
@@ -426,13 +424,19 @@ class SettingsStore:
             if not self._save_timer.isActive():
                 self._save_timer.start(self._SAVE_DELAY_MS)
         except (ImportError, RuntimeError):
-            with self._lock:
-                self._flush_to_disk_locked()
+            self._sync_flush()
+
+    def _sync_flush(self) -> None:
+        with self._lock:
+            if not self._dirty:
+                return
+            self._dirty = False
+            path, payload = self._capture_flush_payload_locked()
+        if payload is not None:
+            self._write_payload(path, payload)
 
     def _deferred_flush(self) -> None:
-        with self._lock:
-            if self._dirty:
-                self._flush_to_disk_locked()
+        self._sync_flush()
 
 
 # ============ 全局单例 + 便捷 API ============

@@ -1,13 +1,4 @@
-"""云端同步服务 — 通过 REST API 与云端服务器双向同步剪贴板数据。
-
-生命周期状态机(CloudSyncState):
-- STOPPED:未启动或已停止。
-- RUNNING:已启动且认证有效,拉取/推送定时器在跑。
-- AUTH_FAILED:401 后进入,定时器已停,等待 `restart_after_reauth()` 恢复。
-
-`_pulling` / `_pushing` 是正交的 "HTTP 请求在途" 标志,不属于生命周期状态;
-`_device_registered` 同理,是初始化子流程标志。
-"""
+"""云端同步服务:通过 REST API 与云端服务器双向同步剪贴板数据。"""
 
 import logging
 import platform
@@ -406,6 +397,8 @@ class CloudSyncService(QObject):
         self._transition(CloudSyncState.STOPPED)
         self._pull_timer.stop()
         self._push_timer.stop()
+        # 退出时才落盘游标,避免热路径每秒 serialize 全量 settings
+        update_settings(cloud_last_sync_id=self._last_sync_id)
         self._worker_thread.quit()
         self._worker_thread.wait(3000)
         logger.info("云端同步服务已停止")
@@ -458,11 +451,11 @@ class CloudSyncService(QObject):
 
     @Slot(list, int)
     def _on_pull_done(self, new_items: list, max_server_id: int):
-        """拉取完成回调（主线程）"""
+        """拉取完成回调（主线程）。
+        游标只更新内存, 由 stop() 统一落盘, 避免每秒一次 settings 全量对比。"""
         self._pulling = False
         if max_server_id > self._last_sync_id:
             self._last_sync_id = max_server_id
-            update_settings(cloud_last_sync_id=self._last_sync_id)
 
         if new_items:
             logger.debug(f"从云端拉取了 {len(new_items)} 条新记录")

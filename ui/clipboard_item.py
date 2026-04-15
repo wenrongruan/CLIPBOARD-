@@ -44,7 +44,6 @@ class ClipboardItemWidget(QWidget):
         content_layout.setSpacing(6)
 
         if isinstance(self.item, ImageClipboardItem) and self.item.image_thumbnail:
-            # 图片预览（已通过 isinstance 收缩类型，可安全访问 image_thumbnail）
             image_label = QLabel()
             image_label.setObjectName("imageLabel")
             cache_key = self.item.content_hash
@@ -153,7 +152,6 @@ class ClipboardItemWidget(QWidget):
     @staticmethod
     def _get_multiline_preview(item: ClipboardItem, max_lines: int = 3, max_chars: int = 120) -> str:
         """保留原始换行结构，取前几行，更自然地展示内容"""
-        # 只有 TextClipboardItem 才有 text_content 字段，类型收缩后再访问
         if not isinstance(item, TextClipboardItem) or not item.text_content:
             return item.preview or ""
         text = item.text_content

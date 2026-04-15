@@ -43,10 +43,12 @@ class DatabaseMigrator:
                 # 按 content_hash 去重
                 existing = self.target.get_by_hash(item.content_hash)
                 if existing is None:
-                    # 清除 id 让目标库自动分配
-                    item.id = 0
+                    # 清除 id 让目标库自动分配；None 与 ClipboardItem.id: Optional[int] 语义一致
+                    item.id = None
                     try:
-                        self.target.add_item(item)
+                        new_id = self.target.add_item(item)
+                        if new_id:
+                            item.id = new_id
                         migrated += 1
                     except Exception as e:
                         logger.warning(f"迁移条目失败 (hash={item.content_hash}): {e}")

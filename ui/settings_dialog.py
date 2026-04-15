@@ -210,9 +210,13 @@ class SettingsDialog(QDialog):
         mysql_layout.addRow(t("username"), self.mysql_user_edit)
 
         self.mysql_password_edit = QLineEdit()
-        self.mysql_password_edit.setText(mysql_config["password"])
+        # 不预填密码；保存逻辑 `_current_db_settings` 仅在 text() 非空时才 set_mysql_config，
+        # 留空则保留 keyring 中已存在的密码。
         self.mysql_password_edit.setEchoMode(QLineEdit.Password)
-        self.mysql_password_edit.setPlaceholderText(t("password"))
+        if mysql_config.get("password"):
+            self.mysql_password_edit.setPlaceholderText("••••••••")
+        else:
+            self.mysql_password_edit.setPlaceholderText(t("password"))
         mysql_layout.addRow(t("password"), self.mysql_password_edit)
 
         self.mysql_database_edit = QLineEdit()

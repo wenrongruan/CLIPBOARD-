@@ -29,8 +29,6 @@ from config import (
     PAGE_SIZE,
     settings,
     update_settings,
-    load_settings_dict,
-    save_settings_dict,
     get_cloud_access_token,
     get_effective_hotkey,
     get_effective_database_path,
@@ -392,7 +390,6 @@ class MainWindow(EdgeHiddenWindow):
             try:
                 f.result()
                 self.repository.clear_cloud_id(item_id)
-                item.cloud_id = None
                 self._load_items()
             except Exception as e:
                 logger.warning(f"删除云端副本失败: {e}")
@@ -504,34 +501,34 @@ class MainWindow(EdgeHiddenWindow):
             need_restart = False
             current_snapshot = settings()
 
-            # 语言变更
+            # 汇总本次对话框要改的字段到 batch, 一次 update_settings 落盘
+            batch: dict = {}
+
             new_language = dlg_settings["language"]
             if new_language != current_snapshot.language:
-                update_settings(language=new_language)
+                batch["language"] = new_language
                 set_language(new_language)
                 need_restart = True
 
-            # 应用停靠边缘
             new_edge = dlg_settings["dock_edge"]
             if new_edge != current_snapshot.dock_edge:
                 self.set_dock_edge(new_edge)
 
-            # 热键变更
             new_hotkey = dlg_settings["hotkey"]
             if new_hotkey != get_effective_hotkey():
-                update_settings(hotkey=new_hotkey)
+                batch["hotkey"] = new_hotkey
                 need_restart = True
 
-            # 过滤与存储设置（批量更新，只写一次磁盘）
             new_poll_interval = dlg_settings["poll_interval_ms"]
             poll_changed = new_poll_interval != current_snapshot.poll_interval_ms
 
-            current_settings = load_settings_dict()
             for key in ("save_text", "save_images", "max_text_length",
                         "max_image_size_kb", "max_items", "retention_days",
                         "poll_interval_ms"):
-                current_settings[key] = dlg_settings[key]
-            save_settings_dict(current_settings)
+                batch[key] = dlg_settings[key]
+
+            if batch:
+                update_settings(**batch)
 
             if poll_changed:
                 self.clipboard_monitor.update_poll_interval(new_poll_interval)

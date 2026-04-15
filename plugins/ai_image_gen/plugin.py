@@ -16,9 +16,47 @@ logger = logging.getLogger(__name__)
 from core.plugin_api import PluginBase, PluginAction, PluginResult, PluginResultAction
 from core.models import ContentType, TextClipboardItem, ImageClipboardItem
 
-# chat_image_gen.py 的路径
-CHAT_IMAGE_GEN_DIR = r"E:\python\chat_image_gen"
-CHAT_IMAGE_GEN_SCRIPT = os.path.join(CHAT_IMAGE_GEN_DIR, "chat_image_gen.py")
+
+# chat_image_gen 定位顺序：
+#   1. 环境变量 CHAT_IMAGE_GEN_DIR（用户/管理员显式覆盖）
+#   2. 应用配置目录下 plugin 专属 config.json (由 UI 设置)
+#   3. 相邻目录候选：仓库同级 ../chat_image_gen、父级 E:/python/chat_image_gen（开发机兜底）
+# Why: 旧版本硬编码 "E:\\python\\chat_image_gen" 分发给任何其他用户均 100% 不可用。
+def _candidate_dirs():
+    env = os.environ.get("CHAT_IMAGE_GEN_DIR")
+    if env:
+        yield Path(env)
+
+    # 插件 config.json
+    try:
+        from config import get_config_dir
+        cfg_path = Path(get_config_dir()) / "plugins" / "ai_image_gen.json"
+        if cfg_path.exists():
+            import json
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            custom = data.get("chat_image_gen_dir")
+            if custom:
+                yield Path(custom)
+    except Exception:
+        logger.debug("读取 ai_image_gen 插件配置失败", exc_info=True)
+
+    here = Path(__file__).resolve()
+    # plugins/ai_image_gen/plugin.py -> 仓库根 == here.parents[2]
+    repo_root = here.parents[2]
+    yield repo_root.parent / "chat_image_gen"
+    yield repo_root.parent.parent / "chat_image_gen"
+
+
+def _locate_chat_image_gen():
+    """返回 (目录, 入口脚本)；定位失败返回 (None, None)。"""
+    for cand in _candidate_dirs():
+        try:
+            script = cand / "chat_image_gen.py"
+            if script.exists():
+                return cand, script
+        except OSError:
+            continue
+    return None, None
 
 
 def _find_python() -> str:
@@ -69,10 +107,15 @@ class AIImageGenPlugin(PluginBase):
 
     def _open_app(self, item, progress_callback):
         """启动 chat_image_gen 应用"""
-        if not os.path.exists(CHAT_IMAGE_GEN_SCRIPT):
+        chat_dir, chat_script = _locate_chat_image_gen()
+        if chat_script is None:
             return PluginResult(
                 success=False,
-                error_message=f"找不到 AI 图片工具: {CHAT_IMAGE_GEN_SCRIPT}",
+                error_message=(
+                    "找不到 AI 图片工具（chat_image_gen）。"
+                    "请设置环境变量 CHAT_IMAGE_GEN_DIR 或在插件配置 "
+                    "ai_image_gen.json 中指定 chat_image_gen_dir。"
+                ),
             )
 
         if progress_callback:
@@ -80,7 +123,7 @@ class AIImageGenPlugin(PluginBase):
 
         # 构建启动参数
         python = _find_python()
-        cmd = [python, CHAT_IMAGE_GEN_SCRIPT]
+        cmd = [python, str(chat_script)]
 
         # 通过 auth.json 传递登录态，避免 token 出现在命令行中被同机进程窥探
         child_env = os.environ.copy()
@@ -96,12 +139,25 @@ class AIImageGenPlugin(PluginBase):
             else:
                 logger.warning("未找到 auth.json，子进程可能无法识别登录态: %s", auth_path)
 
-        temp_file = None
+        temp_files = []
         try:
-            # 基于 isinstance 做类型收缩，再访问子类专属字段
             if isinstance(item, TextClipboardItem) and item.text_content:
-                # 文字内容 → 作为提示词
-                cmd += ["--init-prompt", item.text_content]
+                # 文字内容 → 写入临时文件后以 --init-prompt-file 传递。
+                # Why: 直接 --init-prompt <text> 会使剪贴板内容（可能含密码、token）
+                # 出现在同机可枚举的进程参数列表中。
+                tf = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", prefix="clipboard_prompt_",
+                    encoding="utf-8", delete=False,
+                )
+                tf.write(item.text_content)
+                tf.close()
+                temp_files.append(tf.name)
+                try:
+                    if os.name == "posix":
+                        os.chmod(tf.name, 0o600)
+                except OSError:
+                    pass
+                cmd += ["--init-prompt-file", tf.name]
 
             elif isinstance(item, ImageClipboardItem) and item.image_data:
                 # 图片内容 → 保存临时文件，作为附件
@@ -110,6 +166,12 @@ class AIImageGenPlugin(PluginBase):
                 )
                 temp_file.write(item.image_data)
                 temp_file.close()
+                temp_files.append(temp_file.name)
+                try:
+                    if os.name == "posix":
+                        os.chmod(temp_file.name, 0o600)
+                except OSError:
+                    pass
                 cmd += ["--init-image", temp_file.name]
 
             else:
@@ -118,7 +180,7 @@ class AIImageGenPlugin(PluginBase):
             # 启动外部进程（不等待）
             subprocess.Popen(
                 cmd,
-                cwd=CHAT_IMAGE_GEN_DIR,
+                cwd=str(chat_dir),
                 env=child_env,
                 creationflags=subprocess.CREATE_NO_WINDOW
                 if sys.platform == "win32"
@@ -132,10 +194,9 @@ class AIImageGenPlugin(PluginBase):
             )
 
         except Exception as e:
-            # 清理临时文件
-            if temp_file and os.path.exists(temp_file.name):
+            for path in temp_files:
                 try:
-                    os.unlink(temp_file.name)
+                    os.unlink(path)
                 except OSError:
                     pass
             return PluginResult(success=False, error_message=f"启动失败: {e}")

@@ -88,12 +88,12 @@ class ClipboardMonitor(QObject):
                 self._consecutive_failures = 0
                 return
 
-            # 优先检查图片
+            # 单次快照供本 tick 全部分支使用,减少 RLock 往返
             s = settings()
             if mime_data.hasImage() and s.save_images:
-                self._handle_image()
+                self._handle_image(s)
             elif mime_data.hasText() and s.save_text:
-                self._handle_text()
+                self._handle_text(s)
 
             # 成功一次 → 重置失败计数
             if self._consecutive_failures or self._unhealthy_notified:
@@ -124,7 +124,7 @@ class ClipboardMonitor(QObject):
                 self.monitor_stopped.emit(stop_msg)
                 self.error_occurred.emit(stop_msg)
 
-    def _handle_text(self):
+    def _handle_text(self, s):
         text = self.clipboard.text()
         if not text or not text.strip():
             return
@@ -135,10 +135,8 @@ class ClipboardMonitor(QObject):
 
         self._last_text = text
 
-        # 检查文本长度限制
-        max_text_length = settings().max_text_length
-        if max_text_length > 0 and len(text) > max_text_length:
-            logger.info(f"文本超过最大长度限制 ({len(text)} > {max_text_length})，跳过")
+        if s.max_text_length > 0 and len(text) > s.max_text_length:
+            logger.info(f"文本超过最大长度限制 ({len(text)} > {s.max_text_length})，跳过")
             return
 
         logger.debug(f"检测到新文本: {text[:30]}...")
@@ -150,8 +148,6 @@ class ClipboardMonitor(QObject):
         if existing:
             return
 
-        # 创建新记录（文本类型,使用 TextClipboardItem 变体）
-        s = settings()
         item = TextClipboardItem(
             text_content=text,
             content_hash=content_hash,
@@ -181,7 +177,7 @@ class ClipboardMonitor(QObject):
         ptr = small.constBits()
         return compute_content_hash(bytes(ptr))
 
-    def _handle_image(self):
+    def _handle_image(self, s):
         image = self.clipboard.image()
         if image.isNull():
             return
@@ -210,12 +206,11 @@ class ClipboardMonitor(QObject):
             )
 
         logger.info(f"检测到新图片: {width}x{height}，提交后台处理")
-        # 提交到后台线程执行 PNG 编码、缩略图、数据库写入
         self._image_executor.submit(
-            self._process_image_background, raw_bytes, width, height
+            self._process_image_background, raw_bytes, width, height, s
         )
 
-    def _process_image_background(self, raw_bytes: bytes, width: int, height: int):
+    def _process_image_background(self, raw_bytes: bytes, width: int, height: int, s):
         """后台线程：PNG 编码、缩略图生成、数据库写入"""
         try:
             pil_img = Image.frombytes("RGBA", (width, height), raw_bytes)
@@ -224,10 +219,8 @@ class ClipboardMonitor(QObject):
             if not image_data:
                 return
 
-            # 检查图片大小限制
-            max_image_size_kb = settings().max_image_size_kb
-            if max_image_size_kb > 0 and len(image_data) > max_image_size_kb * 1024:
-                logger.info(f"图片超过最大大小限制 ({len(image_data) // 1024}KB > {max_image_size_kb}KB)，跳过")
+            if s.max_image_size_kb > 0 and len(image_data) > s.max_image_size_kb * 1024:
+                logger.info(f"图片超过最大大小限制 ({len(image_data) // 1024}KB > {s.max_image_size_kb}KB)，跳过")
                 return
 
             content_hash = compute_content_hash(image_data)
@@ -244,8 +237,6 @@ class ClipboardMonitor(QObject):
                 logger.warning(f"创建缩略图失败: {e}")
                 thumbnail = None
 
-            # 创建新记录（图片类型,使用 ImageClipboardItem 变体）
-            s = settings()
             item = ImageClipboardItem(
                 image_data=image_data,
                 image_thumbnail=thumbnail,
@@ -270,7 +261,6 @@ class ClipboardMonitor(QObject):
             QTimer.singleShot(0, lambda: self.error_occurred.emit(f"图片保存失败: {e}"))
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
-        # 通过 isinstance 做类型收缩后再访问子类专属字段,避免 AttributeError
         if isinstance(item, TextClipboardItem) and item.text_content:
             self._last_text = item.text_content
             self.clipboard.setText(item.text_content)
