@@ -66,14 +66,17 @@ try:
 except ImportError:
     _HAS_KEYRING = False
 
-# Windows DPAPI 回退
+# Windows DPAPI 回退(独立于 keyring,作为 keyring 之外的二级 fallback)
+# Why: 原先条件写成 `not _HAS_KEYRING`,exe 里 keyring 可用时 DATA_BLOB 不会被定义,
+# 但后面函数签名用 `DATA_BLOB` 作注解导致 NameError,exe 根本启动不了。
 _HAS_DPAPI = False
-if platform.system() == "Windows" and not _HAS_KEYRING:
+DATA_BLOB = None  # 非 Windows 时占位,让下面函数签名/调用安全
+if platform.system() == "Windows":
     try:
         import ctypes
         import ctypes.wintypes
 
-        class DATA_BLOB(ctypes.Structure):
+        class DATA_BLOB(ctypes.Structure):  # type: ignore[no-redef]
             _fields_ = [
                 ("cbData", ctypes.wintypes.DWORD),
                 ("pbData", ctypes.POINTER(ctypes.c_char)),
@@ -86,7 +89,7 @@ if platform.system() == "Windows" and not _HAS_KEYRING:
         logger.debug(f"DPAPI 不可用: {e}")
 
 
-def _make_blob(data: bytes) -> DATA_BLOB:
+def _make_blob(data: bytes) -> "DATA_BLOB":
     """创建 DATA_BLOB，正确处理 ctypes 指针"""
     blob = DATA_BLOB()
     blob.cbData = len(data)
