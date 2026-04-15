@@ -159,6 +159,9 @@ class ClipboardApp:
         # 此时 _active_backend 已确定，弹一次托盘气泡提醒用户。
         self._maybe_warn_degraded_store()
 
+        # 若 MySQL 连接失败已降级到 SQLite，提示用户同步未生效。
+        self._maybe_warn_mysql_fallback()
+
     def _init_components(self):
         """初始化核心组件"""
         # 使用数据库工厂创建合适的数据库管理器
@@ -271,6 +274,24 @@ class ClipboardApp:
                 logger.debug(f"atexit persist cursor failed: {e}")
             except Exception:
                 pass
+
+    def _maybe_warn_mysql_fallback(self):
+        """若 MySQL 初始化失败已降级到本地 SQLite，通过托盘气泡提醒一次用户。"""
+        try:
+            from core.db_factory import get_mysql_fallback_reason
+            reason = get_mysql_fallback_reason()
+            if not reason:
+                return
+            if not hasattr(self, "tray_icon") or self.tray_icon is None:
+                return
+            self.tray_icon.showMessage(
+                t("app_name"),
+                f"MySQL 连接失败，已降级到本地数据库（同步暂不生效）。请检查设置中的 MySQL 配置。\n原因：{reason}",
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
+        except Exception:
+            logger.debug("MySQL 降级提示发送失败", exc_info=True)
 
     def _maybe_warn_degraded_store(self):
         """若凭据存储降级到非 keyring 后端，通过托盘气泡提醒一次用户。"""
