@@ -20,7 +20,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 
 from config import (
     APP_VERSION,
@@ -37,12 +37,44 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
+class _PluginCloudClientProxy:
+    """按 manifest.permissions 拦截 CloudAPIClient 调用。"""
+
+    def __init__(self, real_client, permissions: list):
+        object.__setattr__(self, "_real", real_client)
+        object.__setattr__(self, "_perms", set(permissions or []))
+
+    def __getattr__(self, name):
+        # 私有属性一律拒绝：tokens/base_url/_client 都是内部状态，
+        # 插件即使声明了 network 也不应直接读取；__class__ 留给 isinstance 检查。
+        if name.startswith("_") and name != "__class__":
+            raise PermissionError(f"插件禁止访问 CloudAPIClient 私有属性: {name}")
+
+        attr = getattr(self._real, name)
+        required = getattr(attr, "_plugin_permission", None)
+        if required and required not in self._perms:
+            raise PermissionError(
+                f"插件未声明 '{required}' 权限，禁止调用 CloudAPIClient.{name}"
+            )
+        return attr
+
+    def __setattr__(self, name, value):
+        # 拒绝写入，防止插件改 token / 覆盖代理内部状态
+        raise PermissionError(f"插件禁止写入 CloudAPIClient 属性: {name}")
+
+
 @contextlib.contextmanager
 def _project_root_in_syspath():
     """临时将项目根加入 sys.path,退出时恢复原状。
 
     插件在 `exec_module` 阶段会执行顶层 import,需要能解析 `core.*`/`config`
     等项目内模块。永久 insert 会污染全局命名空间,因此只在加载窗口内生效。
+
+    Why（并发注意）: 当前 load_plugins 是顺序调用，_load_single_plugin 同步执行，
+    sys.path 的瞬时修改不会产生并发冲突。若未来改为并行加载（如 ThreadPool
+    同时 exec 多个插件），全局 sys.path 的临时注入会出现竞态（一个线程提前
+    恢复导致另一个线程 import 失败）。届时应改为向 spec 直接传递
+    submodule_search_locations，而不是修改全局 sys.path。
     """
     already_present = _PROJECT_ROOT in sys.path
     if not already_present:
@@ -249,10 +281,10 @@ class PluginManager(QObject):
 
         try:
             plugin = plugin_class()
-            # 注入 logger、config 和 cloud_client
+            # 注入 logger、config 和 cloud_client（后者按 permissions 包装）
             plugin._logger = self._init_plugin_logger(plugin_id)
             plugin._config = self._load_plugin_config(plugin_id)
-            plugin._cloud_client = self._cloud_client
+            plugin._cloud_client = self._wrap_cloud_client_for(plugin_id)
             plugin.on_load()
             self._plugins[plugin_id] = plugin
             self._plugin_status[plugin_id] = {"status": "loaded", "message": ""}
@@ -288,11 +320,20 @@ class PluginManager(QObject):
     # ========== 云端客户端 ==========
 
     def set_cloud_client(self, client):
-        """设置云端 API 客户端，所有插件共享此实例"""
+        """设置云端 API 客户端，所有插件共享此实例（但各自走权限代理）。"""
         self._cloud_client = client
-        # 同步更新已加载插件的 cloud_client
-        for plugin in self._plugins.values():
-            plugin._cloud_client = client
+        # 同步更新已加载插件的 cloud_client（每个插件拿到自己的权限代理）
+        for pid, plugin in self._plugins.items():
+            plugin._cloud_client = self._wrap_cloud_client_for(pid)
+
+    def _wrap_cloud_client_for(self, plugin_id: str):
+        """根据插件 manifest.permissions 包装 cloud_client。
+        未声明 credits / network 的插件调用对应方法时抛 PermissionError。
+        """
+        if self._cloud_client is None:
+            return None
+        permissions = self._manifests.get(plugin_id, {}).get("permissions", [])
+        return _PluginCloudClientProxy(self._cloud_client, permissions)
 
     # ========== 查询 ==========
 
@@ -413,48 +454,57 @@ class PluginManager(QObject):
         if self._timeout_timer:
             self._timeout_timer.stop()
             self._timeout_timer = None
-        if self._active_worker:
-            worker = self._active_worker
-            self._active_worker = None
-            # 断开 progress/error，但保留 finished 以便后续等待线程结束
-            try:
-                worker.progress.disconnect()
-                worker.error.disconnect()
-            except RuntimeError:
-                pass
-            try:
-                worker.finished.disconnect()
-            except RuntimeError:
-                pass
-            # 安全清理: 等待线程结束后释放，设置超时防止泄漏
-            if worker.isFinished():
-                worker.deleteLater()
-                return
+        if not self._active_worker:
+            return
+        worker = self._active_worker
+        self._active_worker = None
+        # Why: finished/error 都 connect 到 _cleanup_worker，第一个触发时另一个
+        # 可能已在队列中；一次性断开全部信号-槽连接，消除重入竞态。
+        try:
+            QObject.disconnect(worker, None, None, None)
+        except (RuntimeError, TypeError):
+            pass
 
-            # 设置超时：如果 5 秒内线程未结束则强制清理
-            cleanup_timer = QTimer(self)
-            cleanup_timer.setSingleShot(True)
+        if worker.isFinished():
+            worker.deleteLater()
+            return
 
-            def _on_finished():
-                if cleanup_timer.isActive():
-                    cleanup_timer.stop()
-                worker.deleteLater()
+        # 5s 兜底：线程未结束则强制 terminate，避免泄漏。
+        cleanup_timer = QTimer(self)
+        cleanup_timer.setSingleShot(True)
 
-            def _force_cleanup():
-                if not worker.isFinished():
-                    logger.warning("plugin worker did not finish within 5s, terminating")
-                    worker.terminate()
-                    worker.wait(1000)
-                worker.deleteLater()
+        def _on_finished():
+            if cleanup_timer.isActive():
+                cleanup_timer.stop()
+            worker.deleteLater()
 
-            cleanup_timer.timeout.connect(_force_cleanup)
-            # 先连接 finished，再检查状态，避免 disconnect 与已 emit 的 finished 竞态
-            worker.finished.connect(_on_finished)
-            if worker.isFinished():
-                # 线程已在 disconnect 和 connect 之间结束，手动触发清理
-                _on_finished()
-            else:
-                cleanup_timer.start(5000)
+        def _force_cleanup():
+            if not worker.isFinished():
+                logger.warning("plugin worker did not finish within 5s, terminating")
+                worker.terminate()
+                worker.wait(1000)
+            worker.deleteLater()
+
+        cleanup_timer.timeout.connect(_force_cleanup)
+        # Why: SingleShotConnection 让 _on_finished 只响应一次就自动断开；
+        # PySide6 6.7+ 有，6.6.x（requirements 下限）需手动 disconnect 降级。
+        single_shot = getattr(Qt.ConnectionType, "SingleShotConnection", None)
+        if single_shot is not None:
+            worker.finished.connect(_on_finished, single_shot)
+        else:
+            def _once(*_args, _slot=_on_finished):
+                try:
+                    worker.finished.disconnect(_once)
+                except (RuntimeError, TypeError):
+                    pass
+                _slot()
+            worker.finished.connect(_once)
+
+        if worker.isFinished():
+            # disconnect 和 connect 之间线程已结束，手动触发清理
+            _on_finished()
+        else:
+            cleanup_timer.start(5000)
 
     # ========== 配置 ==========
 

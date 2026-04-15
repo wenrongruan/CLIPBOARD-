@@ -1,10 +1,12 @@
 """云�� API 客户端，封装所有与云端服务器的 HTTP 通信"""
 
+import getpass
 import json
 import logging
 import os
 import platform
 import stat
+import subprocess
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -30,11 +32,31 @@ _DEFAULT_TIMEOUT = httpx.Timeout(connect=8.0, read=15.0, write=15.0, pool=15.0)
 
 
 class CloudAPIError(Exception):
-    """云端 API 异常"""
+    """云端 API 异常。
 
-    def __init__(self, message: str, status_code: int = 0):
+    payload 保存服务端返回的原始 JSON（>=400 场景下），供调用方读取除 error
+    外的字段——例如 `/credits/deduct` 返回 402 时 body 里还带 remaining/required。
+    """
+
+    def __init__(self, message: str, status_code: int = 0, payload: Optional[dict] = None):
         super().__init__(message)
         self.status_code = status_code
+        self.payload = payload or {}
+
+
+def requires_plugin_permission(name: str):
+    """标注该 API 方法需要插件声明某个 manifest 权限。
+
+    Why: 权限白名单原本硬编码在 PluginManager 的 frozenset 里，新增方法要
+    同步修改两处；改为把权限作为属性挂在方法对象上，PluginCloudClientProxy
+    读 `func._plugin_permission` 就能直接判断，避免清单漂移。
+    """
+
+    def decorator(func):
+        func._plugin_permission = name
+        return func
+
+    return decorator
 
 
 class CreditCheckStatus(Enum):
@@ -91,6 +113,14 @@ class CloudAPIClient:
         self._refresh_token_str: Optional[str] = None
         self._client = httpx.Client(base_url=self._base_url, timeout=_DEFAULT_TIMEOUT, verify=True)
 
+    @property
+    def base_url(self) -> str:
+        """公开的只读 base_url，供插件通过 CloudClientProxy 读取。
+        Why: 插件代理禁止访问下划线开头的私有属性（_base_url 会抛 PermissionError），
+        因此需要显式公开 getter。
+        """
+        return self._base_url
+
     # ========== Token 管理 ==========
 
     def set_tokens(self, access_token: str, refresh_token: str):
@@ -124,7 +154,8 @@ class CloudAPIClient:
         直接以当前用户身份访问云端 API。写入流程：
           1. 先 atomic-write 到 .tmp，再 os.replace 到最终文件（避免写入中途被读到半文件）
           2. 非 Windows 平台显式 chmod 0600，确保文件仅属主可读写
-          3. Windows 平台依赖 NTFS 默认 ACL 继承（用户 profile 下默认仅 SYSTEM/当前用户可读）
+          3. Windows 平台通过 icacls 移除继承，仅授予当前用户 Full Control；
+             ACL 失败不阻断登录流程（仅记日志），默认 NTFS 继承作为兜底。
         """
         try:
             auth_dir = Path.home() / ".shared_clipboard"
@@ -165,18 +196,65 @@ class CloudAPIClient:
                     os.chmod(auth_file, stat.S_IRUSR | stat.S_IWUSR)
                 except OSError:
                     pass
+            else:
+                # Windows：用 icacls 移除继承并仅授予当前用户 Full Control。
+                # Why: NTFS 默认 ACL 在某些组策略/共享目录下可能被覆盖，显式收紧更稳。
+                # 失败不阻断登录（仅降级日志），auth.json 已写入本地默认 ACL 兜底。
+                self._apply_windows_acl(auth_file)
         except Exception:
             logger.warning("更新 auth.json 失败", exc_info=True)
 
+    @staticmethod
+    def _apply_windows_acl(path: Path) -> None:
+        """Windows 下对指定文件应用收紧的 ACL：移除继承，仅当前用户完全控制。"""
+        try:
+            user = getpass.getuser()
+            if not user:
+                logger.debug("icacls: 无法获取当前用户名，跳过 ACL 收紧")
+                return
+            # /inheritance:r 移除继承，/grant:r 替换（非追加）user:F 完全控制
+            result = subprocess.run(
+                [
+                    "icacls",
+                    str(path),
+                    "/inheritance:r",
+                    "/grant:r",
+                    f"{user}:F",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0:
+                logger.debug(
+                    "icacls 收紧 ACL 失败 rc=%s stderr=%s",
+                    result.returncode,
+                    (result.stderr or "").strip()[:200],
+                )
+        except FileNotFoundError:
+            logger.debug("icacls 不可用（非 Windows 或 PATH 未包含），跳过 ACL 收紧")
+        except subprocess.TimeoutExpired:
+            logger.debug("icacls 执行超时，跳过 ACL 收紧")
+        except Exception as e:
+            logger.debug("icacls 执行异常，跳过 ACL 收紧: %s", e)
+
     # ========== 统一请求方法 ==========
 
-    def _request(self, method: str, path: str, auth_required: bool = True, **kwargs) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        auth_required: bool = True,
+        **kwargs,
+    ) -> httpx.Response:
         """
         统一请求方法，自动处理认证和 token 刷新。
 
         - 自动在 header 中加 Authorization
         - 收到 401 时自动刷新 token 重试一次
-        - 网络错误抛出 CloudAPIError
+        - 网络/>=400 错误抛出 CloudAPIError；调用方需关心具体状态码时
+          用 `except CloudAPIError as e: if e.status_code == XXX`。
         """
         if auth_required:
             self._ensure_auth()
@@ -209,15 +287,16 @@ class CloudAPIClient:
 
         # 处理错误响应
         if response.status_code >= 400:
+            error_data: dict = {}
             try:
-                error_data = response.json()
+                error_data = response.json() or {}
                 message = error_data.get("error", error_data.get("detail", f"服务器错误 ({response.status_code})"))
             except Exception:
                 body_preview = response.text[:200] if response.text else ""
                 message = f"服务器错误 ({response.status_code})"
                 if body_preview:
                     logger.debug(f"错误响应体: {body_preview}")
-            raise CloudAPIError(message, response.status_code)
+            raise CloudAPIError(message, response.status_code, error_data)
 
         return response
 
@@ -239,6 +318,7 @@ class CloudAPIClient:
             logger.warning(f"认证响应中缺少 token: access={bool(access)}, refresh={bool(refresh)}")
             raise CloudAPIError("登录成功但服务端未返回有效 token，请重试")
 
+    @requires_plugin_permission("network")
     def register(self, email: str, password: str, display_name: str = None) -> dict:
         """注册新用户，返回用户信息和 tokens"""
         payload = {"email": email, "password": password}
@@ -250,6 +330,7 @@ class CloudAPIClient:
         self._handle_auth_response(data, email)
         return data
 
+    @requires_plugin_permission("network")
     def login(self, email: str, password: str) -> dict:
         """登录，返回 tokens"""
         payload = {"email": email, "password": password}
@@ -258,6 +339,7 @@ class CloudAPIClient:
         self._handle_auth_response(data, email)
         return data
 
+    @requires_plugin_permission("network")
     def refresh_token(self) -> bool:
         """使用 refresh_token 刷新 access_token，成功返回 True。
         仅在服务端明确返回 401/403 时才清除本地 token；网络错误保留 token 以便下次重试。
@@ -299,6 +381,7 @@ class CloudAPIClient:
             logger.info("Refresh token 已过期，已清除本地登录态")
         return False
 
+    @requires_plugin_permission("network")
     def logout(self):
         """退出登录，清除本地 tokens"""
         try:
@@ -316,6 +399,7 @@ class CloudAPIClient:
 
     # ========== 剪贴板操作 ==========
 
+    @requires_plugin_permission("network")
     def upload_items(self, items: list) -> list:
         """
         批量上传剪贴板条目，返回服务端创建的 items。
@@ -325,6 +409,7 @@ class CloudAPIClient:
         response = self._request("POST", "/api/v1/clipboard/batch", json={"items": items})
         return response.json().get("items", [])
 
+    @requires_plugin_permission("network")
     def sync(self, since_id: int, device_id: str) -> dict:
         """
         拉取新记录。
@@ -334,6 +419,7 @@ class CloudAPIClient:
         response = self._request("GET", "/api/v1/clipboard/sync", params=params)
         return response.json()
 
+    @requires_plugin_permission("network")
     def delete_item(self, item_id: int) -> bool:
         """删除云端条目"""
         try:
@@ -343,6 +429,7 @@ class CloudAPIClient:
             logger.warning(f"删除云端条目失败 (id={item_id}): {e}")
             return False
 
+    @requires_plugin_permission("network")
     def toggle_star(self, item_id: int) -> bool:
         """切换云端条目收藏状态"""
         try:
@@ -354,6 +441,7 @@ class CloudAPIClient:
 
     # ========== 图片接口 ==========
 
+    @requires_plugin_permission("network")
     def upload_image(self, item_id: int, image_data: bytes) -> bool:
         """上传图片数据到云端"""
         try:
@@ -368,11 +456,13 @@ class CloudAPIClient:
             logger.error(f"图片上传失败: {e}")
             return False
 
+    @requires_plugin_permission("network")
     def get_image_url(self, item_id: int) -> str:
         """获取图片下载 URL（presigned URL）"""
         response = self._request("GET", f"/api/v1/clipboard/{item_id}/image-url")
         return response.json().get("url", "")
 
+    @requires_plugin_permission("network")
     def download_image(self, item_id: int) -> Optional[bytes]:
         """下载图片数据：先获取 presigned URL，再下载���容"""
         url = self.get_image_url(item_id)
@@ -400,11 +490,13 @@ class CloudAPIClient:
 
     # ========== 订阅接口 ==========
 
+    @requires_plugin_permission("credits")
     def get_subscription(self) -> dict:
         """获取当前用户的订阅信息"""
         response = self._request("GET", "/api/v1/subscription")
         return response.json()
 
+    @requires_plugin_permission("credits")
     def create_checkout(self, plan: str) -> str:
         """创建支付 checkout，返回 checkout URL"""
         response = self._request("POST", "/api/v1/subscription/checkout", json={"plan": plan})
@@ -412,6 +504,7 @@ class CloudAPIClient:
 
     # ========== 积分/扣点接口 ==========
 
+    @requires_plugin_permission("credits")
     def get_balance(self) -> dict:
         """获取当前用户的积分余额
         返回: {"balance": float, "frozen": float}
@@ -419,19 +512,12 @@ class CloudAPIClient:
         response = self._request("GET", "/api/v1/credits")
         return response.json()
 
-    def deduct_credits(self, amount: float, reason: str, plugin_id: str = "", task_uuid: str = "") -> dict:
-        """扣除积分
-        返回: {"success": bool, "remaining": float, "transaction_id": str}
-        """
-        payload = {
-            "amount": amount,
-            "reason": reason,
-            "plugin_id": plugin_id,
-            "task_uuid": task_uuid,
-        }
-        response = self._request("POST", "/api/v1/credits/deduct", json=payload)
-        return response.json()
+    # NOTE: 已移除 CloudAPIClient.deduct_credits（原 /api/v1/credits/deduct）。
+    # 服务端 CreditController::deduct 要求 X-Internal-Service-Secret（仅内部服务调用），
+    # 任何桌面客户端 HTTP 请求必然 403。扣点应由服务端在 AI 生图等任务完成后内部扣除，
+    # 不应由客户端主动调用。PluginBase.deduct_credits 也已同步移除。
 
+    @requires_plugin_permission("credits")
     def check_credits(self, required: float) -> CreditCheckResult:
         """检查积分是否足够（三态返回）
 
@@ -470,6 +556,7 @@ class CloudAPIClient:
 
     # ========== AI 生图接口 ==========
 
+    @requires_plugin_permission("network")
     def ai_generate(self, provider: str, model: str, prompt: str, task_uuid: str,
                     size: str = "2K", aspect_ratio: str = "1:1", n: int = 1,
                     **extra) -> dict:
@@ -483,11 +570,13 @@ class CloudAPIClient:
         response = self._request("POST", "/api/v1/ai/generate", json=payload)
         return response.json()
 
+    @requires_plugin_permission("network")
     def ai_poll_task(self, task_uuid: str) -> dict:
         """查询 AI 生图任务状态（万相异步轮询用）。"""
         response = self._request("GET", f"/api/v1/ai/task/{task_uuid}")
         return response.json()
 
+    @requires_plugin_permission("network")
     def ai_cancel_task(self, task_uuid: str) -> dict:
         """取消 AI 生图任务。"""
         response = self._request("POST", f"/api/v1/ai/task/{task_uuid}/cancel")
@@ -495,6 +584,7 @@ class CloudAPIClient:
 
     # ========== 设备接口 ==========
 
+    @requires_plugin_permission("network")
     def register_device(self, device_id: str, device_name: str, platform: str) -> bool:
         """注册当前设备"""
         try:

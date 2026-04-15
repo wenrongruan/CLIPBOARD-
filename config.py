@@ -97,7 +97,7 @@ class AppSettings:
     sync_mode: str = "local"
     last_sync_id: int = 0
     cloud_last_sync_id: int = 0
-    cloud_api_url: str = "https://www.jlike.com"
+    cloud_api_url: str = "https://api.jlike.com"
     cloud_user_email: str = ""
 
     # UI

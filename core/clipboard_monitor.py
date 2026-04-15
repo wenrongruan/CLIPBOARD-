@@ -139,7 +139,9 @@ class ClipboardMonitor(QObject):
             logger.info(f"文本超过最大长度限制 ({len(text)} > {s.max_text_length})，跳过")
             return
 
-        logger.debug(f"检测到新文本: {text[:30]}...")
+        # Why: 日志文件可能被日志收集器、备份等路径读取；原始打印前 30 字符会
+        # 把剪贴板中的 token/密码等敏感内容泄漏到明文日志。仅记录长度即可。
+        logger.debug(f"检测到新文本: 长度 {len(text)} 字符")
 
         content_hash = compute_content_hash(text)
 

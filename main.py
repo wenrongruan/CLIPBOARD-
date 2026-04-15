@@ -1,3 +1,4 @@
+import atexit
 import sys
 import os
 import logging
@@ -153,6 +154,11 @@ class ClipboardApp:
         # 初始化全局热键
         self._init_hotkey()
 
+        # Why: 若 keyring 不可用导致凭据只能以 base64/DPAPI 回退形式保存，
+        # 安全等级低于系统钥匙串。主窗口构造过程中已触发过 token 读取，
+        # 此时 _active_backend 已确定，弹一次托盘气泡提醒用户。
+        self._maybe_warn_degraded_store()
+
     def _init_components(self):
         """初始化核心组件"""
         # 使用数据库工厂创建合适的数据库管理器
@@ -250,6 +256,39 @@ class ClipboardApp:
                 self._advance_sync_after_cloud
             )
             self.cloud_sync_service.start()
+            # Why: 正常 _quit 流程会调 stop() 落盘；atexit 是针对 SIGTERM/
+            # 未捕获异常等非正常退出的兜底，确保游标不丢失。
+            atexit.register(self._atexit_persist_cloud_cursor)
+
+    def _atexit_persist_cloud_cursor(self):
+        """进程退出兜底：持久化云端同步游标。"""
+        try:
+            if getattr(self, "cloud_sync_service", None) is not None:
+                self.cloud_sync_service.persist_sync_cursor()
+        except Exception as e:
+            # atexit 阶段 logger 可能已关闭；尽力 debug 一次，失败就只能放弃
+            try:
+                logger.debug(f"atexit persist cursor failed: {e}")
+            except Exception:
+                pass
+
+    def _maybe_warn_degraded_store(self):
+        """若凭据存储降级到非 keyring 后端，通过托盘气泡提醒一次用户。"""
+        try:
+            from utils import secure_store
+            if not secure_store.is_degraded():
+                return
+            backend = secure_store.get_active_backend()
+            if not hasattr(self, "tray_icon") or self.tray_icon is None:
+                return
+            self.tray_icon.showMessage(
+                t("app_name"),
+                f"当前密钥未加密存储（{backend}），建议安装 keyring 库以提升凭据安全性：pip install keyring",
+                QSystemTrayIcon.MessageIcon.Warning,
+                8000,
+            )
+        except Exception:
+            logger.debug("降级警告发送失败", exc_info=True)
 
     def _on_new_item_for_cloud(self, item):
         """剪贴板新条目回调 — 加入云端上传队列"""

@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import time
 from typing import List, Optional, Tuple
 
@@ -6,6 +7,18 @@ from .base_database import AbstractDatabaseManager
 from .models import ClipboardItem
 
 logger = logging.getLogger(__name__)
+
+# pymysql 在纯 SQLite 部署中可能未安装，兜底为不存在的占位异常，避免 import 失败。
+try:
+    import pymysql  # type: ignore
+
+    _PyMySQLIntegrityError = pymysql.err.IntegrityError  # type: ignore[attr-defined]
+except ImportError:
+    class _PyMySQLIntegrityError(Exception):
+        pass
+
+# 用于 except 元组：两个后端的 UNIQUE 冲突都会落在这里。
+_INTEGRITY_ERRORS: tuple = (sqlite3.IntegrityError, _PyMySQLIntegrityError)
 
 
 class ClipboardRepository:
@@ -69,7 +82,20 @@ class ClipboardRepository:
             _, lastrowid = self._execute_write(conn, sql, item.to_db_tuple())
             return lastrowid
 
-        return self.db.execute_with_retry(operation)
+        try:
+            return self.db.execute_with_retry(operation)
+        except _INTEGRITY_ERRORS:
+            # content_hash UNIQUE 冲突视为"已存在"，降噪为 debug 并返回现有 id。
+            # Why: 剪贴板监控偶发重复写入（跨设备同步窗口期、连续轮询到同一内容），
+            # IntegrityError 冒泡会污染日志且打断调用链。
+            existing = self.get_by_hash(item.content_hash)
+            if existing is not None and existing.id:
+                logger.debug(
+                    "add_item 遇到 content_hash 冲突，返回已有 id=%s", existing.id
+                )
+                return existing.id
+            # 极少见：冲突但又查不到（竞态/其它约束），继续冒泡让上层处理
+            raise
 
     def get_by_hash(self, content_hash: str) -> Optional[ClipboardItem]:
         def operation(conn) -> Optional[ClipboardItem]:
@@ -394,3 +420,45 @@ class ClipboardRepository:
             return result if result else 0
 
         return self.db.execute_read(operation)
+
+    # ========== app_meta key-value 访问 ==========
+    # Why: 少量跨会话状态（如 "永久放弃同步的 server_id 集合"）原本是
+    # _SyncWorker 的实例 dict，进程重启丢失后同步游标可能再度被同一条坏记录卡死。
+    # 复用已有的 app_meta 表存 JSON value，跨 SQLite / MySQL 方言透明。
+
+    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """读取 app_meta 表中的一条键值；MySQL 的 `key` 需反引号转义。"""
+        sql = (
+            "SELECT `value` FROM app_meta WHERE `key` = ?"
+            if self._is_mysql
+            else "SELECT value FROM app_meta WHERE key = ?"
+        )
+
+        def operation(conn):
+            row = self._fetchone(conn, sql, (key,))
+            # SQLite Row (row_factory=sqlite3.Row) 与 MySQL DictCursor 均支持 row["value"]
+            return row["value"] if row else default
+
+        try:
+            return self.db.execute_read(operation)
+        except Exception as e:
+            logger.debug(f"读取 app_meta[{key}] 失败: {e}")
+            return default
+
+    def set_meta(self, key: str, value: str) -> None:
+        """写入 app_meta 表；SQLite 用 INSERT OR REPLACE，MySQL 用 ON DUPLICATE KEY UPDATE。"""
+        if self._is_mysql:
+            sql = (
+                "INSERT INTO app_meta (`key`, `value`) VALUES (?, ?) "
+                "ON DUPLICATE KEY UPDATE `value` = VALUES(`value`)"
+            )
+        else:
+            sql = "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)"
+
+        def operation(conn):
+            self._execute_write(conn, sql, (key, value))
+
+        try:
+            self.db.execute_with_retry(operation)
+        except Exception as e:
+            logger.warning(f"写入 app_meta[{key}] 失败: {e}")

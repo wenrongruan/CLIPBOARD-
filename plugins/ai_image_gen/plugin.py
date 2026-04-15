@@ -81,6 +81,25 @@ def _schedule_temp_cleanup(paths: list[str], delay_seconds: int = 300) -> None:
     threading.Thread(target=_cleanup, daemon=True, name="ai_temp_cleanup").start()
 
 
+def _get_temp_dir() -> str:
+    """返回本插件写临时文件使用的目录。
+    Why: Windows 下系统 %TEMP%（通常 C:\\Users\\...\\AppData\\Local\\Temp）对同
+    机本用户所有进程可读；落在这里的剪贴板副本可能被同账户其他进程枚举读取。
+    改用应用私有目录 %LOCALAPPDATA%\\SharedClipboard\\Temp，由 Windows NTFS
+    默认 ACL 仅授权当前用户与 SYSTEM。非 Windows 平台保持 tempfile 默认行为
+    （后续仍显式 chmod 0600 保证私密）。
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+        priv_dir = os.path.join(base, "SharedClipboard", "Temp")
+        try:
+            os.makedirs(priv_dir, exist_ok=True)
+        except OSError:
+            return tempfile.gettempdir()
+        return priv_dir
+    return tempfile.gettempdir()
+
+
 def _find_python() -> str:
     """找到系统 Python 解释器路径（兼容 PyInstaller 打包环境）"""
     # 非打包环境直接用 sys.executable
@@ -151,7 +170,7 @@ class AIImageGenPlugin(PluginBase):
         child_env = os.environ.copy()
         cloud_client = self.get_cloud_client()
         if cloud_client:
-            base_url = getattr(cloud_client, "_base_url", None)
+            base_url = getattr(cloud_client, "base_url", None)
             if base_url:
                 cmd += ["--cloud-url", base_url]
             auth_path = Path.home() / ".shared_clipboard" / "auth.json"
@@ -162,6 +181,7 @@ class AIImageGenPlugin(PluginBase):
                 logger.warning("未找到 auth.json，子进程可能无法识别登录态: %s", auth_path)
 
         temp_files = []
+        temp_dir = _get_temp_dir()  # Windows 下走 %LOCALAPPDATA% 私有子目录
         try:
             if isinstance(item, TextClipboardItem) and item.text_content:
                 # 文字内容 → 写入临时文件后以 --init-prompt-file 传递。
@@ -169,7 +189,7 @@ class AIImageGenPlugin(PluginBase):
                 # 出现在同机可枚举的进程参数列表中。
                 tf = tempfile.NamedTemporaryFile(
                     mode="w", suffix=".txt", prefix="clipboard_prompt_",
-                    encoding="utf-8", delete=False,
+                    encoding="utf-8", delete=False, dir=temp_dir,
                 )
                 tf.write(item.text_content)
                 tf.close()
@@ -184,7 +204,8 @@ class AIImageGenPlugin(PluginBase):
             elif isinstance(item, ImageClipboardItem) and item.image_data:
                 # 图片内容 → 保存临时文件，作为附件
                 temp_file = tempfile.NamedTemporaryFile(
-                    suffix=".png", prefix="clipboard_img_", delete=False
+                    suffix=".png", prefix="clipboard_img_", delete=False,
+                    dir=temp_dir,
                 )
                 temp_file.write(item.image_data)
                 temp_file.close()
@@ -212,10 +233,12 @@ class AIImageGenPlugin(PluginBase):
             # 子进程已开始读取临时文件；5 分钟后清理足够覆盖启动+读取窗口
             _schedule_temp_cleanup(list(temp_files))
 
+            # Why: action=NONE 表示不触碰剪贴板/UI，text_content 不会被消费；
+            # 传提示串会让调用方误以为应当回填剪贴板，导致语义不一致。
             return PluginResult(
                 success=True,
                 action=PluginResultAction.NONE,
-                text_content="已启动 AI 图片工具",
+                text_content="",
             )
 
         except Exception as e:

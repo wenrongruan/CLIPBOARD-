@@ -22,7 +22,9 @@ def create_database_manager():
         from .mysql_database import MySQLDatabaseManager
 
         mysql_config = get_mysql_config()
-        logger.info(f"使用 MySQL 数据库: {mysql_config['host']}:{mysql_config['port']}/{mysql_config['database']} (user={mysql_config['user']})")
+        # Why: 日志默认级别 WARNING 下不会输出；降为 DEBUG 避免常规启动日志里
+        # 出现连接主机/用户名（即便不含密码，也属于较敏感的运维信息）。
+        logger.debug(f"使用 MySQL 数据库: {mysql_config['host']}:{mysql_config['port']}/{mysql_config['database']} (user={mysql_config['user']})")
 
         return MySQLDatabaseManager(
             host=mysql_config["host"],

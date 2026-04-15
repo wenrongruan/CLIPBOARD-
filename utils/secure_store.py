@@ -14,20 +14,35 @@ _SERVICE_NAME = "SharedClipboard"
 
 # 当前实际使用的凭据存储后端：'keyring' / 'dpapi' / 'base64' / 'unknown'
 _active_backend: str = "unknown"
-_backend_warned: bool = False
 
 
 def _set_active_backend(backend: str):
-    """设置当前活动后端，首次降级时打 warning"""
-    global _active_backend, _backend_warned
+    """设置当前活动后端，首次降级时打一次 warning（闭包去重，无需模块级标志）。"""
+    global _active_backend
     if backend == _active_backend:
         return
     _active_backend = backend
-    if backend != "keyring" and not _backend_warned:
-        logger.warning(
-            "凭据存储已降级到 %s，安全等级低于系统钥匙串。", backend
-        )
-        _backend_warned = True
+    if backend != "keyring":
+        _warn_degraded_once(backend)
+
+
+def _make_warn_once():
+    """闭包去重：首个降级后端打一次 warning，之后保持沉默。
+    Why: 取代原 _backend_warned 全局布尔，把去重状态封闭在函数里。
+    """
+    warned = False
+
+    def _warn(backend: str):
+        nonlocal warned
+        if warned:
+            return
+        logger.warning("凭据存储已降级到 %s，安全等级低于系统钥匙串。", backend)
+        warned = True
+
+    return _warn
+
+
+_warn_degraded_once = _make_warn_once()
 
 
 def get_active_backend() -> str:
@@ -36,7 +51,7 @@ def get_active_backend() -> str:
 
 
 def is_degraded() -> bool:
-    """当前凭据存储是否降级（非 keyring）"""
+    """当前凭据存储是否降级（非 keyring；unknown 视为未定，不算降级）。"""
     return _active_backend not in ("keyring", "unknown")
 
 

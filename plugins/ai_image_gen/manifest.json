@@ -7,6 +7,6 @@
     "entry_point": "plugin.py",
     "min_app_version": "1.0.0",
     "permissions": ["network", "clipboard_write"],
-    "timeout": 300,
+    "timeout": 10,
     "config_schema": {}
 }

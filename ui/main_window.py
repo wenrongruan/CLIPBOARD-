@@ -553,8 +553,9 @@ class MainWindow(EdgeHiddenWindow):
                     db_changed = True
             elif new_db_type == "mysql":
                 mysql_config = get_mysql_config()
-                # 密码空表示"未在本次会话修改"（_current_db_settings 不回传密码），
-                # 仅当用户实际填入了新密码且与 keyring 中不同才算变更
+                # 密码空表示"未在本次会话修改"（get_settings 返回的明文密码若为空，
+                # _on_accept 不会覆盖 keyring 中已存在的密码），仅当用户实际填入
+                # 了新密码且与 keyring 中不同才算变更。
                 pw_changed = bool(dlg_settings["mysql_password"]) and dlg_settings["mysql_password"] != mysql_config["password"]
                 if (dlg_settings["mysql_host"] != mysql_config["host"] or
                     dlg_settings["mysql_port"] != mysql_config["port"] or

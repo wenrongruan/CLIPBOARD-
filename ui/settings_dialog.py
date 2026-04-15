@@ -210,7 +210,7 @@ class SettingsDialog(QDialog):
         mysql_layout.addRow(t("username"), self.mysql_user_edit)
 
         self.mysql_password_edit = QLineEdit()
-        # 不预填密码；保存逻辑 `_current_db_settings` 仅在 text() 非空时才 set_mysql_config，
+        # 不预填密码；保存逻辑在 `_on_accept` 中，仅当 text() 非空时才 set_mysql_config，
         # 留空则保留 keyring 中已存在的密码。
         self.mysql_password_edit.setEchoMode(QLineEdit.Password)
         if mysql_config.get("password"):
@@ -577,7 +577,10 @@ class SettingsDialog(QDialog):
         if name in profiles:
             QMessageBox.warning(self, t("warning"), t("profile_exists"))
             return
-        profiles[name] = self._current_db_settings()
+        # Why: profile 持久化到 settings.json，绝不能带明文密码（密码走 keyring）。
+        profile_settings = self._current_db_settings()
+        profile_settings["mysql_password"] = ""
+        profiles[name] = profile_settings
         update_settings(db_profiles=profiles)
         self.profile_combo.addItem(name)
         self.profile_combo.setCurrentText(name)
@@ -600,24 +603,20 @@ class SettingsDialog(QDialog):
             self.profile_combo.removeItem(self.profile_combo.currentIndex())
 
     def _current_db_settings(self) -> dict:
-        """从 UI 中读取当前数据库配置（密码不写入 profile，走安全存储）"""
+        """从 UI 中读取当前数据库配置（纯读取，无副作用）。
+        Why: 原实现在这里直接写 keyring，但该函数会被 _add_profile /
+        get_settings 等多个路径调用，包括 Cancel 前的探测；只读保证幂等。
+        密码持久化统一搬到 _on_accept 一次完成。
+        """
         db_type = "sqlite" if self.db_type_group.checkedId() == 0 else "mysql"
-        password = self.mysql_password_edit.text()
-        if password:
-            set_mysql_config(
-                host=self.mysql_host_edit.text() or "localhost",
-                port=self.mysql_port_spin.value(),
-                user=self.mysql_user_edit.text(),
-                password=password,
-                database=self.mysql_database_edit.text() or "clipboard",
-            )
         return {
             "db_type": db_type,
             "database_path": self.db_path_edit.text(),
             "mysql_host": self.mysql_host_edit.text() or "localhost",
             "mysql_port": self.mysql_port_spin.value(),
             "mysql_user": self.mysql_user_edit.text(),
-            "mysql_password": "",
+            # 明文密码随 dict 返回，调用方（_on_accept）负责写入安全存储
+            "mysql_password": self.mysql_password_edit.text(),
             "mysql_database": self.mysql_database_edit.text() or "clipboard",
         }
 
@@ -718,19 +717,38 @@ class SettingsDialog(QDialog):
                 )
                 return
 
+            # Why: 真正确认保存时才将明文密码写入 keyring。若用户输入为空，
+            # 保留 keyring 中已有密码（set_mysql_config 会覆盖，空字符串会清除）。
+            if password:
+                try:
+                    set_mysql_config(
+                        host=host, port=port, user=user,
+                        password=password, database=database,
+                    )
+                except Exception as e:
+                    logger.warning(f"保存 MySQL 配置到安全存储失败: {e}")
+
         self.accept()
 
     def get_cloud_api(self):
         return self._cloud_api
 
     def get_settings(self) -> dict:
+        """返回纯 dict（含明文 mysql_password 字段）。
+        Why: 旧实现把 keyring 写入藏在这里，违反"读"的语义。当前函数只做数据汇总，
+        由调用方决定如何持久化；mysql_password 的 keyring 写入已挪到 _on_accept。
+        """
         edge_map = {0: "right", 1: "left", 2: "top", 3: "bottom"}
         db_settings = self._current_db_settings()
         language = self._language_codes[self.language_combo.currentIndex()]
 
+        # profile 持久化时剥掉明文密码——密码只通过 keyring 保存。
+        profile_snapshot = dict(db_settings)
+        profile_snapshot["mysql_password"] = ""
+
         profile_name = self.profile_combo.currentText()
         profiles = dict(settings().db_profiles)
-        profiles[profile_name] = db_settings
+        profiles[profile_name] = profile_snapshot
         update_settings(db_profiles=profiles)
 
         result = {

@@ -176,27 +176,10 @@ class PluginBase(ABC):
             )
         return client.check_credits(required)
 
-    def deduct_credits(self, amount: float, reason: str, task_uuid: str = "") -> dict:
-        """扣除用户积分
-
-        参数:
-            amount: 扣除数量
-            reason: 扣除原因（如 "AI 生图"）
-            task_uuid: 关联的任务 UUID（可选）
-        返回:
-            {"success": bool, "remaining": float, "transaction_id": str}
-        异常:
-            RuntimeError: 未登录时调用
-        """
-        client = self.get_cloud_client()
-        if not client:
-            raise RuntimeError("未登录，无法扣除积分")
-        return client.deduct_credits(
-            amount=amount,
-            reason=reason,
-            plugin_id=self.get_id(),
-            task_uuid=task_uuid,
-        )
+    # NOTE: 已移除 PluginBase.deduct_credits。
+    # 服务端 /api/v1/credits/deduct 仅接受 X-Internal-Service-Secret 的内部服务调用，
+    # 任何客户端调用必然 403；扣点由服务端在任务完成时内部处理，插件只需调用
+    # check_credits / get_balance 查询余额。
 
     def get_balance(self) -> dict:
         """获取当前积分余额

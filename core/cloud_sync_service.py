@@ -1,7 +1,9 @@
 """云端同步服务:通过 REST API 与云端服务器双向同步剪贴板数据。"""
 
+import json
 import logging
 import platform
+import time
 from collections import deque
 from enum import Enum
 from typing import Optional
@@ -11,7 +13,7 @@ from PySide6.QtCore import QObject, Signal, QTimer, QThread, Slot, QMetaObject, 
 from .models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
 from .repository import ClipboardRepository
 from .cloud_api import CloudAPIClient, CloudAPIError
-from config import settings, update_settings, SYNC_INTERVAL_MS
+from config import settings, SYNC_INTERVAL_MS
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,11 @@ class _SyncWorker(QObject):
     quota_warning = Signal(int, int)
     device_registered = Signal()    # 设备注册成功
 
+    # app_meta 表中存放永久放弃同步的 server_id 集合（JSON list）
+    # Why: 进程重启后若某 server_id 的图片下载始终失败，无持久化时会从该 id
+    # 处再次阻塞 _MAX_IMAGE_RETRY 次。落盘达阈值 id 后重启即永久放弃。
+    _META_SKIP_KEY = "cloud_sync_permanently_skipped"
+
     def __init__(self, cloud_api: CloudAPIClient, repository: ClipboardRepository):
         super().__init__()
         self.cloud_api = cloud_api
@@ -38,6 +45,12 @@ class _SyncWorker(QObject):
         s = settings()
         self._device_id = s.device_id
         self._device_name = s.device_name
+
+        # server_id → 累计失败次数。计数 >= _MAX_IMAGE_RETRY 即视为永久放弃；
+        # 单一事实来源避免"counter + set"双状态。惰性加载，首次查询才读 DB。
+        self._skip_counter: dict[int, int] = {}
+        self._skip_counter_loaded: bool = False
+        self._skip_counter_dirty: bool = False
 
     @Slot(int)
     def do_pull(self, last_sync_id: int):
@@ -96,6 +109,10 @@ class _SyncWorker(QObject):
                     max_server_id = last_sync_id
 
             self.repository.set_cloud_ids_bulk(cloud_id_pairs)
+            # 本批若有新增永久放弃项，统一落盘一次（避免批内多次写 app_meta）
+            if self._skip_counter_dirty:
+                self._save_skip_counter()
+                self._skip_counter_dirty = False
             self.pull_done.emit(new_items, max_server_id)
 
         except CloudAPIError as e:
@@ -258,21 +275,50 @@ class _SyncWorker(QObject):
             return False
 
     def _register_skip(self, server_id: int):
-        """记录某 server_id 因图片/解析失败被跳过的次数"""
+        """记录某 server_id 因图片/解析失败被跳过；达到阈值标记 dirty 待批量落盘。"""
         if not server_id:
             return
-        counter = getattr(self, '_skip_retry_counter', None)
-        if counter is None:
-            counter = {}
-            self._skip_retry_counter = counter
-        counter[server_id] = counter.get(server_id, 0) + 1
+        self._ensure_skip_counter_loaded()
+        current = self._skip_counter.get(server_id, 0)
+        if current >= self._MAX_IMAGE_RETRY:
+            return
+        new_count = current + 1
+        self._skip_counter[server_id] = new_count
+        if new_count >= self._MAX_IMAGE_RETRY:
+            # 延迟到 _on_pull_done 整批处理完再落盘，避免批内多条各写一次 app_meta
+            self._skip_counter_dirty = True
 
     def _is_permanently_skipped(self, server_id: int) -> bool:
-        """判断某 server_id 是否已达永久放弃阈值"""
         if not server_id:
             return True
-        counter = getattr(self, '_skip_retry_counter', {})
-        return counter.get(server_id, 0) >= self._MAX_IMAGE_RETRY
+        self._ensure_skip_counter_loaded()
+        return self._skip_counter.get(server_id, 0) >= self._MAX_IMAGE_RETRY
+
+    def _ensure_skip_counter_loaded(self) -> None:
+        if self._skip_counter_loaded:
+            return
+        # 从 app_meta 读已达阈值的 id 列表；每个初始化为 MAX 即代表"已永久放弃"
+        try:
+            raw = self.repository.get_meta(self._META_SKIP_KEY, "[]")
+            if raw:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    for x in data:
+                        if isinstance(x, (int, str)) and str(x).isdigit():
+                            self._skip_counter[int(x)] = self._MAX_IMAGE_RETRY
+        except Exception as e:
+            logger.debug(f"加载永久放弃集合失败: {e}")
+        self._skip_counter_loaded = True
+
+    def _save_skip_counter(self) -> None:
+        try:
+            # 仅持久化达阈值的 id；保底截断 5000 项防 JSON 膨胀
+            ids = sorted(
+                sid for sid, c in self._skip_counter.items() if c >= self._MAX_IMAGE_RETRY
+            )[-5000:]
+            self.repository.set_meta(self._META_SKIP_KEY, json.dumps(ids))
+        except Exception as e:
+            logger.debug(f"持久化永久放弃集合失败: {e}")
 
     def _upload_image_for_item(self, item: ImageClipboardItem, server_id: int):
         """上传图片到云端（仅对 ImageClipboardItem 调用，调用方已做类型过滤）"""
@@ -313,6 +359,14 @@ class CloudSyncService(QObject):
     # 上传批次大小
     _UPLOAD_BATCH_SIZE = 20
 
+    # app_meta 中存放云同步游标的键名
+    _META_CURSOR_KEY = "cloud_last_sync_id"
+
+    # 游标节流落盘阈值：每 N 次推进或经过 SEC 秒才写一次，避免热路径频繁 DB 写。
+    # 崩溃场景最多丢 N 条 / SEC 秒的进度，由 stop() 与 atexit 兜底收敛。
+    _PERSIST_EVERY_N = 10
+    _PERSIST_EVERY_SEC = 120.0
+
     def __init__(self, repository: ClipboardRepository, cloud_api: CloudAPIClient, parent=None):
         super().__init__(parent)
         self.repository = repository
@@ -320,7 +374,9 @@ class CloudSyncService(QObject):
         s = settings()
         self._device_id = s.device_id
         self._device_name = s.device_name
-        self._last_sync_id = s.cloud_last_sync_id
+        # Why: 游标改为优先从 app_meta 读（轻量 key-value 落盘），兼容旧版本
+        # 时 fallback 到 settings.json；读取到任意一处有值就用，用后不再写回老字段。
+        self._last_sync_id = self._load_cursor_from_meta(s.cloud_last_sync_id)
         self._state: CloudSyncState = CloudSyncState.STOPPED
         self._current_interval = self._MIN_INTERVAL_MS
         self._pulling = False  # 正交的 in-flight 标志:拉取请求是否在途
@@ -358,6 +414,26 @@ class CloudSyncService(QObject):
         # 注册设备（首次连接时）
         self._device_registered = False
         self._quota_check_counter = 0
+
+        self._cursor_persist_counter = 0
+        self._last_cursor_persist_ts = time.monotonic()
+
+    def _load_cursor_from_meta(self, fallback: int) -> int:
+        """从 app_meta 读游标；读不到时用传入的 settings.json 值兜底（向后兼容）。"""
+        try:
+            raw = self.repository.get_meta(self._META_CURSOR_KEY, None)
+            if raw is not None and str(raw).strip():
+                return int(raw)
+        except Exception as e:
+            logger.debug(f"读取云同步游标失败（走 settings.json 兜底）: {e}")
+        return fallback
+
+    def _persist_cursor(self) -> None:
+        """把 _last_sync_id 写入 app_meta。失败静默（热路径不要抛）。"""
+        try:
+            self.repository.set_meta(self._META_CURSOR_KEY, str(self._last_sync_id))
+        except Exception as e:
+            logger.debug(f"写入云同步游标失败: {e}")
 
     @property
     def state(self) -> CloudSyncState:
@@ -397,8 +473,8 @@ class CloudSyncService(QObject):
         self._transition(CloudSyncState.STOPPED)
         self._pull_timer.stop()
         self._push_timer.stop()
-        # 退出时才落盘游标,避免热路径每秒 serialize 全量 settings
-        update_settings(cloud_last_sync_id=self._last_sync_id)
+        # 退出时落盘游标（改走 app_meta，单条 key-value 比全量 settings 便宜）
+        self._persist_cursor()
         self._worker_thread.quit()
         self._worker_thread.wait(3000)
         logger.info("云端同步服务已停止")
@@ -416,8 +492,12 @@ class CloudSyncService(QObject):
     def reset_sync_position(self):
         """重置同步位置"""
         self._last_sync_id = 0
-        update_settings(cloud_last_sync_id=0)
+        self._persist_cursor()
         logger.info("云端同步位置已重置")
+
+    def persist_sync_cursor(self) -> None:
+        """atexit / 崩溃兜底调用：立即把内存游标落盘到 app_meta。"""
+        self._persist_cursor()
 
     def enqueue_upload(self, item: ClipboardItem):
         """将新条目加入上传队列；队列满时最旧条目被挤出并上报告警"""
@@ -452,10 +532,12 @@ class CloudSyncService(QObject):
     @Slot(list, int)
     def _on_pull_done(self, new_items: list, max_server_id: int):
         """拉取完成回调（主线程）。
-        游标只更新内存, 由 stop() 统一落盘, 避免每秒一次 settings 全量对比。"""
+        游标以节流方式增量落盘（每 N 次或每 T 秒任一触发），stop()/atexit 兜底。"""
         self._pulling = False
+        cursor_advanced = False
         if max_server_id > self._last_sync_id:
             self._last_sync_id = max_server_id
+            cursor_advanced = True
 
         if new_items:
             logger.debug(f"从云端拉取了 {len(new_items)} 条新记录")
@@ -465,6 +547,16 @@ class CloudSyncService(QObject):
                 self._pull_timer.setInterval(self._current_interval)
         else:
             self._increase_interval()
+
+        # Why: 仅在游标真正推进时才计数，避免空轮询刷满节流窗口。
+        if cursor_advanced:
+            self._cursor_persist_counter += 1
+            now = time.monotonic()
+            if (self._cursor_persist_counter >= self._PERSIST_EVERY_N
+                    or now - self._last_cursor_persist_ts >= self._PERSIST_EVERY_SEC):
+                self._cursor_persist_counter = 0
+                self._last_cursor_persist_ts = now
+                self._persist_cursor()
 
     @Slot(str, int)
     def _on_pull_error(self, message: str, status_code: int):

@@ -3,7 +3,7 @@ import time
 import random
 import logging
 import threading
-from typing import Optional, Callable, Any
+from typing import Callable, Any
 from contextlib import contextmanager
 
 from .base_database import AbstractDatabaseManager
@@ -70,8 +70,14 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         self.user = user
         self.password = password
         self.database = database
-        self._conn: Optional[pymysql.connections.Connection] = None
-        self._lock = threading.Lock()
+        # Why: 原先共享单个 _conn + 全局 _lock，所有读写被串行化，UI
+        # 列表查询会阻塞同步线程的写入。PyMySQL 连接本身非线程安全，
+        # 改为每线程一份 connection（对齐 SQLite 做法），并发读写互不干扰。
+        # _all_conns 仅用于 close() 统一回收，_conns_lock 保护列表自身，
+        # 不再对读写加锁。
+        self._tls = threading.local()
+        self._all_conns: list = []
+        self._conns_lock = threading.Lock()
         self._init_database()
 
     def _init_database(self):
@@ -153,32 +159,64 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
             write_timeout=30,
         )
 
+    # ping 节流间隔：同一线程距上次 ping <PING_INTERVAL_S 直接复用 conn，
+    # 断开的连接会在 execute 时抛 OperationalError(2006/2013)，由 execute_with_retry 回捞。
+    _PING_INTERVAL_S = 60.0
+
+    def _discard_thread_conn(self, conn) -> None:
+        """关闭并从池中移除一个已失效连接；单独封装让 _get_thread_conn 主路径平直。"""
+        try:
+            conn.close()
+        except Exception:
+            pass
+        with self._conns_lock:
+            try:
+                self._all_conns.remove(conn)
+            except ValueError:
+                pass
+
+    def _get_thread_conn(self) -> "pymysql.connections.Connection":
+        """返回当前线程独占的 connection；首次访问或连接失效时创建。
+        Why: PyMySQL 连接非线程安全；每次都 ping 会给热路径加一次 roundtrip，
+        60s 内复用 conn、跳过 ping，依赖 execute_with_retry 的 2006/2013 重试兜底。
+        """
+        conn = getattr(self._tls, "conn", None)
+        if conn is not None:
+            now = time.monotonic()
+            last_ping = getattr(self._tls, "last_ping_ts", 0.0)
+            if now - last_ping < self._PING_INTERVAL_S:
+                return conn
+            try:
+                conn.ping(reconnect=True)
+                self._tls.last_ping_ts = now
+                return conn
+            except Exception:
+                # ping 失败：清理旧连接后 fallthrough 创建新连接
+                self._discard_thread_conn(conn)
+
+        new_conn = self._create_connection()
+        self._tls.conn = new_conn
+        self._tls.last_ping_ts = time.monotonic()
+        with self._conns_lock:
+            self._all_conns.append(new_conn)
+        return new_conn
+
     @contextmanager
     def get_connection(self):
-        """复用持久连接，仅在出错时重建。使用锁保证线程安全。"""
-        with self._lock:
-            if self._conn is None:
-                self._conn = self._create_connection()
-            else:
-                try:
-                    self._conn.ping(reconnect=True)
-                except Exception:
-                    try:
-                        self._conn.close()
-                    except Exception:
-                        pass
-                    self._conn = self._create_connection()
-            yield self._conn
+        """yield 当前线程独占的 connection（无全局锁，允许并发读写）。"""
+        yield self._get_thread_conn()
 
     def close(self):
-        """关闭持久连接，供应用退出时调用"""
-        with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except Exception:
-                    pass
-                self._conn = None
+        """关闭所有线程的 connection，供应用退出时调用。"""
+        with self._conns_lock:
+            conns = list(self._all_conns)
+            self._all_conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self._tls = threading.local()
 
     def execute_with_retry(
         self,
@@ -186,8 +224,6 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         max_retries: int = 5,
     ) -> Any:
         """带重试的数据库操作"""
-        # TODO: 当前所有写操作串行化在单个持久连接上，高频写入会阻塞；
-        # 未来可改为连接池（如 DBUtils PooledDB）提升并发吞吐。
         last_error = None
         for attempt in range(max_retries):
             try:
@@ -211,13 +247,26 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         raise Exception(f"数据库操作失败，已重试{max_retries}次: {last_error}")
 
     def execute_read(self, operation: Callable) -> Any:
-        """执行只读操作
+        """执行只读操作。
+        Why: 每线程连接模型下，读不再与写互斥（不同线程用不同 MySQL 会话），
+        operation 仍须在返回前把结果实体化（fetchall/list），避免返回
+        游离 cursor 后被其他调用复用同一连接的 cursor 打断。
 
-        PyMySQL 连接非线程安全，必须在 self._lock 保护下完成整个查询，
-        并确保 operation 在锁内已将结果实体化（fetchall/list），不能返回仍依赖连接的 cursor。
+        Why commit: MySQL 默认 REPEATABLE READ 隔离级别下，同一连接上未显式
+        结束的只读事务会持续持有一个一致性快照，后续读会看到陈旧数据。
+        读完显式 commit 结束事务，下次读取时 MySQL 会开启新快照。
         """
         with self.get_connection() as conn:
-            return operation(conn)
+            try:
+                return operation(conn)
+            finally:
+                try:
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
     def check_connection(self) -> bool:
         """检查数据库连接"""
