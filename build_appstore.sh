@@ -115,14 +115,14 @@ echo "打包成功: ${APP_BUNDLE}"
 
 # 修正 Info.plist（PyInstaller 生成的版本号不正确）
 INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 2.0.0" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 3.0.0" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 6" "$INFO_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 6" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.utilities" "$INFO_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.utilities" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 12.0" "$INFO_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 12.0" "$INFO_PLIST"
-echo "Info.plist 已更新: 版本 2.0.0 (Build 6)"
+echo "Info.plist 已更新: 版本 3.0.0 (Build 6)"
 
 # 嵌入 Provisioning Profile
 if [ -f "*.provisionprofile" ] 2>/dev/null || ls *.provisionprofile 2>/dev/null; then
