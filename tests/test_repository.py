@@ -247,3 +247,53 @@ class TestHashUtils:
     def test_different_inputs_different_hashes(self):
         from utils.hash_utils import compute_content_hash
         assert compute_content_hash("a") != compute_content_hash("b")
+
+
+class TestUpdateItemContentCrossType:
+    def _fetch_row(self, repo, item_id):
+        def op(conn):
+            cur = conn.execute(
+                "SELECT content_type, text_content, image_data, image_thumbnail, preview "
+                "FROM clipboard_items WHERE id = ?",
+                (item_id,),
+            )
+            return cur.fetchone()
+        return repo.db.execute_with_retry(op)
+
+    def test_replace_image_to_text_clears_image_payload(self, repo):
+        item = ImageClipboardItem(
+            image_data=b"\x89PNGfake",
+            image_thumbnail=b"thumb",
+            content_hash="hash_img",
+            preview="[图片]",
+            device_id="dev1",
+            device_name="TestPC",
+            created_at=1000,
+        )
+        item_id = repo.add_item(item)
+
+        ok = repo.update_item_content(
+            item_id, text_content="replaced text", content_type="text"
+        )
+        assert ok is True
+
+        row = self._fetch_row(repo, item_id)
+        assert row[0] == "text"
+        assert row[1] == "replaced text"
+        assert row[2] is None
+        assert row[3] is None
+
+    def test_replace_text_to_image_clears_text_payload(self, repo):
+        item = _make_item("original text", hash_suffix="cross1")
+        item_id = repo.add_item(item)
+
+        ok = repo.update_item_content(
+            item_id, image_data=b"\x89PNGfake2", content_type="image"
+        )
+        assert ok is True
+
+        row = self._fetch_row(repo, item_id)
+        assert row[0] == "image"
+        assert row[1] is None
+        assert row[2] == b"\x89PNGfake2"
+        assert row[4] == ""

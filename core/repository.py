@@ -338,11 +338,15 @@ class ClipboardRepository:
         self, item_id: int, text_content: Optional[str] = None,
         image_data: Optional[bytes] = None, content_type: Optional[str] = None,
     ) -> bool:
-        """更新条目内容（用于插件 REPLACE 操作）"""
+        """更新条目内容（用于插件 REPLACE 操作）。
+
+        当 content_type 从 image 切到 text（或反向）时，另一类载荷列必须显式清空，
+        否则数据库行会同时残留 image_data/image_thumbnail 和 text_content，后续读取逻辑
+        可能按旧 content_type 误判。
+        """
         from utils.hash_utils import compute_content_hash
 
         def operation(conn) -> bool:
-            # 构建动态 UPDATE
             fields = []
             params = []
             hash_source = None
@@ -359,6 +363,13 @@ class ClipboardRepository:
             if content_type is not None:
                 fields.append("content_type = ?")
                 params.append(content_type)
+                if content_type == "text":
+                    fields.append("image_data = NULL")
+                    fields.append("image_thumbnail = NULL")
+                elif content_type == "image":
+                    fields.append("text_content = NULL")
+                    fields.append("preview = ?")
+                    params.append("")
             if hash_source is not None:
                 fields.append("content_hash = ?")
                 params.append(compute_content_hash(hash_source))
