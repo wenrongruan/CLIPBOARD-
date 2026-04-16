@@ -58,7 +58,7 @@ PAGE_SIZE = 10  # 每页显示条数
 THUMBNAIL_SIZE = (100, 100)
 
 # 云端 API 域名白名单
-_ALLOWED_API_DOMAINS = {"www.jlike.com", "api.jlike.com", "localhost", "127.0.0.1"}
+_ALLOWED_API_DOMAINS = {"www.jlike.com", "localhost", "127.0.0.1"}
 # 数据库名白名单:仅字母、数字、下划线
 _DB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 

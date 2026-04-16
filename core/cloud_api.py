@@ -97,7 +97,6 @@ class CloudAPIClient:
     # 此处只保留精确 region 级 OSS 域名；若需自有 bucket 另行通过子域匹配（bucket.region.aliyuncs.com）。
     _ALLOWED_DOWNLOAD_DOMAINS = {
         "www.jlike.com",
-        "api.jlike.com",
         "s3.amazonaws.com",
         "s3.us-east-1.amazonaws.com",
         "storage.googleapis.com",
