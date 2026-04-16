@@ -241,6 +241,7 @@ class ClipboardApp:
             self.sync_service,
             plugin_manager=self.plugin_manager,
             cloud_api=self.cloud_api,
+            cloud_sync_service=self.cloud_sync_service,
         )
 
         # 连接退出信号

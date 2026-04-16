@@ -331,6 +331,62 @@ class _SyncWorker(QObject):
         except CloudAPIError as e:
             logger.warning(f"图片上传失败 (server_id={server_id}): {e}")
 
+    @Slot()
+    def do_starred_sync(self):
+        """推送已收藏但未同步到云端的条目（在工作线程中执行）
+
+        确保收藏条目一定存在于云端，配额管理由服务端负责。
+        """
+        try:
+            unsynced = self.repository.get_starred_unsynced()
+            if not unsynced:
+                return
+
+            upload_items = []
+            image_items = []
+            for item in unsynced:
+                item_dict = {
+                    "content_type": item.content_type.value,
+                    "text_content": item.text_content if isinstance(item, TextClipboardItem) else None,
+                    "content_hash": item.content_hash,
+                    "preview": item.preview or "",
+                    "device_id": item.device_id,
+                    "device_name": item.device_name,
+                    "created_at": item.created_at,
+                    "is_starred": item.is_starred,
+                }
+                upload_items.append(item_dict)
+                if isinstance(item, ImageClipboardItem) and item.image_data:
+                    image_items.append(item)
+
+            server_items = self.cloud_api.upload_items(upload_items)
+
+            hash_to_server_id = {}
+            if server_items:
+                for si in server_items:
+                    h = si.get("content_hash", "")
+                    sid = si.get("id")
+                    if h and sid:
+                        hash_to_server_id[h] = sid
+
+            cloud_id_pairs = [
+                (item.id, hash_to_server_id[item.content_hash])
+                for item in unsynced
+                if item.id and item.content_hash in hash_to_server_id
+            ]
+            self.repository.set_cloud_ids_bulk(cloud_id_pairs)
+
+            for item in image_items:
+                server_id = hash_to_server_id.get(item.content_hash)
+                if server_id:
+                    self._upload_image_for_item(item, server_id)
+
+            logger.info(f"收藏同步：已推送 {len(unsynced)} 条收藏条目到云端")
+        except CloudAPIError as e:
+            logger.warning(f"收藏同步推送失败: {e}")
+        except Exception as e:
+            logger.error(f"收藏同步推送异常: {e}")
+
 
 class CloudSyncService(QObject):
     """
@@ -358,6 +414,9 @@ class CloudSyncService(QObject):
 
     # 上传批次大小
     _UPLOAD_BATCH_SIZE = 20
+
+    # 数据库扫描未同步条目的最小间隔（秒）
+    _DB_SCAN_INTERVAL_SEC = 10
 
     # app_meta 中存放云同步游标的键名
     _META_CURSOR_KEY = "cloud_last_sync_id"
@@ -417,6 +476,7 @@ class CloudSyncService(QObject):
 
         self._cursor_persist_counter = 0
         self._last_cursor_persist_ts = time.monotonic()
+        self._last_db_scan_ts = 0.0  # DB 扫描未同步条目的上次时间
 
     def _load_cursor_from_meta(self, fallback: int) -> int:
         """从 app_meta 读游标；读不到时用传入的 settings.json 值兜底（向后兼容）。"""
@@ -464,7 +524,18 @@ class CloudSyncService(QObject):
         # 推送定时器间隔为拉取的 2 倍
         self._push_timer.start(interval_ms * 2)
 
+        # 启动后延迟 5 秒执行初始收藏同步（推送未同步的收藏 + 清理非收藏云端副本）
+        QTimer.singleShot(5000, self._trigger_starred_sync)
+
         logger.info(f"云端同步服务已启动,拉取间隔 {interval_ms}ms")
+
+    def _trigger_starred_sync(self):
+        """触发收藏同步（在工作线程执行）"""
+        if self._state != CloudSyncState.RUNNING:
+            return
+        QMetaObject.invokeMethod(
+            self._worker, "do_starred_sync", Qt.QueuedConnection,
+        )
 
     def stop(self):
         """停止云端同步服务"""
@@ -600,6 +671,11 @@ class CloudSyncService(QObject):
         """将本地待上传条目推送到云端(主线程调度,实际 HTTP 在工作线程执行)"""
         if self._state != CloudSyncState.RUNNING or self._pushing:
             return
+
+        # 队列为空时，定期从数据库扫描未同步的条目
+        if not self._pending_upload_queue and not self._retry_queue:
+            self._load_unsynced_from_db()
+
         if not self._pending_upload_queue and not self._retry_queue:
             return
 
@@ -617,14 +693,30 @@ class CloudSyncService(QObject):
         while self._pending_upload_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
             batch.append(self._pending_upload_queue.popleft())
 
+        logger.warning(f"云端推送：发送 {len(batch)} 条记录")
         self._trigger_push.emit(batch)
+
+    def _load_unsynced_from_db(self):
+        """从数据库扫描未同步的条目加入上传队列（有冷却间隔避免频繁查询）"""
+        now = time.monotonic()
+        if now - self._last_db_scan_ts < self._DB_SCAN_INTERVAL_SEC:
+            return
+        self._last_db_scan_ts = now
+        try:
+            unsynced = self.repository.get_unsynced_items(limit=self._UPLOAD_BATCH_SIZE)
+            for item in unsynced:
+                self._pending_upload_queue.append(item)
+            if unsynced:
+                logger.warning(f"数据库扫描：加载了 {len(unsynced)} 条未同步条目到上传队列")
+        except Exception as e:
+            logger.warning(f"数据库扫描未同步条目失败: {e}")
 
     @Slot(int)
     def _on_push_done(self, uploaded_count: int):
         """推送完成回调（主线程）"""
         self._pushing = False
         self.upload_completed.emit(uploaded_count)
-        logger.debug(f"成功上传 {uploaded_count} 条记录到云端")
+        logger.warning(f"云端推送成功：已上传 {uploaded_count} 条记录")
 
     @Slot(str, int, list)
     def _on_push_error(self, message: str, status_code: int, failed_batch: list):

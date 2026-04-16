@@ -72,6 +72,7 @@ class MainWindow(EdgeHiddenWindow):
         sync_service: SyncService,
         plugin_manager=None,
         cloud_api=None,
+        cloud_sync_service=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -80,6 +81,7 @@ class MainWindow(EdgeHiddenWindow):
         self.sync_service = sync_service
         self.plugin_manager = plugin_manager
         self.cloud_api = cloud_api
+        self.cloud_sync_service = cloud_sync_service
 
         # 如果没有传入 cloud_api，但有已保存的 token，则创建客户端
         if not self.cloud_api:
@@ -402,6 +404,20 @@ class MainWindow(EdgeHiddenWindow):
 
     def _on_item_star(self, item: ClipboardItem):
         self.repository.toggle_star(item.id)
+        new_starred = not item.is_starred
+
+        if item.cloud_id and self.cloud_api:
+            # 已在云端 → 同步收藏状态到服务端（服务端据此管理配额优先级）
+            cloud_id = item.cloud_id
+            api = self.cloud_api
+            self._cloud_executor.submit(lambda: api.toggle_star(cloud_id))
+        elif new_starred and not item.cloud_id and self.cloud_sync_service:
+            # 新收藏但不在云端 → 推送到云端（含完整图片数据）
+            full_item = self.repository.get_item_by_id(item.id)
+            if full_item:
+                full_item.is_starred = True
+                self.cloud_sync_service.enqueue_upload(full_item)
+
         self._load_items()
 
     def _on_item_save(self, item: ClipboardItem):

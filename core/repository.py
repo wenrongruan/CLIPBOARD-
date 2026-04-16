@@ -414,6 +414,50 @@ class ClipboardRepository:
 
         return self.db.execute_read(operation)
 
+    def get_starred_unsynced(self, limit: int = 100) -> List[ClipboardItem]:
+        """获取已收藏但未同步到云端的条目（含完整图片数据，用于推送）"""
+        def operation(conn) -> List[ClipboardItem]:
+            sql = f"""
+                SELECT {self._SELECT_FIELDS}
+                FROM clipboard_items
+                WHERE is_starred = 1 AND cloud_id IS NULL
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            rows = self._fetchall(conn, sql, (limit,))
+            return [ClipboardItem.from_db_row(row) for row in rows]
+
+        return self.db.execute_read(operation)
+
+    def get_unsynced_items(self, limit: int = 20) -> List[ClipboardItem]:
+        """获取未同步到云端的条目（含完整图片数据），按最新排序，用于批量推送"""
+        def operation(conn) -> List[ClipboardItem]:
+            sql = f"""
+                SELECT {self._SELECT_FIELDS}
+                FROM clipboard_items
+                WHERE cloud_id IS NULL
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            rows = self._fetchall(conn, sql, (limit,))
+            return [ClipboardItem.from_db_row(row) for row in rows]
+        return self.db.execute_read(operation)
+
+    def get_unstarred_with_cloud_id(self, limit: int = 200) -> List[ClipboardItem]:
+        """获取未收藏但有云端副本的条目，按最旧排序（用于配额清理时优先删最旧）"""
+        def operation(conn) -> List[ClipboardItem]:
+            sql = f"""
+                SELECT {self._SELECT_FIELDS_NO_IMAGE}
+                FROM clipboard_items
+                WHERE is_starred = 0 AND cloud_id IS NOT NULL
+                ORDER BY created_at ASC
+                LIMIT ?
+            """
+            rows = self._fetchall(conn, sql, (limit,))
+            return [ClipboardItem.from_db_row(row) for row in rows]
+
+        return self.db.execute_read(operation)
+
     def get_latest_id(self) -> int:
         def operation(conn) -> int:
             result = self._scalar(conn, "SELECT MAX(id) FROM clipboard_items")
