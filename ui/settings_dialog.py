@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import (
+    APP_VERSION,
     settings,
     update_settings,
     get_cloud_access_token,
@@ -387,6 +388,11 @@ class SettingsDialog(QDialog):
         app_name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
         app_name_label.setAlignment(Qt.AlignCenter)
         about_layout.addWidget(app_name_label)
+
+        version_label = QLabel(f"v{APP_VERSION}")
+        version_label.setStyleSheet("color: #888888; font-size: 13px;")
+        version_label.setAlignment(Qt.AlignCenter)
+        about_layout.addWidget(version_label)
 
         desc_label = QLabel(t("about_description"))
         desc_label.setStyleSheet("color: #aaaaaa; font-size: 13px;")
