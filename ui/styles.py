@@ -237,6 +237,20 @@ QPushButton#cloudButton:hover {
     border-radius: 4px;
 }
 
+QPushButton#urlButton {
+    background-color: transparent;
+    border: none;
+    padding: 4px;
+    min-width: 24px;
+    max-width: 24px;
+    color: #4fc3f7;
+}
+
+QPushButton#urlButton:hover {
+    background-color: rgba(79, 195, 247, 0.2);
+    border-radius: 4px;
+}
+
 QTabWidget::pane {
     border: 1px solid #555555;
     border-radius: 6px;

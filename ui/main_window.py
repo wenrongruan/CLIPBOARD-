@@ -270,6 +270,7 @@ class MainWindow(EdgeHiddenWindow):
         widget.star_clicked.connect(self._on_item_star)
         widget.save_clicked.connect(self._on_item_save)
         widget.cloud_delete_clicked.connect(self._on_cloud_delete)
+        widget.image_url_clicked.connect(self._on_image_url_copy)
 
         list_item = QListWidgetItem()
         hint = widget.sizeHint()
@@ -469,6 +470,42 @@ class MainWindow(EdgeHiddenWindow):
                 QMessageBox.warning(self, t("error"), t("image_load_failed"))
             else:
                 QMessageBox.critical(self, t("error"), t("save_failed", error=error))
+
+    def _on_image_url_copy(self, item: ClipboardItem):
+        """获取云端图片链接并复制到剪贴板"""
+        if not item.cloud_id or not self.cloud_api:
+            return
+
+        self.copy_feedback_label.setText("正在获取图片链接...")
+        self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
+        self.copy_feedback_label.style().polish(self.copy_feedback_label)
+        self.copy_feedback_label.show()
+
+        cloud_id = item.cloud_id
+        api = self.cloud_api
+
+        def _fetch_url():
+            try:
+                return api.get_image_url(cloud_id)
+            except Exception as e:
+                logger.warning(f"获取图片链接失败: {e}")
+                return None
+
+        future = self._cloud_executor.submit(_fetch_url)
+
+        def _on_done(f):
+            url = f.result()
+            if url:
+                from PySide6.QtWidgets import QApplication
+                QApplication.clipboard().setText(url)
+                self._show_copy_feedback(True)
+            else:
+                self.copy_feedback_label.setText("获取图片链接失败")
+                self.copy_feedback_label.setObjectName("copyFeedbackError")
+                self.copy_feedback_label.style().polish(self.copy_feedback_label)
+                self._feedback_timer.start(2000)
+
+        future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_done(f)))
 
     def _prepend_item(self, item: ClipboardItem):
         """在列表顶部插入单个新条目，避免全量重建"""

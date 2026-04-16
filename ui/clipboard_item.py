@@ -25,6 +25,7 @@ class ClipboardItemWidget(QWidget):
     star_clicked = Signal(ClipboardItem)
     save_clicked = Signal(ClipboardItem)
     cloud_delete_clicked = Signal(ClipboardItem)
+    image_url_clicked = Signal(ClipboardItem)
 
     def __init__(self, item: ClipboardItem, parent=None):
         super().__init__(parent)
@@ -125,6 +126,13 @@ class ClipboardItemWidget(QWidget):
             button_layout.addWidget(cloud_btn)
 
         if self.item.is_image:
+            if self.item.is_cloud_synced:
+                url_btn = QPushButton("🔗")
+                url_btn.setObjectName("urlButton")
+                url_btn.setToolTip("复制图片链接")
+                url_btn.clicked.connect(lambda: self.image_url_clicked.emit(self.item))
+                button_layout.addWidget(url_btn)
+
             save_btn = QPushButton("💾")
             save_btn.setObjectName("saveButton")
             save_btn.setToolTip("保存图片")
