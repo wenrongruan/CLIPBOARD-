@@ -150,6 +150,7 @@ class PluginManager(QObject):
         self._plugins: Dict[str, PluginBase] = {}
         self._manifests: Dict[str, dict] = {}
         self._plugin_status: Dict[str, dict] = {}  # {id: {status, message}}
+        self._plugin_paths: Dict[str, Path] = {}   # {id: plugin_dir_path}
         self._active_worker: Optional[PluginWorker] = None
         self._timeout_timer: Optional[QTimer] = None
         self._cloud_client = None  # 共享的云端客户端实例
@@ -193,6 +194,7 @@ class PluginManager(QObject):
             return
 
         self._manifests[plugin_id] = manifest
+        self._plugin_paths[plugin_id] = plugin_path
 
         # 版本兼容性检查
         if not self._check_version_compat(manifest):
@@ -311,6 +313,7 @@ class PluginManager(QObject):
         self._plugins.clear()
         self._manifests.clear()
         self._plugin_status.clear()
+        self._plugin_paths.clear()
 
     def reload_plugins(self):
         """重新加载所有插件"""
@@ -614,3 +617,21 @@ class PluginManager(QObject):
                 json.dump(config, f, indent=2, ensure_ascii=False)
         except (IOError, OSError) as e:
             logger.error(f"Failed to save config for {plugin_id}: {e}")
+
+    # ========== 插件商店 ==========
+
+    def uninstall_plugin(self, plugin_id: str) -> bool:
+        """卸载插件，删除其目录。只允许删除已知插件目录内的内容。"""
+        import shutil
+        path = self._plugin_paths.get(plugin_id)
+        if not path or not path.exists():
+            return False
+        resolved = path.resolve()
+        for known_dir in self._get_plugin_dirs():
+            try:
+                resolved.relative_to(known_dir.resolve())
+                shutil.rmtree(path)
+                return True
+            except ValueError:
+                continue
+        return False

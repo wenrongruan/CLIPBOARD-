@@ -68,6 +68,7 @@ class EdgeHiddenWindow(QWidget):
         self._dragging = False
         self._drag_start_pos = QPoint()
         self._drag_start_geometry = QRect()
+        self._last_cursor_pos = QPoint(-1, -1)
 
         # 鼠标位置检测定时器
         self._mouse_check_timer = QTimer(self)
@@ -91,8 +92,7 @@ class EdgeHiddenWindow(QWidget):
             pos = settings().floating_position
             if pos and len(pos) == 2:
                 x, y = pos
-                # 校验位置是否在屏幕内
-                if screen_rect.contains(QPoint(x, y)):
+                if QApplication.screenAt(QPoint(x, y)):
                     self.setGeometry(QRect(x, y, self._window_width, self._window_height))
                     self._is_visible = True
                     self._is_pinned = True
@@ -106,7 +106,12 @@ class EdgeHiddenWindow(QWidget):
         self.show()
 
     def _get_screen(self) -> Optional[QScreen]:
-        return QApplication.primaryScreen()
+        """当前屏幕：窗口可见/悬浮时用窗口中心所在屏幕，否则用鼠标所在屏幕"""
+        if self._is_visible or self._is_floating:
+            screen = QApplication.screenAt(self.geometry().center())
+            if screen:
+                return screen
+        return QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
 
     def _get_screen_rect(self) -> QRect:
         """获取可用屏幕区域，macOS 上排除菜单栏和 Dock"""
@@ -236,43 +241,48 @@ class EdgeHiddenWindow(QWidget):
         self.setGeometry(self._get_visible_geometry(screen_rect))
 
     def _check_mouse_position(self):
-        # 悬浮模式下不做边缘检测
-        if self._is_floating:
-            return
-
-        # 保护期内不自动隐藏
-        if self._show_protection:
-            return
-
-        screen_rect = self._get_screen_rect()
-        if screen_rect.isEmpty():
+        # 拖动中不做边缘检测，否则会被定时器拉回停靠位置
+        if self._dragging or self._is_floating or self._show_protection:
             return
 
         cursor_pos = QCursor.pos()
-        trigger_zone = self._get_trigger_zone(screen_rect)
+        if cursor_pos == self._last_cursor_pos:
+            return
+        self._last_cursor_pos = cursor_pos
 
-        # 检查鼠标是否在触发区域
+        cursor_screen = QApplication.screenAt(cursor_pos)
+        if not cursor_screen:
+            return
+        cursor_screen_rect = cursor_screen.availableGeometry()
+
+        trigger_zone = self._get_trigger_zone(cursor_screen_rect)
+
         if trigger_zone.contains(cursor_pos):
-            if not self._is_visible:
-                self._slide_in()
+            if not self._is_visible or not self.geometry().intersects(cursor_screen_rect):
+                self._slide_in(cursor_screen_rect)
         else:
-            # 检查鼠标是否在窗口内
-            window_rect = self.geometry()
             if self._is_visible and not self._is_pinned:
-                if not window_rect.contains(cursor_pos):
+                if not self.geometry().contains(cursor_pos):
                     self._slide_out()
 
-    def _slide_in(self):
+    def _slide_in(self, screen_rect: Optional[QRect] = None):
         if self._animation.state() == QPropertyAnimation.Running:
             self._animation.stop()
 
-        screen_rect = self._get_screen_rect()
+        if screen_rect is None or screen_rect.isEmpty():
+            screen_rect = self._get_screen_rect()
         if screen_rect.isEmpty():
             return
 
+        # 若窗口当前不在目标屏幕上，先瞬移到目标屏幕的隐藏位置，避免跨屏动画突兀
+        current_geometry = self.geometry()
+        if not screen_rect.intersects(current_geometry):
+            current_geometry = self._get_hidden_geometry(screen_rect)
+            self.setGeometry(current_geometry)
+
         end_geometry = self._get_visible_geometry(screen_rect)
 
-        self._animation.setStartValue(self.geometry())
+        self._animation.setStartValue(current_geometry)
         self._animation.setEndValue(end_geometry)
         self._animation.start()
         self._is_visible = True

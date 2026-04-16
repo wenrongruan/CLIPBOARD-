@@ -1,13 +1,15 @@
 """应用设置对话框 — 通用/数据库/过滤/插件/云端/关于六个选项卡"""
 
 import logging
+import os
+from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from config import (
@@ -27,6 +29,80 @@ from .plugin_config_dialog import PluginConfigDialog
 from .styles import MAIN_STYLE
 
 logger = logging.getLogger(__name__)
+
+
+class _StoreLoadThread(QThread):
+    """后台加载插件商店列表"""
+    loaded = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, api_url: str):
+        super().__init__()
+        self._api_url = api_url.rstrip("/")
+
+    def run(self):
+        import httpx
+        try:
+            resp = httpx.get(
+                f"{self._api_url}/api/plugins/store",
+                timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=10.0),
+            )
+            if resp.status_code == 200:
+                self.loaded.emit(resp.json().get("plugins", []))
+            else:
+                self.error.emit(f"HTTP {resp.status_code}")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _PluginInstallThread(QThread):
+    """后台下载并安装插件"""
+    installed = Signal(str)
+    error = Signal(str, str)
+
+    def __init__(self, api_url: str, plugin_id: str, download_url: str, target_dir: str):
+        super().__init__()
+        self._api_url = api_url.rstrip("/")
+        self._plugin_id = plugin_id
+        self._download_url = download_url
+        self._target_dir = Path(target_dir)
+
+    def run(self):
+        import httpx
+        import tempfile
+        import zipfile
+
+        try:
+            url = self._download_url if self._download_url.startswith("http") \
+                else f"{self._api_url}{self._download_url}"
+            resp = httpx.get(
+                url,
+                timeout=httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=10.0),
+                follow_redirects=True,
+            )
+            if resp.status_code != 200:
+                self.error.emit(self._plugin_id, f"HTTP {resp.status_code}")
+                return
+
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                tmp.write(resp.content)
+                tmp_path = tmp.name
+
+            try:
+                with zipfile.ZipFile(tmp_path) as zf:
+                    resolved_target = self._target_dir.resolve()
+                    for member in zf.namelist():
+                        member_path = (self._target_dir / member).resolve()
+                        if not str(member_path).startswith(str(resolved_target)):
+                            self.error.emit(self._plugin_id, f"安全检查失败: {member}")
+                            return
+                    zf.extractall(self._target_dir)
+            finally:
+                os.unlink(tmp_path)
+
+            self.installed.emit(self._plugin_id)
+        except Exception as e:
+            self.error.emit(self._plugin_id, str(e))
 
 
 def _restore_cloud_api_from_config():
@@ -348,21 +424,52 @@ class SettingsDialog(QDialog):
         plugin_layout = QVBoxLayout(plugin_tab)
         plugin_layout.setSpacing(10)
 
-        title = QLabel(t("installed_plugins"))
-        title.setObjectName("sectionTitle")
-        plugin_layout.addWidget(title)
+        self._store_thread = None
+        self._install_threads = {}
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         scroll_content = QWidget()
-        self._plugin_list_layout = QVBoxLayout(scroll_content)
+        content_layout = QVBoxLayout(scroll_content)
+        content_layout.setSpacing(6)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+
+        # -- 已安装插件 --
+        installed_title = QLabel(t("installed_plugins"))
+        installed_title.setObjectName("sectionTitle")
+        content_layout.addWidget(installed_title)
+
+        self._plugin_list_layout = QVBoxLayout()
         self._plugin_list_layout.setSpacing(6)
-        self._plugin_list_layout.setContentsMargins(0, 0, 0, 0)
-        self._plugin_list_layout.addStretch()
+        content_layout.addLayout(self._plugin_list_layout)
+
+        # -- 分隔线 --
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setStyleSheet("color: #555555; margin: 8px 0;")
+        content_layout.addWidget(separator)
+
+        # -- 插件商店 --
+        store_header = QHBoxLayout()
+        store_title = QLabel(t("plugin_store"))
+        store_title.setObjectName("sectionTitle")
+        store_header.addWidget(store_title)
+        store_header.addStretch()
+        self._store_refresh_btn = QPushButton(t("refresh"))
+        self._store_refresh_btn.clicked.connect(self._load_store_plugins)
+        store_header.addWidget(self._store_refresh_btn)
+        content_layout.addLayout(store_header)
+
+        self._store_list_layout = QVBoxLayout()
+        self._store_list_layout.setSpacing(6)
+        content_layout.addLayout(self._store_list_layout)
+
+        content_layout.addStretch()
         scroll.setWidget(scroll_content)
         plugin_layout.addWidget(scroll, 1)
 
+        # -- 底部按钮 --
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
@@ -388,27 +495,27 @@ class SettingsDialog(QDialog):
         tab_widget.addTab(plugin_tab, t("plugins"))
 
         self._refresh_plugin_list()
+        self._load_store_plugins()
+
+    # -- 已安装插件 --
 
     def _refresh_plugin_list(self):
-        while self._plugin_list_layout.count() > 1:
-            item = self._plugin_list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self._clear_layout(self._plugin_list_layout)
 
         if not hasattr(self, '_plugin_manager') or self._plugin_manager is None:
             return
 
         plugins = self._plugin_manager.get_loaded_plugins()
         if not plugins:
-            empty_label = QLabel("没有找到插件")
-            empty_label.setStyleSheet("color: #888888; padding: 20px;")
+            empty_label = QLabel(t("plugin_no_installed"))
+            empty_label.setStyleSheet("color: #888888; padding: 10px;")
             empty_label.setAlignment(Qt.AlignCenter)
-            self._plugin_list_layout.insertWidget(0, empty_label)
+            self._plugin_list_layout.addWidget(empty_label)
             return
 
-        for i, info in enumerate(plugins):
+        for info in plugins:
             row = self._create_plugin_row(info)
-            self._plugin_list_layout.insertWidget(i, row)
+            self._plugin_list_layout.addWidget(row)
 
     def _create_plugin_row(self, info: dict) -> QWidget:
         row = QWidget()
@@ -451,18 +558,167 @@ class SettingsDialog(QDialog):
 
         row_layout.addLayout(info_layout, 1)
 
+        btn_box = QVBoxLayout()
+        btn_box.setSpacing(4)
+
         if info.get("has_config") and status == "loaded":
             config_btn = QPushButton(t("plugin_settings"))
             config_btn.setObjectName("pluginConfigBtn")
             config_btn.clicked.connect(
                 lambda checked=False, pid=plugin_id: self._open_plugin_config(pid)
             )
-            row_layout.addWidget(config_btn)
+            btn_box.addWidget(config_btn)
 
+        uninstall_btn = QPushButton(t("plugin_uninstall"))
+        uninstall_btn.setStyleSheet(
+            "QPushButton { color: #f87171; border: 1px solid #f87171; padding: 2px 8px; }"
+            "QPushButton:hover { background: #f87171; color: white; }"
+        )
+        uninstall_btn.clicked.connect(
+            lambda checked=False, pid=plugin_id: self._uninstall_plugin(pid)
+        )
+        btn_box.addWidget(uninstall_btn)
+
+        row_layout.addLayout(btn_box)
         return row
 
     def _toggle_plugin(self, plugin_id: str, enabled: bool):
         set_plugin_enabled(plugin_id, enabled)
+
+    def _uninstall_plugin(self, plugin_id: str):
+        reply = QMessageBox.question(
+            self,
+            t("plugin_uninstall_confirm_title"),
+            t("plugin_uninstall_confirm", name=self._plugin_manager.get_plugin_name(plugin_id)),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if self._plugin_manager.uninstall_plugin(plugin_id):
+            self._plugin_manager.reload_plugins()
+            self._refresh_plugin_list()
+            self._load_store_plugins()
+        else:
+            QMessageBox.warning(self, t("plugin_uninstall_failed"), t("plugin_uninstall_failed"))
+
+    # -- 插件商店 --
+
+    def _load_store_plugins(self):
+        self._store_refresh_btn.setEnabled(False)
+        self._clear_layout(self._store_list_layout)
+
+        loading_label = QLabel(t("plugin_store_loading"))
+        loading_label.setStyleSheet("color: #888888; padding: 10px;")
+        loading_label.setAlignment(Qt.AlignCenter)
+        self._store_list_layout.addWidget(loading_label)
+
+        thread = _StoreLoadThread(settings().cloud_api_url)
+        thread.loaded.connect(self._on_store_loaded)
+        thread.error.connect(self._on_store_error)
+        thread.loaded.connect(thread.deleteLater)
+        thread.error.connect(thread.deleteLater)
+        self._store_thread = thread
+        thread.start()
+
+    def _on_store_loaded(self, plugins: list):
+        self._store_refresh_btn.setEnabled(True)
+        self._clear_layout(self._store_list_layout)
+
+        installed_ids = set()
+        if self._plugin_manager:
+            installed_ids = {p["id"] for p in self._plugin_manager.get_loaded_plugins()}
+
+        available = [p for p in plugins if p.get("id") not in installed_ids]
+
+        if not available:
+            label = QLabel(t("plugin_store_empty"))
+            label.setStyleSheet("color: #888888; padding: 10px;")
+            label.setAlignment(Qt.AlignCenter)
+            self._store_list_layout.addWidget(label)
+            return
+
+        for info in available:
+            row = self._create_store_plugin_row(info)
+            self._store_list_layout.addWidget(row)
+
+    def _on_store_error(self, error_msg: str):
+        self._store_refresh_btn.setEnabled(True)
+        self._clear_layout(self._store_list_layout)
+
+        label = QLabel(t("plugin_store_error"))
+        label.setStyleSheet("color: #f87171; padding: 10px;")
+        label.setAlignment(Qt.AlignCenter)
+        self._store_list_layout.addWidget(label)
+
+    def _create_store_plugin_row(self, info: dict) -> QWidget:
+        row = QWidget()
+        row.setObjectName("pluginItem")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(10, 8, 10, 8)
+        row_layout.setSpacing(10)
+
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+
+        name_label = QLabel(f"{info.get('name', info['id'])} v{info.get('version', '?')}")
+        name_label.setStyleSheet("font-weight: bold;")
+        info_layout.addWidget(name_label)
+
+        desc = info.get("description", "")
+        if desc:
+            desc_label = QLabel(desc)
+            desc_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+            desc_label.setWordWrap(True)
+            info_layout.addWidget(desc_label)
+
+        row_layout.addLayout(info_layout, 1)
+
+        install_btn = QPushButton(t("plugin_install"))
+        install_btn.setStyleSheet(
+            "QPushButton { color: #4fc3f7; border: 1px solid #4fc3f7; padding: 4px 16px; }"
+            "QPushButton:hover { background: #4fc3f7; color: white; }"
+            "QPushButton:disabled { color: #888888; border-color: #888888; }"
+        )
+        plugin_id = info["id"]
+        download_url = info.get("download_url", f"/api/plugins/download/{plugin_id}")
+        install_btn.clicked.connect(
+            lambda checked=False, pid=plugin_id, url=download_url, btn=install_btn:
+                self._install_plugin(pid, url, btn)
+        )
+        row_layout.addWidget(install_btn)
+
+        return row
+
+    def _install_plugin(self, plugin_id: str, download_url: str, btn: QPushButton):
+        btn.setEnabled(False)
+        btn.setText(t("plugin_installing"))
+
+        thread = _PluginInstallThread(
+            settings().cloud_api_url, plugin_id, download_url, str(get_user_plugins_dir()),
+        )
+        thread.installed.connect(lambda pid: self._on_install_finished(pid, btn))
+        thread.error.connect(lambda pid, err: self._on_install_error(pid, err, btn))
+        thread.installed.connect(thread.deleteLater)
+        thread.error.connect(thread.deleteLater)
+        self._install_threads[plugin_id] = thread
+        thread.start()
+
+    def _on_install_finished(self, plugin_id: str, btn: QPushButton):
+        self._install_threads.pop(plugin_id, None)
+        btn.setText(t("plugin_installed_tag"))
+        if self._plugin_manager:
+            self._plugin_manager.reload_plugins()
+        self._refresh_plugin_list()
+        self._load_store_plugins()
+
+    def _on_install_error(self, plugin_id: str, error_msg: str, btn: QPushButton):
+        self._install_threads.pop(plugin_id, None)
+        btn.setEnabled(True)
+        btn.setText(t("plugin_install"))
+        QMessageBox.warning(self, t("plugin_install_failed"), error_msg)
+
+    # -- 插件通用 --
 
     def _open_plugins_dir(self):
         from PySide6.QtGui import QDesktopServices
@@ -473,6 +729,7 @@ class SettingsDialog(QDialog):
         if hasattr(self, '_plugin_manager') and self._plugin_manager:
             self._plugin_manager.reload_plugins()
             self._refresh_plugin_list()
+            self._load_store_plugins()
 
     def _open_plugin_logs(self):
         from PySide6.QtGui import QDesktopServices
@@ -495,6 +752,13 @@ class SettingsDialog(QDialog):
         if dialog.exec() == QDialog.Accepted:
             new_config = dialog.get_config()
             self._plugin_manager.save_plugin_config(plugin_id, new_config)
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     # ========== 数据库回调 ==========
 
