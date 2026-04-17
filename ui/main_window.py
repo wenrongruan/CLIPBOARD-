@@ -64,6 +64,10 @@ class MainWindow(EdgeHiddenWindow):
     _save_image_done = Signal(bool, str, str)
     # 内部信号：插件需要的完整图片加载完成 (plugin_id, action_id, full_item_or_none)
     _plugin_item_loaded = Signal(str, str, object)
+    # 内部信号：云端图片链接获取完成 (url, 空串表示失败)
+    _image_url_done = Signal(str)
+    # 内部信号：云端删除完成 (success: bool, item_id: int, error: str)
+    _cloud_delete_done = Signal(bool, int, str)
 
     def __init__(
         self,
@@ -204,6 +208,10 @@ class MainWindow(EdgeHiddenWindow):
         self._save_image_done.connect(self._handle_save_image_done)
         # 跨线程：插件所需完整图片加载完成 → 主线程派发给 plugin_manager
         self._plugin_item_loaded.connect(self._handle_plugin_item_loaded)
+        # 跨线程：云端图片链接获取完成 → 主线程写入剪贴板并提示
+        self._image_url_done.connect(self._handle_image_url_done)
+        # 跨线程：云端删除完成 → 主线程清理 cloud_id 并刷新列表
+        self._cloud_delete_done.connect(self._handle_cloud_delete_done)
 
         # 剪贴板监控信号
         self.clipboard_monitor.item_added.connect(self._on_item_added)
@@ -390,18 +398,25 @@ class MainWindow(EdgeHiddenWindow):
         cloud_id = item.cloud_id
         item_id = item.id
         api = self.cloud_api
+        signal = self._cloud_delete_done
 
-        future = self._cloud_executor.submit(api.delete_item, cloud_id)
-
-        def _on_done(f):
+        def _do_delete():
+            # worker 线程没有 Qt 事件循环，必须用信号切回主线程
             try:
-                f.result()
-                self.repository.clear_cloud_id(item_id)
-                self._load_items()
+                api.delete_item(cloud_id)
+                signal.emit(True, item_id, "")
             except Exception as e:
-                logger.warning(f"删除云端副本失败: {e}")
+                signal.emit(False, item_id, str(e))
 
-        future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_done(f)))
+        self._cloud_executor.submit(_do_delete)
+
+    def _handle_cloud_delete_done(self, success: bool, item_id: int, error: str):
+        """主线程槽：云端删除完成后清理本地 cloud_id 并刷新"""
+        if success:
+            self.repository.clear_cloud_id(item_id)
+            self._load_items()
+        else:
+            logger.warning(f"删除云端副本失败: {error}")
 
     def _on_item_star(self, item: ClipboardItem):
         self.repository.toggle_star(item.id)
@@ -483,29 +498,30 @@ class MainWindow(EdgeHiddenWindow):
 
         cloud_id = item.cloud_id
         api = self.cloud_api
+        signal = self._image_url_done
 
         def _fetch_url():
+            # worker 线程没有 Qt 事件循环，必须用信号切回主线程
             try:
-                return api.get_image_url(cloud_id)
+                url = api.get_image_url(cloud_id) or ""
             except Exception as e:
                 logger.warning(f"获取图片链接失败: {e}")
-                return None
+                url = ""
+            signal.emit(url)
 
-        future = self._cloud_executor.submit(_fetch_url)
+        self._cloud_executor.submit(_fetch_url)
 
-        def _on_done(f):
-            url = f.result()
-            if url:
-                from PySide6.QtWidgets import QApplication
-                QApplication.clipboard().setText(url)
-                self._show_copy_feedback(True)
-            else:
-                self.copy_feedback_label.setText("获取图片链接失败")
-                self.copy_feedback_label.setObjectName("copyFeedbackError")
-                self.copy_feedback_label.style().polish(self.copy_feedback_label)
-                self._feedback_timer.start(2000)
-
-        future.add_done_callback(lambda f: QTimer.singleShot(0, lambda: _on_done(f)))
+    def _handle_image_url_done(self, url: str):
+        """主线程槽：写入剪贴板并展示反馈"""
+        if url:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(url)
+            self._show_copy_feedback(True)
+        else:
+            self.copy_feedback_label.setText("获取图片链接失败")
+            self.copy_feedback_label.setObjectName("copyFeedbackError")
+            self.copy_feedback_label.style().polish(self.copy_feedback_label)
+            self._feedback_timer.start(2000)
 
     def _prepend_item(self, item: ClipboardItem):
         """在列表顶部插入单个新条目，避免全量重建"""
