@@ -524,7 +524,17 @@ class MainWindow(EdgeHiddenWindow):
             self._feedback_timer.start(2000)
 
     def _prepend_item(self, item: ClipboardItem):
-        """在列表顶部插入单个新条目，避免全量重建"""
+        """在列表顶部插入单个新条目，避免全量重建。
+
+        若同 id 条目已在列表中（重复复制触发置顶场景），先移除旧行再插入顶部。
+        """
+        if item.id is not None:
+            for idx, existing in enumerate(self._items):
+                if existing.id == item.id:
+                    self.list_widget.takeItem(idx)
+                    self._items.pop(idx)
+                    break
+
         list_item, widget = self._make_list_item(item)
 
         self.list_widget.insertItem(0, list_item)

@@ -145,9 +145,17 @@ class ClipboardMonitor(QObject):
 
         content_hash = compute_content_hash(text)
 
-        # 检查是否已存在
+        now_ms = int(time.time() * 1000)
+
+        # 检查是否已存在：重复内容刷新 created_at 并通知 UI 置顶
         existing = self.repository.get_by_hash(content_hash)
-        if existing:
+        if existing and existing.id:
+            try:
+                self.repository.touch_item(existing.id, now_ms)
+                existing.created_at = now_ms
+                self.item_added.emit(existing)
+            except Exception as e:
+                logger.warning(f"重复文本置顶失败: {e}")
             return
 
         item = TextClipboardItem(
@@ -155,7 +163,7 @@ class ClipboardMonitor(QObject):
             content_hash=content_hash,
             device_id=s.device_id,
             device_name=s.device_name,
-            created_at=int(time.time() * 1000),
+            created_at=now_ms,
         )
         item.preview = item.get_display_preview()
 
@@ -227,9 +235,17 @@ class ClipboardMonitor(QObject):
 
             content_hash = compute_content_hash(image_data)
 
-            # 检查是否已存在
+            now_ms = int(time.time() * 1000)
+
+            # 检查是否已存在：重复图片刷新 created_at 并通知 UI 置顶
             existing = self.repository.get_by_hash(content_hash)
-            if existing:
+            if existing and existing.id:
+                try:
+                    self.repository.touch_item(existing.id, now_ms)
+                    existing.created_at = now_ms
+                    QTimer.singleShot(0, lambda it=existing: self.item_added.emit(it))
+                except Exception as e:
+                    logger.warning(f"重复图片置顶失败: {e}")
                 return
 
             # 创建缩略图

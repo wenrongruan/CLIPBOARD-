@@ -382,6 +382,15 @@ class ClipboardRepository:
 
         return self.db.execute_with_retry(operation)
 
+    def touch_item(self, item_id: int, created_at: int) -> bool:
+        """更新条目的 created_at 让其置顶（用于重复复制时刷新时间）。"""
+        def operation(conn) -> bool:
+            sql = "UPDATE clipboard_items SET created_at = ? WHERE id = ?"
+            rowcount, _ = self._execute_write(conn, sql, (created_at, item_id))
+            return rowcount > 0
+
+        return self.db.execute_with_retry(operation)
+
     def set_cloud_id(self, item_id: int, cloud_id: int):
         """标记本地条目已同步到云端"""
         def operation(conn):
