@@ -1,69 +1,67 @@
-# 共享剪贴板 (SharedClipboard)
+# SharedClipboard
+跨平台剪贴板历史管理器，面向 Windows、macOS 和 Linux。
 
-跨设备剪贴板同步工具，支持 Windows 和 macOS。
+## 主要功能
+- 记录文本和图片剪贴板历史。
+- 支持搜索、收藏、固定到屏幕边缘。
+- 支持系统托盘运行和全局热键唤出主窗口。
+- 支持三种同步模式：`local`、`mysql`、`cloud`。
+- 内置插件系统，当前仓库包含 `smart_text` 和 `ai_image_gen`。
+- 设置页支持数据库、过滤、语言、热键、插件管理和云端同步入口。
 
-## 功能特性
+## 当前项目结构
+- `main.py`：应用入口，初始化托盘、剪贴板监听、同步服务和插件管理器。
+- `config.py`：配置中心，负责 `settings.json`、数据目录、密钥存储和同步模式。
+- `core/`：数据库、仓库、模型、同步、云端 API、插件系统。
+- `ui/`：主窗口、设置页、插件配置页和云端登录界面。
+- `plugins/`：内置插件和第三方插件目录。
+- `tests/`：当前自动化测试。
 
-- **剪贴板历史** - 自动保存复制的文本和图片
-- **跨设备同步** - 多台设备共享同一数据库，自动同步剪贴板内容
-- **模糊搜索** - 快速搜索历史记录
-- **收藏功能** - 重要内容可收藏，不会被自动清理
-- **边缘停靠** - 窗口隐藏在屏幕边缘，鼠标靠近自动滑出
-- **系统托盘** - 后台运行，不占用任务栏
-
-## 下载安装
-
-从 [Releases](https://github.com/wenrongruan/CLIPBOARD-/releases) 下载：
-
-| 平台 | 文件 |
-|------|------|
-| Windows | `SharedClipboard.exe` |
-| macOS | `共享剪贴板-macOS.dmg` |
-
-### macOS 安装说明
-
-1. 下载 `.dmg` 文件
-2. 双击打开，将应用拖到 Applications 文件夹
-3. 首次打开：右键点击应用 → 选择"打开"（绕过安全提示）
-
-## 使用方法
-
-1. 运行应用后，图标出现在系统托盘/菜单栏
-2. 鼠标移到屏幕右边缘，窗口自动滑出
-3. 点击任意记录即可复制到剪贴板
-4. 点击 ⚙ 可设置停靠位置和数据库路径
-
-## 多设备同步
-
-将数据库文件放在共享位置（如网盘同步文件夹）：
-
-1. 打开设置 ⚙
-2. 修改数据库路径到共享文件夹（如 `D:\Dropbox\clipboard.db`）
-3. 所有设备使用相同的数据库路径
-
-## 从源码运行
-
+## 快速开始
 ```bash
-# 安装依赖
 pip install -r requirements.txt
-
-# 运行
 python main.py
 ```
 
-## 技术栈
-
+## 依赖
 - Python 3.11+
-- PySide6 (Qt for Python)
-- SQLite (WAL 模式)
+- PySide6
 - Pillow
+- pynput
+- PyMySQL
+- httpx
+- keyring
 
-## 相关链接
+## 配置与数据位置
+应用会把运行数据放到系统配置目录下的 `SharedClipboard` 子目录中：
+- Windows: `%APPDATA%\SharedClipboard\`
+- macOS: `~/Library/Application Support/SharedClipboard/`
+- Linux: `~/.config/SharedClipboard/`
 
-- **官方网站**: [www.jlike.com](https://www.jlike.com)
-- **GitHub 仓库**: [github.com/wenrongruan/CLIPBOARD-](https://github.com/wenrongruan/CLIPBOARD-)
-- **软件下载**: [GitHub Releases](https://github.com/wenrongruan/CLIPBOARD-/releases)
+常见文件和目录包括：
+- `settings.json`：应用配置。
+- `clipboard.db`：默认 SQLite 数据库。
+- `plugins/`：用户安装插件。
+- `logs/`：插件和应用日志。
 
-## 许可证
+密钥和令牌优先保存在系统 `keyring` 中。若系统后端不可用，应用会降级并在启动时提示。
 
-MIT License
+## 插件系统
+设置页的「插件」标签可查看已安装插件、启用或禁用插件、打开用户插件目录、查看插件日志，并从云端插件商店安装插件。
+
+插件加载顺序由代码决定：
+- 内置插件目录：仓库根目录下的 `plugins/`
+- 用户插件目录：`<config_dir>/plugins/`
+- 冻结包运行时的可执行文件同级 `plugins/`
+
+## 测试
+```bash
+pytest -q
+```
+
+当前仓库测试结果：`61 passed`
+
+## 说明
+- 主窗口采用边缘停靠和托盘模式运行。
+- 复制历史既支持本地 SQLite，也支持 MySQL 和云端同步。
+- `REPLACE` 类插件操作会更新现有条目的内容，仓库层会清理被替换掉的另一种 payload，避免残留脏数据。
