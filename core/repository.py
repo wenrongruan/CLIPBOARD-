@@ -206,8 +206,9 @@ class ClipboardRepository:
             star_filter = " AND is_starred = 1" if starred_only else ""
 
             if self._has_fts and not self._is_mysql:
-                # 使用 FTS5 全文搜索（更快），包装为短语避免特殊字符注入
-                fts_query = '"' + query.replace('"', '""') + '"'
+                # FTS5 短语 + 尾部 * 前缀通配, 让 "w" 能匹配 Warning/Windows/w-server 等
+                # 否则短语查询要求 token 完全相等, 单字符/子串永远搜不到
+                fts_query = '"' + query.replace('"', '""') + '"*'
 
                 count_sql = f"""
                     SELECT COUNT(*) FROM clipboard_items
