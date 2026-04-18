@@ -622,8 +622,7 @@ class SettingsDialog(QDialog):
         thread = _StoreLoadThread(settings().cloud_api_url)
         thread.loaded.connect(self._on_store_loaded)
         thread.error.connect(self._on_store_error)
-        thread.loaded.connect(thread.deleteLater)
-        thread.error.connect(thread.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         self._store_thread = thread
         thread.start()
 
@@ -705,8 +704,7 @@ class SettingsDialog(QDialog):
         )
         thread.installed.connect(lambda pid: self._on_install_finished(pid, btn))
         thread.error.connect(lambda pid, err: self._on_install_error(pid, err, btn))
-        thread.installed.connect(thread.deleteLater)
-        thread.error.connect(thread.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         self._install_threads[plugin_id] = thread
         thread.start()
 
