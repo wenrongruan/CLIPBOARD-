@@ -31,8 +31,8 @@ class EdgeHiddenWindow(QWidget):
                 | Qt.Tool
                 | Qt.NoDropShadowWindowHint  # macOS 上避免阴影问题
             )
-            # macOS 上启用透明背景以获得更好的视觉效果
-            self.setAttribute(Qt.WA_TranslucentBackground, True)
+            # macOS 下关闭透明背景, 避免内容未绘制时桌面穿透
+            self.setAttribute(Qt.WA_TranslucentBackground, False)
         else:
             self.setWindowFlags(
                 Qt.FramelessWindowHint

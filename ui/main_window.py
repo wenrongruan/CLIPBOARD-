@@ -26,6 +26,7 @@ from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
 from core.plugin_api import PluginResult, PluginResultAction
 from config import (
+    IS_MACOS,
     PAGE_SIZE,
     settings,
     update_settings,
@@ -148,11 +149,16 @@ class MainWindow(EdgeHiddenWindow):
         self.minimize_btn.setFixedSize(28, 28)
         self.minimize_btn.clicked.connect(self._minimize_window)
         header_layout.addWidget(self.minimize_btn)
+        if IS_MACOS:
+            self.minimize_btn.setVisible(False)
 
         self.quit_btn = QPushButton("✕")
-        self.quit_btn.setToolTip(t("quit_app"))
+        self.quit_btn.setToolTip(t("minimize") if IS_MACOS else t("quit_app"))
         self.quit_btn.setFixedSize(28, 28)
-        self.quit_btn.clicked.connect(self._request_quit)
+        if IS_MACOS:
+            self.quit_btn.clicked.connect(self.hide_window)
+        else:
+            self.quit_btn.clicked.connect(self._request_quit)
         header_layout.addWidget(self.quit_btn)
 
         layout.addLayout(header_layout)
@@ -177,6 +183,7 @@ class MainWindow(EdgeHiddenWindow):
         pagination_layout.setSpacing(8)
 
         self.prev_btn = QPushButton(t("prev_page"))
+        self.prev_btn.setObjectName("pageBtn")
         self.prev_btn.clicked.connect(self._prev_page)
         pagination_layout.addWidget(self.prev_btn)
 
@@ -186,6 +193,7 @@ class MainWindow(EdgeHiddenWindow):
         pagination_layout.addWidget(self.page_label, 1)
 
         self.next_btn = QPushButton(t("next_page"))
+        self.next_btn.setObjectName("pageBtn")
         self.next_btn.clicked.connect(self._next_page)
         pagination_layout.addWidget(self.next_btn)
 
@@ -941,3 +949,11 @@ class MainWindow(EdgeHiddenWindow):
     def _request_quit(self):
         """请求退出应用"""
         self.quit_requested.emit()
+
+    def closeEvent(self, event):
+        """macOS 下拦截系统关闭事件, 仅隐藏窗口, 菜单栏"退出"才真正退出进程。"""
+        if IS_MACOS:
+            event.ignore()
+            self.hide_window()
+            return
+        super().closeEvent(event)

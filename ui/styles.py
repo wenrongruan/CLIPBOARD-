@@ -11,11 +11,32 @@ else:
     _SCROLLBAR_WIDTH = "8px"
 
 MAIN_STYLE = """
+* { outline: 0; }
+
 QWidget {
     background-color: #2b2b2b;
     color: #ffffff;
     font-family: """ + _FONT_FAMILY + """;
     font-size: """ + _FONT_SIZE + """;
+}
+
+QPushButton#pageBtn {
+    background-color: #3c3c3c;
+    border: 1px solid #555555;
+    border-radius: 6px;
+    padding: 6px 14px;
+    color: #e0e0e0;
+}
+
+QPushButton#pageBtn:hover {
+    background-color: #4a4a4a;
+    border-color: #666666;
+}
+
+QPushButton#pageBtn:disabled {
+    background-color: #2b2b2b;
+    color: #555555;
+    border-color: #3a3a3a;
 }
 
 QLineEdit {

@@ -24,8 +24,8 @@ OPTIONS = {
         'CFBundleName': '共享剪贴板',
         'CFBundleDisplayName': '共享剪贴板',
         'CFBundleIdentifier': 'com.sharedclipboard.app',
-        'CFBundleVersion': '3.2.4',
-        'CFBundleShortVersionString': '3.2.4',
+        'CFBundleVersion': '3.2.5',
+        'CFBundleShortVersionString': '3.2.5',
         'LSUIElement': True,  # 作为菜单栏应用运行，不显示在 Dock
         'NSHighResolutionCapable': True,  # 支持 Retina 显示
         'NSRequiresAquaSystemAppearance': False,  # 支持深色模式
