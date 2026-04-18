@@ -32,6 +32,16 @@ from .styles import MAIN_STYLE
 logger = logging.getLogger(__name__)
 
 
+_ACTIVE_THREADS: set = set()
+
+
+def _track_thread(thread: QThread) -> None:
+    """保持 QThread 的 Python 强引用直到 finished, 避免 dialog 先销毁
+    导致 QThread 在 isRunning() 状态被 Python GC 析构触发 qFatal → abort。"""
+    _ACTIVE_THREADS.add(thread)
+    thread.finished.connect(lambda: _ACTIVE_THREADS.discard(thread))
+
+
 class _StoreLoadThread(QThread):
     """后台加载插件商店列表"""
     loaded = Signal(list)
@@ -623,6 +633,7 @@ class SettingsDialog(QDialog):
         thread.loaded.connect(self._on_store_loaded)
         thread.error.connect(self._on_store_error)
         thread.finished.connect(thread.deleteLater)
+        _track_thread(thread)
         self._store_thread = thread
         thread.start()
 
@@ -705,6 +716,7 @@ class SettingsDialog(QDialog):
         thread.installed.connect(lambda pid: self._on_install_finished(pid, btn))
         thread.error.connect(lambda pid, err: self._on_install_error(pid, err, btn))
         thread.finished.connect(thread.deleteLater)
+        _track_thread(thread)
         self._install_threads[plugin_id] = thread
         thread.start()
 
