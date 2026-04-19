@@ -49,10 +49,21 @@ class SubscriptionWidget(QWidget):
         layout.setSpacing(16)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # QGroupBox 内的 QLabel 和 QFormLayout 行标签在某些深色主题下默认色不可见，
+        # 这里统一给 groupbox 后代样式，保证所有行标签/小提示在深色背景下看得清
+        _group_style = (
+            "QGroupBox{color:#e8e8e8;font-weight:600;border:1px solid #3c3c3c;"
+            "border-radius:6px;margin-top:10px;padding:8px 10px 10px 10px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}"
+            "QGroupBox QLabel{color:#cbd5e1;background:transparent;}"
+        )
+
         # ===== 账户信息组 =====
         account_group = QGroupBox("账户信息")
+        account_group.setStyleSheet(_group_style)
         account_layout = QFormLayout(account_group)
         account_layout.setSpacing(10)
+        account_layout.setLabelAlignment(Qt.AlignLeft)
 
         from config import settings
         email = settings().cloud_user_email
@@ -73,6 +84,7 @@ class SubscriptionWidget(QWidget):
 
         # ===== 用量信息组 =====
         usage_group = QGroupBox("用量")
+        usage_group.setStyleSheet(_group_style)
         usage_layout = QVBoxLayout(usage_group)
         usage_layout.setSpacing(10)
 
@@ -194,7 +206,10 @@ class SubscriptionWidget(QWidget):
             self._reset_to_logged_out()
             return
 
-        self.plan_label.setText("加载中...")
+        # 先用本地 EntitlementService 兜底展示，避免 HTTP 未返回前出现"空白套餐"
+        self._fill_from_local_entitlement()
+
+        self.plan_label.setText(self.plan_label.text() + "（刷新中...）")
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1)
 
@@ -202,6 +217,35 @@ class SubscriptionWidget(QWidget):
         future.add_done_callback(
             lambda f: self._subscription_loaded.emit(f)
         )
+
+    def _fill_from_local_entitlement(self):
+        """在云端响应到达前，先展示本地缓存的套餐/配额，避免空白。"""
+        try:
+            from core.entitlement_service import get_entitlement_service, Plan
+            ent = get_entitlement_service().current()
+            plan_name_map = {Plan.FREE: "免费版", Plan.PRO: "专业版 (Pro)", Plan.PREMIUM: "高级版 (Premium)"}
+            self.plan_label.setText(plan_name_map.get(ent.plan, str(ent.plan.value)))
+            status_map = {"active": "有效", "expired": "已过期", "cancelled": "已取消",
+                           "trial": "试用中", "inactive": "未激活"}
+            self.status_label.setText(status_map.get(ent.status, ent.status or "--"))
+            if ent.files_quota_bytes > 0:
+                self.files_count_label.setText(
+                    f"已用 {self._fmt_bytes(ent.files_used_bytes)} / {self._fmt_bytes(ent.files_quota_bytes)}"
+                )
+                pct = min(100, int(ent.files_used_bytes * 100 / max(1, ent.files_quota_bytes)))
+                self.files_usage_progress.setValue(pct)
+            else:
+                self.files_count_label.setText("仅 Pro / Premium 可用")
+        except Exception as e:
+            logger.debug(f"本地 entitlement 预填失败: {e}")
+
+    @staticmethod
+    def _fmt_bytes(n: int) -> str:
+        if n <= 0:
+            return "0"
+        if n >= (1 << 30):
+            return f"{n / (1 << 30):.2f} GB"
+        return f"{n / (1 << 20):.1f} MB"
 
     def _fetch_subscription(self) -> dict:
         """在后台线程中获取订阅信息"""
@@ -296,13 +340,15 @@ class SubscriptionWidget(QWidget):
                 self.files_usage_progress.setValue(0)
 
         except CloudAPIError as e:
-            self.plan_label.setText("云端加载失败")
-            self.status_label.setText(f"云端: {e}")
+            # 云端刷新失败但已有本地 entitlement 展示，只提示状态行
             logger.warning(f"加载订阅信息失败: {e}")
+            self.status_label.setText(f"云端刷新失败: {e}")
+            # 把"(刷新中...)"后缀去掉
+            self.plan_label.setText(self.plan_label.text().replace("（刷新中...）", ""))
         except Exception as e:
-            self.plan_label.setText("云端加载失败")
-            self.status_label.setText(f"云端异常: {e}")
             logger.error(f"加载订阅信息异常: {e}")
+            self.status_label.setText(f"云端异常: {e}")
+            self.plan_label.setText(self.plan_label.text().replace("（刷新中...）", ""))
 
     def _open_pricing(self):
         """打开套餐页面"""

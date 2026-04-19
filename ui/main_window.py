@@ -258,15 +258,56 @@ class MainWindow(EdgeHiddenWindow):
                 logger.warning(f"初始化文件页失败: {e}", exc_info=True)
 
         if self.file_list_widget is None:
-            # 无登录 / 依赖缺失时占位：展示一个引导
+            # 无登录 / 依赖缺失时占位：展示升级引导 + 文件同步与剪贴板同步的差异说明
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
             placeholder = QWidget()
             pl = QVBoxLayout(placeholder)
-            pl.setContentsMargins(20, 20, 20, 20)
+            pl.setContentsMargins(24, 24, 24, 24)
+            pl.setSpacing(14)
+            pl.addStretch()
+
+            title = QLabel("文件云同步（付费功能）")
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet("color:#e8e8e8;font-size:15px;font-weight:600;")
+            pl.addWidget(title)
+
             tip = QLabel("登录云端账户并升级到 Pro/Premium 后，在此管理常用文件。")
             tip.setWordWrap(True)
             tip.setAlignment(Qt.AlignCenter)
             tip.setStyleSheet("color:#aaa;")
             pl.addWidget(tip)
+
+            diff = QLabel(
+                "📋 <b>剪贴板同步</b>（免费版已包含）：自动备份文字和图片记录，"
+                "图片会压缩为 JPG、长边 ≤ 2K 节省流量。<br><br>"
+                "📁 <b>文件云同步</b>（本功能）：保存原始文件（文档、压缩包、音视频、"
+                "工程文件等），最大单文件 1 GB、保留原始字节和扩展名，跨设备按需下载。"
+            )
+            diff.setWordWrap(True)
+            diff.setTextFormat(Qt.RichText)
+            diff.setAlignment(Qt.AlignLeft)
+            diff.setStyleSheet(
+                "color:#cbd5e1;background:#2a2a2a;border:1px solid #3c3c3c;"
+                "border-radius:6px;padding:10px 14px;"
+            )
+            pl.addWidget(diff)
+
+            upgrade_btn = QPushButton("升级套餐")
+            upgrade_btn.setObjectName("okButton")
+            upgrade_btn.setMinimumHeight(34)
+            upgrade_btn.setCursor(Qt.PointingHandCursor)
+            upgrade_btn.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+            )
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            btn_row.addWidget(upgrade_btn)
+            btn_row.addStretch()
+            pl.addLayout(btn_row)
+
+            pl.addStretch()
             self._stack.addWidget(placeholder)
 
         # 搜索防抖定时器

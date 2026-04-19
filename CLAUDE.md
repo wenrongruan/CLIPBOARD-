@@ -19,6 +19,7 @@
 - 插件配置文件位于 `<config_dir>/plugins/<plugin_id>/config.json`。
 - `settings.json`、`clipboard.db` 和 `logs/` 都在系统配置目录下的 `SharedClipboard/` 子目录中。
 - 文件云同步（付费功能）由 `core/file_sync_service.py` + `core/file_repository.py` + `core/file_storage.py` 实现，付费闸在 `core/entitlement_service.py`。
+- 官网与后端 API 源码在 `website/` 子目录（部署到 `www.jlike.com`）。`website/CLAUDE.md` 有详细说明；客户端里的 `pricing.html` / `account.html` / `privacy.html` 外链都指向同一仓库的前端。
 
 ## 文档维护优先级
 

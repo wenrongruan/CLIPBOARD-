@@ -1,9 +1,12 @@
 import atexit
 import sys
 import os
+import time
 import logging
 import platform
 import threading
+
+_STARTUP_T0 = time.time()
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,12 +39,27 @@ try:
 except ImportError:
     HOTKEY_AVAILABLE = False
 
-# 配置日志 (只显示警告和错误)
+# 日志配置：默认 WARNING，设置 SC_DEBUG=1 可切到 DEBUG 并同时落盘到 logs/debug.log
+_SC_DEBUG = os.environ.get("SC_DEBUG", "").strip() not in ("", "0", "false", "False")
+_log_level = logging.DEBUG if _SC_DEBUG else logging.WARNING
+_log_handlers = [logging.StreamHandler()]
+if _SC_DEBUG:
+    try:
+        _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(_log_dir, exist_ok=True)
+        _log_handlers.append(logging.FileHandler(os.path.join(_log_dir, "debug.log"), encoding="utf-8"))
+    except Exception:
+        pass
 logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=_log_level,
+    format="%(asctime)s.%(msecs)03d - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=_log_handlers,
+    force=True,
 )
 logger = logging.getLogger(__name__)
+if _SC_DEBUG:
+    logger.warning(f"[startup] SC_DEBUG 已启用，DEBUG 日志将写入 logs/debug.log  t=+{time.time()-_STARTUP_T0:.2f}s")
 
 
 def get_app_icon() -> QIcon:
@@ -170,9 +188,12 @@ class ClipboardApp:
 
     def _init_components(self):
         """初始化核心组件"""
+        logger.debug(f"[startup] _init_components 开始 t=+{time.time()-_STARTUP_T0:.2f}s")
+        _t = time.time()
         # 使用数据库工厂创建合适的数据库管理器
         self.db_manager = create_database_manager()
         self.repository = ClipboardRepository(self.db_manager)
+        logger.debug(f"[startup] db_manager+repository 用时 {time.time()-_t:.3f}s")
 
     def _create_tray_icon(self):
         """创建系统托盘图标"""
@@ -200,6 +221,7 @@ class ClipboardApp:
 
     def _create_main_window(self):
         """创建主窗口"""
+        logger.debug(f"[startup] _create_main_window 开始 t=+{time.time()-_STARTUP_T0:.2f}s")
         self.clipboard_monitor = ClipboardMonitor(self.repository)
 
         # 本地/MySQL 同步服务（始终启动）
@@ -212,7 +234,10 @@ class ClipboardApp:
         self.file_repository = None
         self.entitlement_service = None
         self._cloud_sync_error = None
-        if get_cloud_access_token():
+        _t = time.time()
+        _has_token = get_cloud_access_token()
+        logger.debug(f"[startup] get_cloud_access_token 用时 {time.time()-_t:.3f}s, has_token={bool(_has_token)}")
+        if _has_token:
             try:
                 from core.cloud_sync_service import CloudSyncService
                 from core.cloud_api import get_cloud_client
@@ -266,9 +291,12 @@ class ClipboardApp:
                     logger.warning(f"托盘通知发送失败: {notify_err}")
 
         # 初始化插件管理器
+        _t = time.time()
         self.plugin_manager = PluginManager()
         self.plugin_manager.load_plugins()
+        logger.debug(f"[startup] PluginManager.load_plugins 用时 {time.time()-_t:.3f}s")
 
+        _t = time.time()
         self.main_window = MainWindow(
             self.repository,
             self.clipboard_monitor,
@@ -280,6 +308,7 @@ class ClipboardApp:
             file_repository=self.file_repository,
             entitlement_service=self.entitlement_service,
         )
+        logger.debug(f"[startup] MainWindow(__init__) 用时 {time.time()-_t:.3f}s, 累计 t=+{time.time()-_STARTUP_T0:.2f}s")
 
         # 连接退出信号
         self.main_window.quit_requested.connect(self._quit)
@@ -503,6 +532,7 @@ class ClipboardApp:
 
     def run(self) -> int:
         """运行应用"""
+        logger.debug(f"[startup] 进入 app.exec() 事件循环 t=+{time.time()-_STARTUP_T0:.2f}s")
         return self.app.exec()
 
 
