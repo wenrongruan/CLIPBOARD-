@@ -185,13 +185,40 @@ if [ "$TEAM_ID" = "YOUR_TEAM_ID" ]; then
     warn "TEAM_ID 未设置，使用 ad-hoc 签名（仅用于本地测试，无法上传 App Store）"
     codesign --force --deep --sign - "$APP_BUNDLE"
 else
-    # 对所有 .so 和 .dylib 单独签名（子库不能带 entitlements，仅主可执行带）
-    find "$APP_BUNDLE" \( -name "*.so" -o -name "*.dylib" \) | while read lib; do
-        codesign --force --sign "$APP_SIGN_CERT" \
-            --options runtime "$lib" 2>/dev/null || true
+    # Inside-out 签名：Apple 要求所有嵌套 bundle/二进制分别签名，
+    # 只签 .so/.dylib 不够（Qt frameworks 和 Python.framework 会让 Transporter
+    # 报 90238 "code failed to satisfy specified code requirement(s)"）。
+
+    # (1) 所有 .so / .dylib
+    find "$APP_BUNDLE" -type f \( -name "*.so" -o -name "*.dylib" \) | while read lib; do
+        codesign --force --sign "$APP_SIGN_CERT" --options runtime "$lib" 2>/dev/null || true
     done
 
-    # 签名主 App Bundle（子库已单独签过，这里不用 --deep）
+    # (2) framework 内部的主可执行（QtCore.framework/Versions/A/QtCore,
+    #     Python.framework/Versions/3.11/Python 等）
+    find "$APP_BUNDLE" -type d -name "*.framework" | while read fw; do
+        fw_name=$(basename "$fw" .framework)
+        for ver in "$fw"/Versions/*/; do
+            [ -d "$ver" ] || continue
+            [ -L "${ver%/}" ] && continue  # 跳过 Current 符号链接
+            exe="${ver}${fw_name}"
+            [ -f "$exe" ] && codesign --force --sign "$APP_SIGN_CERT" \
+                --options runtime "$exe" 2>/dev/null || true
+        done
+    done
+
+    # (3) framework 内嵌的 .app（如 Python.app）
+    find "$APP_BUNDLE/Contents/Frameworks" -type d -name "*.app" 2>/dev/null | sort -r | while read inner_app; do
+        codesign --force --sign "$APP_SIGN_CERT" --options runtime "$inner_app"
+    done
+
+    # (4) framework bundle 本身（按路径深度从深到浅签）
+    find "$APP_BUNDLE/Contents/Frameworks" -type d -name "*.framework" 2>/dev/null \
+        | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- | while read fw; do
+        codesign --force --sign "$APP_SIGN_CERT" --options runtime "$fw"
+    done
+
+    # (5) 主 App Bundle（带 Entitlements，会覆盖主可执行的签名）
     codesign --force \
         --sign "$APP_SIGN_CERT" \
         --entitlements "$ENTITLEMENTS" \
