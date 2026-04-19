@@ -128,6 +128,15 @@ rm -rf dist build
 ICON_ARG=""
 [ -f "icons/AppIcon.icns" ] && ICON_ARG="--icon=icons/AppIcon.icns"
 
+# App Store 版本只保留内置插件 smart_text。ai_image_gen 会启动外部 Python
+# 解释器（App Sandbox 禁止）并依赖仓库外的 chat_image_gen 工具，打进来是死代码。
+APPSTORE_PLUGINS_DIR="$SCRIPT_DIR/.plugins_appstore"
+rm -rf "$APPSTORE_PLUGINS_DIR"
+mkdir -p "$APPSTORE_PLUGINS_DIR"
+if [ -d "plugins/smart_text" ]; then
+    cp -R "plugins/smart_text" "$APPSTORE_PLUGINS_DIR/"
+fi
+
 pyinstaller \
     --name "${APP_NAME}" \
     --windowed \
@@ -138,7 +147,7 @@ pyinstaller \
     --add-data "core:core" \
     --add-data "ui:ui" \
     --add-data "utils:utils" \
-    --add-data "plugins:plugins" \
+    --add-data "${APPSTORE_PLUGINS_DIR}:plugins" \
     --add-data "i18n.py:." \
     --hidden-import "PySide6.QtCore" \
     --hidden-import "PySide6.QtGui" \
@@ -147,6 +156,9 @@ pyinstaller \
     --hidden-import "pymysql" \
     --osx-bundle-identifier "$BUNDLE_ID" \
     main.py
+
+# 清理构建临时目录
+rm -rf "$APPSTORE_PLUGINS_DIR"
 
 [ -d "$APP_BUNDLE" ] || fail "打包失败，未找到 ${APP_BUNDLE}"
 echo "打包成功: ${APP_BUNDLE}"
@@ -161,6 +173,15 @@ INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 12.0" "$INFO_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 12.0" "$INFO_PLIST"
 echo "Info.plist 已更新: 版本 ${VER} (Build ${BUILD_NUM})"
+
+# 在 Info.plist 注入自定义键 SCBuildFlavor=appstore，标识 App Store 构建。
+# Why: PyInstaller macOS 把 Contents/Resources 与 Contents/Frameworks 做了
+# 符号链接/联动，写独立标志文件会在两处都出现，触发 codesign "code object
+# is not signed at all" 报错。Info.plist 是标准 bundle 元数据，codesign 认可。
+# 运行时 config.py 通过 Foundation/plistlib 读取此键。
+/usr/libexec/PlistBuddy -c "Add :SCBuildFlavor string appstore" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Set :SCBuildFlavor appstore" "$INFO_PLIST"
+echo "已写入 App Store 构建标志 (Info.plist SCBuildFlavor=appstore)"
 
 # 嵌入 Provisioning Profile（用数组展开 glob，避免引号内 glob 不展开）
 profiles=(*.provisionprofile)

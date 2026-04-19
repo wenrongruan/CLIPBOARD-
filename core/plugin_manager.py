@@ -24,6 +24,7 @@ from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 
 from config import (
     APP_VERSION,
+    IS_APPSTORE_BUILD,
     get_config_dir,
     get_user_plugins_dir,
     is_plugin_enabled,
@@ -544,6 +545,10 @@ class PluginManager(QObject):
             app_root = Path(__file__).parent.parent
         builtin_dir = app_root / "plugins"
         dirs.append(builtin_dir)
+        # App Store / 沙盒构建禁止加载任何外部插件（App Review 2.5.2）。
+        # 只信任打包进 .app 的内置插件。
+        if IS_APPSTORE_BUILD:
+            return dirs
         # 用户安装插件
         user_dir = get_user_plugins_dir()
         if user_dir != builtin_dir:

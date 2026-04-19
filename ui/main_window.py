@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QFileDialog,
     QProgressDialog,
+    QStackedWidget,
+    QButtonGroup,
 )
 
 from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
@@ -30,6 +32,7 @@ from config import (
     PAGE_SIZE,
     settings,
     update_settings,
+    flush_settings,
     get_cloud_access_token,
     get_effective_hotkey,
     get_effective_database_path,
@@ -78,6 +81,9 @@ class MainWindow(EdgeHiddenWindow):
         plugin_manager=None,
         cloud_api=None,
         cloud_sync_service=None,
+        file_sync_service=None,
+        file_repository=None,
+        entitlement_service=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -87,6 +93,9 @@ class MainWindow(EdgeHiddenWindow):
         self.plugin_manager = plugin_manager
         self.cloud_api = cloud_api
         self.cloud_sync_service = cloud_sync_service
+        self.file_sync_service = file_sync_service
+        self.file_repository = file_repository
+        self.entitlement_service = entitlement_service
 
         # 如果没有传入 cloud_api，但有已保存的 token，则创建客户端
         if not self.cloud_api:
@@ -132,7 +141,10 @@ class MainWindow(EdgeHiddenWindow):
         self.star_filter_btn.clicked.connect(self._toggle_starred_filter)
         header_layout.addWidget(self.star_filter_btn)
 
-        self.pin_btn = QPushButton("📌")
+        # Why: 📌/📍 在 macOS 下会被渲染成彩色 emoji, 视觉尺寸明显大于
+        # ☆/⚙/✕ 等几何符号, 让整排按钮大小不统一。换成 ⇩/⇧
+        # (下/上箭头) 保持单色线条风格与其它符号一致。
+        self.pin_btn = QPushButton("⇩")
         self.pin_btn.setToolTip(t("pin_window"))
         self.pin_btn.setFixedSize(28, 28)
         self.pin_btn.clicked.connect(self._toggle_pin)
@@ -163,20 +175,49 @@ class MainWindow(EdgeHiddenWindow):
 
         layout.addLayout(header_layout)
 
-        # 中间：列表
+        # Tab 切换：历史 / 我的文件
+        tab_row = QHBoxLayout()
+        tab_row.setSpacing(4)
+        self.history_tab_btn = QPushButton("历史")
+        self.history_tab_btn.setObjectName("tabBtn")
+        self.history_tab_btn.setCheckable(True)
+        self.history_tab_btn.setChecked(True)
+        self.files_tab_btn = QPushButton("我的文件")
+        self.files_tab_btn.setObjectName("tabBtn")
+        self.files_tab_btn.setCheckable(True)
+        self._tab_group = QButtonGroup(self)
+        self._tab_group.setExclusive(True)
+        self._tab_group.addButton(self.history_tab_btn, 0)
+        self._tab_group.addButton(self.files_tab_btn, 1)
+        self._tab_group.idClicked.connect(self._on_tab_changed)
+        tab_row.addWidget(self.history_tab_btn)
+        tab_row.addWidget(self.files_tab_btn)
+        tab_row.addStretch()
+        layout.addLayout(tab_row)
+
+        # 堆叠容器：页 0 = 剪贴板列表，页 1 = 文件管理
+        self._stack = QStackedWidget()
+        layout.addWidget(self._stack, 1)
+
+        # --- 剪贴板页 ---
+        clipboard_page = QWidget()
+        clip_layout = QVBoxLayout(clipboard_page)
+        clip_layout.setContentsMargins(0, 0, 0, 0)
+        clip_layout.setSpacing(6)
+
         self.list_widget = QListWidget()
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.setSpacing(1)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
-        layout.addWidget(self.list_widget, 1)
+        clip_layout.addWidget(self.list_widget, 1)
 
         # 复制反馈标签
         self.copy_feedback_label = QLabel()
         self.copy_feedback_label.setAlignment(Qt.AlignCenter)
         self.copy_feedback_label.hide()
-        layout.addWidget(self.copy_feedback_label)
+        clip_layout.addWidget(self.copy_feedback_label)
 
         # 底部：分页
         pagination_layout = QHBoxLayout()
@@ -197,7 +238,36 @@ class MainWindow(EdgeHiddenWindow):
         self.next_btn.clicked.connect(self._next_page)
         pagination_layout.addWidget(self.next_btn)
 
-        layout.addLayout(pagination_layout)
+        clip_layout.addLayout(pagination_layout)
+
+        self._stack.addWidget(clipboard_page)
+
+        # --- 文件页 ---
+        self.file_list_widget = None
+        if self.file_sync_service and self.file_repository and self.entitlement_service:
+            try:
+                from .file_list_widget import FileListWidget
+                self.file_list_widget = FileListWidget(
+                    self.file_repository,
+                    self.file_sync_service,
+                    self.entitlement_service,
+                    self.cloud_api,
+                )
+                self._stack.addWidget(self.file_list_widget)
+            except Exception as e:
+                logger.warning(f"初始化文件页失败: {e}", exc_info=True)
+
+        if self.file_list_widget is None:
+            # 无登录 / 依赖缺失时占位：展示一个引导
+            placeholder = QWidget()
+            pl = QVBoxLayout(placeholder)
+            pl.setContentsMargins(20, 20, 20, 20)
+            tip = QLabel("登录云端账户并升级到 Pro/Premium 后，在此管理常用文件。")
+            tip.setWordWrap(True)
+            tip.setAlignment(Qt.AlignCenter)
+            tip.setStyleSheet("color:#aaa;")
+            pl.addWidget(tip)
+            self._stack.addWidget(placeholder)
 
         # 搜索防抖定时器
         self._search_timer = QTimer(self)
@@ -232,6 +302,14 @@ class MainWindow(EdgeHiddenWindow):
             self.plugin_manager.action_progress.connect(self._on_plugin_progress)
             self.plugin_manager.action_finished.connect(self._on_plugin_finished)
             self.plugin_manager.action_error.connect(self._on_plugin_error)
+
+    def _on_tab_changed(self, index: int):
+        self._stack.setCurrentIndex(index)
+        # 切到文件页时刷新付费/配额状态
+        if index == 1 and self.file_list_widget is not None:
+            self.file_list_widget.reload()
+            if self.entitlement_service:
+                self.entitlement_service.refresh_async()
 
     def _toggle_starred_filter(self):
         self._starred_only = not self._starred_only
@@ -571,7 +649,7 @@ class MainWindow(EdgeHiddenWindow):
         # 取消固定时若处于悬浮模式，吸附回最近边缘
         if not is_pinned and self._is_floating:
             self._snap_to_nearest_edge()
-        self.pin_btn.setText("📍" if is_pinned else "📌")
+        self.pin_btn.setText("⇧" if is_pinned else "⇩")
         self.pin_btn.setToolTip(t("unpin_window") if is_pinned else t("pin_window"))
 
     def _minimize_window(self):
@@ -668,6 +746,10 @@ class MainWindow(EdgeHiddenWindow):
                     self._do_migration()
 
                 need_restart = True
+
+            # Why: update_settings 默认延迟 2s 落盘，若用户立即关闭/被 kill
+            # 会丢失本次改动（密码走 keyring 不受影响，表现为其它字段被吞）。
+            flush_settings()
 
             if need_restart:
                 QMessageBox.information(

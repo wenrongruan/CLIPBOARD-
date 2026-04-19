@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager(AbstractDatabaseManager):
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -39,6 +39,39 @@ class DatabaseManager(AbstractDatabaseManager):
     CREATE TABLE IF NOT EXISTS app_meta (
         key TEXT PRIMARY KEY,
         value TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS cloud_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cloud_id INTEGER UNIQUE,
+        name TEXT NOT NULL,
+        original_path TEXT,
+        local_path TEXT,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        mime_type TEXT,
+        content_sha256 TEXT NOT NULL,
+        mtime INTEGER NOT NULL,
+        device_id TEXT NOT NULL,
+        device_name TEXT,
+        created_at INTEGER NOT NULL,
+        is_deleted INTEGER NOT NULL DEFAULT 0,
+        sync_state TEXT NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        bookmark BLOB
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_files_sync_state ON cloud_files(sync_state);
+    CREATE INDEX IF NOT EXISTS idx_files_cloud_id ON cloud_files(cloud_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_files_sha_not_deleted
+        ON cloud_files(content_sha256) WHERE is_deleted = 0;
+
+    CREATE TABLE IF NOT EXISTS cloud_file_upload_parts (
+        file_id INTEGER NOT NULL,
+        part_number INTEGER NOT NULL,
+        etag TEXT,
+        uploaded_at INTEGER,
+        PRIMARY KEY (file_id, part_number),
+        FOREIGN KEY (file_id) REFERENCES cloud_files(id) ON DELETE CASCADE
     );
     """
 
@@ -139,21 +172,84 @@ class DatabaseManager(AbstractDatabaseManager):
             conn.commit()
             logger.info("数据库 Schema 已迁移到 v2（新增 cloud_id）")
 
+        if current_version < 4:
+            # CREATE_TABLE_SQL 在 _init_database 已用 IF NOT EXISTS 建表，此处
+            # 兜底一次是为了 MySQL 兼容层的迁移路径能复用同一份 DDL。
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS cloud_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cloud_id INTEGER UNIQUE,
+                    name TEXT NOT NULL,
+                    original_path TEXT,
+                    local_path TEXT,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    mime_type TEXT,
+                    content_sha256 TEXT NOT NULL,
+                    mtime INTEGER NOT NULL,
+                    device_id TEXT NOT NULL,
+                    device_name TEXT,
+                    created_at INTEGER NOT NULL,
+                    is_deleted INTEGER NOT NULL DEFAULT 0,
+                    sync_state TEXT NOT NULL DEFAULT 'pending',
+                    last_error TEXT,
+                    bookmark BLOB
+                );
+                CREATE INDEX IF NOT EXISTS idx_files_sync_state ON cloud_files(sync_state);
+                CREATE INDEX IF NOT EXISTS idx_files_cloud_id ON cloud_files(cloud_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_files_sha_not_deleted
+                    ON cloud_files(content_sha256) WHERE is_deleted = 0;
+                CREATE TABLE IF NOT EXISTS cloud_file_upload_parts (
+                    file_id INTEGER NOT NULL,
+                    part_number INTEGER NOT NULL,
+                    etag TEXT,
+                    uploaded_at INTEGER,
+                    PRIMARY KEY (file_id, part_number),
+                    FOREIGN KEY (file_id) REFERENCES cloud_files(id) ON DELETE CASCADE
+                );
+                """
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('schema_version', '4')"
+            )
+            conn.commit()
+            logger.info("数据库 Schema 已迁移到 v4")
+
     def _create_connection(self) -> sqlite3.Connection:
         """创建新连接并配置 PRAGMA"""
+        # Why: UI 线程的 busy_timeout 必须短。C 层 sqlite3_step 拿不到写锁时会
+        # 原地阻塞整整 busy_timeout 毫秒，期间整个事件循环冻结；Python 层的
+        # execute_with_retry 只能在返回 BUSY 之后才接管。后台同步/写入线程可以
+        # 保留长超时，用 30s 吃掉偶发拥塞。
+        is_ui = self._is_ui_thread()
+        busy_ms = 500 if is_ui else 10000
+        py_timeout = max(busy_ms / 1000.0, 5.0)
+
         conn = sqlite3.connect(
             self.db_path,
-            timeout=30.0,
+            timeout=py_timeout,
             isolation_level="DEFERRED",
             check_same_thread=False,
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(f"PRAGMA busy_timeout={busy_ms}")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA cache_size=-64000")  # 64MB缓存
         conn.execute("PRAGMA temp_store=MEMORY")
         return conn
+
+    @staticmethod
+    def _is_ui_thread() -> bool:
+        """当前是否为 Qt 主线程。无 Qt 环境（如单测）返回 False。"""
+        try:
+            from PySide6.QtCore import QCoreApplication, QThread
+            app = QCoreApplication.instance()
+            if app is None:
+                return False
+            return QThread.currentThread() is app.thread()
+        except Exception:
+            return False
 
     def _get_thread_conn(self) -> sqlite3.Connection:
         """返回当前线程的 connection；首次访问时创建。

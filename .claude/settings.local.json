@@ -27,7 +27,32 @@
       "Bash(cd \"E:/python/共享剪贴板/CLIPBOARD-\" && pyinstaller SharedClipboard.spec --clean 2>&1)",
       "Bash(cd \"E:/python/共享剪贴板/CLIPBOARD-\" && pyinstaller SharedClipboard.spec --clean -y)",
       "Bash(pyinstaller SharedClipboard.spec --clean)",
-      "Bash(cmd //c \"taskkill /IM SharedClipboard.exe /F\")"
+      "Bash(cmd //c \"taskkill /IM SharedClipboard.exe /F\")",
+      "Bash(/Users/mango/Documents/app开发/CLIPBOARD-/.venv_appstore/bin/python -c \"import PySide6, PIL, pynput, pymysql, httpx, keyring; print\\('all deps ok'\\)\")",
+      "Bash(.venv_appstore/bin/pip install *)",
+      "Bash(python3 *)",
+      "Bash(chmod +x build_appstore.sh)",
+      "Bash(./build_appstore.sh)",
+      "Bash(TARGET_ARCH=arm64 ./build_appstore.sh *)",
+      "Bash(chmod +x upload.sh)",
+      "Bash(./upload.sh)",
+      "Bash(pip index *)",
+      "Bash(pip download *)",
+      "Bash(pip3 download *)",
+      "Bash(pip3 install *)",
+      "Bash(curl -s \"https://pypi.org/pypi/Pillow/json\")",
+      "Bash(brew list *)",
+      "Bash(/opt/homebrew/bin/brew list *)",
+      "Bash(/usr/local/bin/brew list *)",
+      "Read(//opt/homebrew/**)",
+      "Read(//usr/local/lib/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(xcrun --sdk macosx --show-sdk-path)",
+      "WebFetch(domain:github.com)",
+      "Bash(curl -s \"https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/releases/latest\")",
+      "Bash(curl -L -o /tmp/libjpeg-turbo.dmg \"https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.4.1/libjpeg-turbo-3.1.4.1.dmg\")",
+      "Bash(hdiutil attach *)",
+      "Bash(sudo installer *)"
     ]
   }
 }

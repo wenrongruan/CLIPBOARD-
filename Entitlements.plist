@@ -18,8 +18,16 @@
     <key>com.apple.security.network.client</key>
     <true/>
 
-    <!-- 用户选择的文件读写（通过文件对话框导入/导出数据库） -->
+    <!-- 用户选择的文件读写（通过文件对话框导入/导出数据库、导入常用文件） -->
     <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- 允许持久化 security-scoped bookmark，跨进程重启仍可定位用户选中的源文件 -->
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
+
+    <!-- 允许写入用户 Downloads 目录（用于 "下载到本地" 导出） -->
+    <key>com.apple.security.files.downloads.read-write</key>
     <true/>
 </dict>
 </plist>

@@ -45,6 +45,40 @@ IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
 
+
+def _detect_appstore_build() -> bool:
+    """判断当前是否为 Mac App Store 构建 / 沙盒运行。
+
+    两个信号任意命中即视为 App Store 模式：
+    1. 运行时处于 App Sandbox（APP_SANDBOX_CONTAINER_ID 由 macOS 注入）。
+    2. 冻结包的 Info.plist 中 SCBuildFlavor 键值为 "appstore"
+       （由 build_appstore.sh 注入，用于 ad-hoc 签名/未沙盒运行时
+       仍走 App Store 逻辑）。
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    if os.environ.get("APP_SANDBOX_CONTAINER_ID"):
+        return True
+    if getattr(_sys, "frozen", False):
+        # PyInstaller macOS onedir: sys.executable 位于 .app/Contents/MacOS/
+        # Info.plist 在 .app/Contents/Info.plist
+        try:
+            import plistlib
+            exe = _Path(_sys.executable).resolve()
+            plist_path = exe.parent.parent / "Info.plist"
+            if plist_path.exists():
+                with open(plist_path, "rb") as f:
+                    plist = plistlib.load(f)
+                if plist.get("SCBuildFlavor") == "appstore":
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+IS_APPSTORE_BUILD = _detect_appstore_build()
+
 MAX_ITEMS = 10000
 SYNC_INTERVAL_MS = 1000  # 同步轮询间隔(毫秒)
 
@@ -123,6 +157,11 @@ class AppSettings:
     # 插件
     disabled_plugins: Tuple[str, ...] = ()
 
+    # 文件云同步（仅付费用户可用，配额与单文件上限由云端下发）
+    files_sync_enabled: bool = True
+    files_auto_download: bool = False
+    files_max_autodownload_mb: int = 200
+
 
 # ============ 序列化 ============
 
@@ -180,6 +219,9 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         active_profile=data.get("active_profile", "Default"),
         db_profiles=dict(data.get("db_profiles", {})),
         disabled_plugins=tuple(data.get("disabled_plugins", [])),
+        files_sync_enabled=bool(data.get("files_sync_enabled", True)),
+        files_auto_download=bool(data.get("files_auto_download", False)),
+        files_max_autodownload_mb=int(data.get("files_max_autodownload_mb", 200)),
     )
     return snapshot, extras
 
@@ -216,6 +258,9 @@ def _snapshot_to_dict(s: AppSettings, extras: dict) -> dict:
         "active_profile": s.active_profile,
         "db_profiles": dict(s.db_profiles),
         "disabled_plugins": list(s.disabled_plugins),
+        "files_sync_enabled": s.files_sync_enabled,
+        "files_auto_download": s.files_auto_download,
+        "files_max_autodownload_mb": s.files_max_autodownload_mb,
     })
     return d
 
@@ -241,6 +286,13 @@ def get_config_file() -> Path:
 def get_user_plugins_dir() -> Path:
     p = get_config_dir() / "plugins"
     p.mkdir(exist_ok=True)
+    return p
+
+
+def get_files_local_dir() -> Path:
+    """云端文件的本地沙盒容器路径；不存在即创建。"""
+    p = get_config_dir() / "files"
+    p.mkdir(parents=True, exist_ok=True)
     return p
 
 

@@ -45,6 +45,9 @@ QLineEdit {
     border-radius: 6px;
     padding: 8px 12px;
     color: #ffffff;
+    /* Why: macOS 下 QLineEdit 默认高度会被 padding 挤到文字贴底/贴顶,
+       显示的 "localhost" 之类会被上下裁掉一截; 给个明确最小高度 */
+    min-height: 20px;
 }
 
 QLineEdit:focus {
@@ -63,8 +66,9 @@ QPushButton {
     color: #ffffff;
 }
 
-QPushButton[text="📌"], QPushButton[text="📍"],
-QPushButton[text="⚙"], QPushButton[text="✕"], QPushButton[text="—"] {
+QPushButton[text="⇩"], QPushButton[text="⇧"],
+QPushButton[text="⚙"], QPushButton[text="✕"], QPushButton[text="—"],
+QPushButton[text="☆"], QPushButton[text="★"] {
     min-width: 28px;
     max-width: 28px;
     padding: 2px;
@@ -302,6 +306,7 @@ QComboBox {
     border-radius: 6px;
     padding: 6px 12px;
     color: #ffffff;
+    min-height: 20px;
 }
 
 QComboBox:hover {
@@ -340,6 +345,7 @@ QSpinBox {
     border-radius: 6px;
     padding: 4px 8px;
     color: #ffffff;
+    min-height: 20px;
 }
 
 QSpinBox:focus {

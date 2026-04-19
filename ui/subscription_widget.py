@@ -112,6 +112,29 @@ class SubscriptionWidget(QWidget):
         self.devices_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
         usage_layout.addWidget(self.devices_label)
 
+        # 文件存储（付费功能，未启用时显示「需要升级」）
+        files_layout = QHBoxLayout()
+        files_layout.setSpacing(8)
+        files_caption = QLabel("文件存储:")
+        files_caption.setStyleSheet("color: #e8e8e8;")
+        files_layout.addWidget(files_caption)
+        self.files_count_label = QLabel("-- / --")
+        self.files_count_label.setStyleSheet("color: #aaaaaa;")
+        files_layout.addWidget(self.files_count_label)
+        files_layout.addStretch()
+        usage_layout.addLayout(files_layout)
+
+        self.files_usage_progress = QProgressBar()
+        self.files_usage_progress.setRange(0, 100)
+        self.files_usage_progress.setValue(0)
+        self.files_usage_progress.setTextVisible(False)
+        self.files_usage_progress.setFixedHeight(8)
+        self.files_usage_progress.setStyleSheet("""
+            QProgressBar {background-color:#3c3c3c;border:none;border-radius:4px;}
+            QProgressBar::chunk {background-color:#0078d4;border-radius:4px;}
+        """)
+        usage_layout.addWidget(self.files_usage_progress)
+
         layout.addWidget(usage_group)
 
         # ===== 操作按钮 =====
@@ -236,6 +259,41 @@ class SubscriptionWidget(QWidget):
 
             # 设备数
             self.devices_label.setText(f"已注册设备: {devices_count}/{max_devices}")
+
+            # 文件存储用量（如果服务端下发，则展示；否则通过 EntitlementService 兜底）
+            files_block = sub.get("files") if isinstance(sub.get("files"), dict) else {}
+            files_used = int(files_block.get("used_bytes") or sub.get("files_used_bytes") or 0)
+            files_quota = int(
+                files_block.get("quota_bytes") or sub.get("files_quota_bytes") or 0
+            )
+            if files_quota == 0:
+                try:
+                    from core.entitlement_service import get_entitlement_service
+                    ent = get_entitlement_service().current()
+                    files_used = ent.files_used_bytes
+                    files_quota = ent.files_quota_bytes
+                except Exception:
+                    pass
+
+            def _fmt(n):
+                if n <= 0:
+                    return "0"
+                if n >= (1 << 30):
+                    return f"{n / (1 << 30):.2f} GB"
+                return f"{n / (1 << 20):.1f} MB"
+
+            if files_quota > 0:
+                self.files_count_label.setText(f"已用 {_fmt(files_used)} / {_fmt(files_quota)}")
+                pct = min(100, int(files_used * 100 / max(1, files_quota)))
+                self.files_usage_progress.setValue(pct)
+                color = "#0078d4" if pct < 80 else ("#fbbf24" if pct < 95 else "#f87171")
+                self.files_usage_progress.setStyleSheet(
+                    f"QProgressBar{{background-color:#3c3c3c;border:none;border-radius:4px;}}"
+                    f"QProgressBar::chunk{{background-color:{color};border-radius:4px;}}"
+                )
+            else:
+                self.files_count_label.setText("仅 Pro / Premium 可用")
+                self.files_usage_progress.setValue(0)
 
         except CloudAPIError as e:
             self.plan_label.setText("云端加载失败")

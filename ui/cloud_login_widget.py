@@ -5,7 +5,7 @@ import time
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import Signal, QTimer
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QFormLayout,
@@ -47,6 +47,8 @@ class CloudLoginWidget(QWidget):
         form_layout = QFormLayout(self)
         form_layout.setSpacing(10)
         form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form_layout.setLabelAlignment(Qt.AlignLeft)
 
         self.email_edit = QLineEdit()
         self.email_edit.setPlaceholderText("your@email.com")

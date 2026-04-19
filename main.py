@@ -131,6 +131,9 @@ class ClipboardApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)  # 托盘模式
+        # Why: update_settings 延迟 2s 合并落盘，Qt 正常退出路径（Cmd+Q、
+        # SIGTERM 下的 aboutToQuit）若不兜底会丢失未 flush 的改动。
+        self.app.aboutToQuit.connect(flush_settings)
 
         from PySide6.QtGui import QPixmapCache
         QPixmapCache.setCacheLimit(10240)
@@ -205,6 +208,9 @@ class ClipboardApp:
         # 云端同步服务（叠加层，有 token 时自动启动）
         self.cloud_api = None
         self.cloud_sync_service = None
+        self.file_sync_service = None
+        self.file_repository = None
+        self.entitlement_service = None
         self._cloud_sync_error = None
         if get_cloud_access_token():
             try:
@@ -216,6 +222,30 @@ class ClipboardApp:
 
                 # 监听剪贴板新增条目，自动加入云端上传队列
                 self.clipboard_monitor.item_added.connect(self._on_new_item_for_cloud)
+
+                # 付费闸 + 文件云同步（复用 app_meta 持久化，无额外依赖）
+                try:
+                    from core.entitlement_service import get_entitlement_service
+                    from core.file_repository import CloudFileRepository
+                    from core.file_sync_service import FileCloudSyncService
+
+                    self.entitlement_service = get_entitlement_service(
+                        cloud_api=self.cloud_api, repository=self.repository,
+                    )
+                    self.entitlement_service.refresh_async()
+
+                    self.file_repository = CloudFileRepository(self.db_manager)
+                    if settings().files_sync_enabled:
+                        self.file_sync_service = FileCloudSyncService(
+                            self.file_repository,
+                            self.cloud_api,
+                            self.entitlement_service,
+                            self.repository,
+                        )
+                except Exception as ent_err:
+                    logger.warning(f"文件云同步初始化失败: {ent_err}", exc_info=True)
+                    self.file_repository = None
+                    self.file_sync_service = None
 
                 logger.info("云端同步已启用（叠加模式）")
             except Exception as e:
@@ -246,6 +276,9 @@ class ClipboardApp:
             plugin_manager=self.plugin_manager,
             cloud_api=self.cloud_api,
             cloud_sync_service=self.cloud_sync_service,
+            file_sync_service=self.file_sync_service,
+            file_repository=self.file_repository,
+            entitlement_service=self.entitlement_service,
         )
 
         # 连接退出信号
@@ -268,6 +301,13 @@ class ClipboardApp:
             # 未捕获异常等非正常退出的兜底，确保游标不丢失。
             atexit.register(self._atexit_persist_cloud_cursor)
 
+        if self.file_sync_service:
+            try:
+                self.file_sync_service.start()
+                atexit.register(self._atexit_persist_file_cursor)
+            except Exception as e:
+                logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
+
     def _atexit_persist_cloud_cursor(self):
         """进程退出兜底：持久化云端同步游标。"""
         try:
@@ -277,6 +317,16 @@ class ClipboardApp:
             # atexit 阶段 logger 可能已关闭；尽力 debug 一次，失败就只能放弃
             try:
                 logger.debug("atexit persist cloud cursor failed", exc_info=True)
+            except Exception:
+                pass
+
+    def _atexit_persist_file_cursor(self):
+        try:
+            if getattr(self, "file_sync_service", None) is not None:
+                self.file_sync_service.persist_sync_cursor()
+        except Exception:
+            try:
+                logger.debug("atexit persist file cursor failed", exc_info=True)
             except Exception:
                 pass
 
@@ -432,6 +482,11 @@ class ClipboardApp:
         self.sync_service.stop()
         if self.cloud_sync_service:
             self.cloud_sync_service.stop()
+        if self.file_sync_service:
+            try:
+                self.file_sync_service.stop()
+            except Exception:
+                logger.debug("文件云同步停止失败", exc_info=True)
         self.tray_icon.hide()
         # 关闭云端 API 客户端（统一通过 reset_cloud_client 清理单例）
         try:

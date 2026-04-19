@@ -25,7 +25,7 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
     placeholder = "%s"
     is_mysql = True
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -44,6 +44,40 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         INDEX idx_content_type (content_type),
         INDEX idx_device_id (device_id),
         INDEX idx_content_hash (content_hash)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+    CREATE_FILES_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS cloud_files (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        cloud_id BIGINT UNIQUE,
+        name VARCHAR(512) NOT NULL,
+        original_path TEXT,
+        local_path TEXT,
+        size_bytes BIGINT NOT NULL DEFAULT 0,
+        mime_type VARCHAR(255),
+        content_sha256 CHAR(64) NOT NULL,
+        mtime BIGINT NOT NULL,
+        device_id VARCHAR(32) NOT NULL,
+        device_name VARCHAR(255),
+        created_at BIGINT NOT NULL,
+        is_deleted TINYINT NOT NULL DEFAULT 0,
+        sync_state VARCHAR(32) NOT NULL DEFAULT 'pending',
+        last_error TEXT,
+        bookmark LONGBLOB,
+        INDEX idx_files_sync_state (sync_state),
+        INDEX idx_files_cloud_id (cloud_id),
+        INDEX idx_files_sha (content_sha256)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    """
+
+    CREATE_FILE_PARTS_TABLE_SQL = """
+    CREATE TABLE IF NOT EXISTS cloud_file_upload_parts (
+        file_id BIGINT NOT NULL,
+        part_number INT NOT NULL,
+        etag VARCHAR(128),
+        uploaded_at BIGINT,
+        PRIMARY KEY (file_id, part_number)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     """
 
@@ -110,6 +144,8 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
             with conn.cursor() as cursor:
                 cursor.execute(self.CREATE_TABLE_SQL)
                 cursor.execute(self.CREATE_META_TABLE_SQL)
+                cursor.execute(self.CREATE_FILES_TABLE_SQL)
+                cursor.execute(self.CREATE_FILE_PARTS_TABLE_SQL)
             conn.commit()
 
             # Schema 迁移
@@ -143,6 +179,45 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
                 )
                 conn.commit()
                 logger.info("MySQL Schema 已迁移到 v2（新增 cloud_id）")
+
+            if current_version < 3:
+                # v2 → v3: 远古版本创建的库可能缺 image_data / image_thumbnail,
+                # 对齐 CREATE TABLE 的完整列集, 补齐缺失字段避免写入 1054。
+                expected_columns = [
+                    ("image_data", "LONGBLOB"),
+                    ("image_thumbnail", "MEDIUMBLOB"),
+                ]
+                for col_name, col_type in expected_columns:
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE clipboard_items ADD COLUMN {col_name} {col_type}"
+                        )
+                    except pymysql.Error as e:
+                        # 1060 = Duplicate column name, 已存在跳过
+                        if "Duplicate column name" not in str(e):
+                            raise
+
+                cursor.execute(
+                    "INSERT INTO app_meta (`key`, `value`) VALUES ('schema_version', '3') "
+                    "ON DUPLICATE KEY UPDATE `value` = '3'"
+                )
+                conn.commit()
+                logger.info("MySQL Schema 已迁移到 v3（补齐 image_data / image_thumbnail）")
+
+            if current_version < 4:
+                try:
+                    cursor.execute(self.CREATE_FILES_TABLE_SQL)
+                    cursor.execute(self.CREATE_FILE_PARTS_TABLE_SQL)
+                except pymysql.Error:
+                    logger.warning("MySQL 建 cloud_files 表失败", exc_info=True)
+                    raise
+
+                cursor.execute(
+                    "INSERT INTO app_meta (`key`, `value`) VALUES ('schema_version', '4') "
+                    "ON DUPLICATE KEY UPDATE `value` = '4'"
+                )
+                conn.commit()
+                logger.info("MySQL Schema 已迁移到 v4")
 
     def _create_connection(self) -> "pymysql.connections.Connection":
         """创建新的 MySQL 连接"""

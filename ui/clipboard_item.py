@@ -154,6 +154,9 @@ class ClipboardItemWidget(QWidget):
         label = QLabel(meta_text)
         label.setObjectName("metaLabel")
         label.setMinimumWidth(0)
+        # Why: 长 device_name (如 "mangguodeairdeMacBook-Air.local (Darwin)")
+        # 若保留默认 Preferred policy 会撑大行宽, 把右侧 28px 按钮列挤出可视区。
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         return label
 
     @staticmethod

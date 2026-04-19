@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from config import (
     APP_VERSION,
+    IS_APPSTORE_BUILD,
     settings,
     update_settings,
     get_cloud_access_token,
@@ -141,6 +142,10 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(t("settings"))
         self.setFixedSize(580, 560)
         self.setStyleSheet(MAIN_STYLE)
+        # Why: 父 MainWindow 带 WindowStaysOnTopHint + Tool, 子 dialog 不继承
+        # 这两个标志时会被父窗口永久盖住, 表现为"点击设置没反应"。
+        # 给 dialog 也加 StayOnTop 让它始终浮在父窗口之上。
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -172,6 +177,7 @@ class SettingsDialog(QDialog):
         general_tab = QWidget()
         general_layout = QFormLayout(general_tab)
         general_layout.setSpacing(12)
+        general_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         self.language_combo = QComboBox()
         languages = get_languages()
@@ -267,6 +273,7 @@ class SettingsDialog(QDialog):
 
         self.sqlite_group = QGroupBox(t("sqlite_config"))
         sqlite_layout = QFormLayout(self.sqlite_group)
+        sqlite_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         path_layout = QHBoxLayout()
         self.db_path_edit = QLineEdit()
@@ -283,6 +290,7 @@ class SettingsDialog(QDialog):
 
         self.mysql_group = QGroupBox(t("mysql_config"))
         mysql_layout = QFormLayout(self.mysql_group)
+        mysql_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
         mysql_config = get_mysql_config()
 
@@ -337,6 +345,7 @@ class SettingsDialog(QDialog):
 
         filter_group = QGroupBox(t("content_filter"))
         filter_group_layout = QFormLayout(filter_group)
+        filter_group_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         filter_group_layout.setSpacing(8)
 
         self.save_text_check = QCheckBox(t("save_text"))
@@ -365,6 +374,7 @@ class SettingsDialog(QDialog):
 
         storage_group = QGroupBox(t("storage_management"))
         storage_group_layout = QFormLayout(storage_group)
+        storage_group_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         storage_group_layout.setSpacing(8)
 
         self.max_items_spin = QSpinBox()
@@ -465,26 +475,32 @@ class SettingsDialog(QDialog):
         self._plugin_list_layout.setSpacing(6)
         content_layout.addLayout(self._plugin_list_layout)
 
-        # -- 分隔线 --
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet("color: #555555; margin: 8px 0;")
-        content_layout.addWidget(separator)
+        # App Store / 沙盒构建下隐藏插件商店与外部目录按钮（App Review 2.5.2 禁止
+        # 应用下载或加载可执行代码；卸载/打开插件目录也一并隐藏避免误导）。
+        self._store_list_layout = None
+        self._store_refresh_btn = None
 
-        # -- 插件商店 --
-        store_header = QHBoxLayout()
-        store_title = QLabel(t("plugin_store"))
-        store_title.setObjectName("sectionTitle")
-        store_header.addWidget(store_title)
-        store_header.addStretch()
-        self._store_refresh_btn = QPushButton(t("refresh"))
-        self._store_refresh_btn.clicked.connect(self._load_store_plugins)
-        store_header.addWidget(self._store_refresh_btn)
-        content_layout.addLayout(store_header)
+        if not IS_APPSTORE_BUILD:
+            # -- 分隔线 --
+            separator = QFrame()
+            separator.setFrameShape(QFrame.HLine)
+            separator.setStyleSheet("color: #555555; margin: 8px 0;")
+            content_layout.addWidget(separator)
 
-        self._store_list_layout = QVBoxLayout()
-        self._store_list_layout.setSpacing(6)
-        content_layout.addLayout(self._store_list_layout)
+            # -- 插件商店 --
+            store_header = QHBoxLayout()
+            store_title = QLabel(t("plugin_store"))
+            store_title.setObjectName("sectionTitle")
+            store_header.addWidget(store_title)
+            store_header.addStretch()
+            self._store_refresh_btn = QPushButton(t("refresh"))
+            self._store_refresh_btn.clicked.connect(self._load_store_plugins)
+            store_header.addWidget(self._store_refresh_btn)
+            content_layout.addLayout(store_header)
+
+            self._store_list_layout = QVBoxLayout()
+            self._store_list_layout.setSpacing(6)
+            content_layout.addLayout(self._store_list_layout)
 
         content_layout.addStretch()
         scroll.setWidget(scroll_content)
@@ -494,21 +510,23 @@ class SettingsDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
 
-        open_dir_btn = QPushButton(t("open_plugins_dir"))
-        open_dir_btn.clicked.connect(self._open_plugins_dir)
-        btn_layout.addWidget(open_dir_btn)
+        if not IS_APPSTORE_BUILD:
+            open_dir_btn = QPushButton(t("open_plugins_dir"))
+            open_dir_btn.clicked.connect(self._open_plugins_dir)
+            btn_layout.addWidget(open_dir_btn)
 
-        reload_btn = QPushButton(t("reload_plugins"))
-        reload_btn.clicked.connect(self._reload_plugins)
-        btn_layout.addWidget(reload_btn)
+            reload_btn = QPushButton(t("reload_plugins"))
+            reload_btn.clicked.connect(self._reload_plugins)
+            btn_layout.addWidget(reload_btn)
 
         logs_btn = QPushButton(t("view_plugin_logs"))
         logs_btn.clicked.connect(self._open_plugin_logs)
         btn_layout.addWidget(logs_btn)
 
-        dev_docs_btn = QPushButton(t("plugin_dev_docs"))
-        dev_docs_btn.clicked.connect(self._open_plugin_dev_docs)
-        btn_layout.addWidget(dev_docs_btn)
+        if not IS_APPSTORE_BUILD:
+            dev_docs_btn = QPushButton(t("plugin_dev_docs"))
+            dev_docs_btn.clicked.connect(self._open_plugin_dev_docs)
+            btn_layout.addWidget(dev_docs_btn)
 
         btn_layout.addStretch()
         plugin_layout.addLayout(btn_layout)
@@ -516,7 +534,8 @@ class SettingsDialog(QDialog):
         tab_widget.addTab(plugin_tab, t("plugins"))
 
         self._refresh_plugin_list()
-        self._load_store_plugins()
+        if not IS_APPSTORE_BUILD:
+            self._load_store_plugins()
 
     # -- 已安装插件 --
 
@@ -590,15 +609,17 @@ class SettingsDialog(QDialog):
             )
             btn_box.addWidget(config_btn)
 
-        uninstall_btn = QPushButton(t("plugin_uninstall"))
-        uninstall_btn.setStyleSheet(
-            "QPushButton { color: #f87171; border: 1px solid #f87171; padding: 2px 8px; }"
-            "QPushButton:hover { background: #f87171; color: white; }"
-        )
-        uninstall_btn.clicked.connect(
-            lambda checked=False, pid=plugin_id: self._uninstall_plugin(pid)
-        )
-        btn_box.addWidget(uninstall_btn)
+        # App Store 版本只带内置插件，不能卸载。
+        if not IS_APPSTORE_BUILD:
+            uninstall_btn = QPushButton(t("plugin_uninstall"))
+            uninstall_btn.setStyleSheet(
+                "QPushButton { color: #f87171; border: 1px solid #f87171; padding: 2px 8px; }"
+                "QPushButton:hover { background: #f87171; color: white; }"
+            )
+            uninstall_btn.clicked.connect(
+                lambda checked=False, pid=plugin_id: self._uninstall_plugin(pid)
+            )
+            btn_box.addWidget(uninstall_btn)
 
         row_layout.addLayout(btn_box)
         return row
@@ -921,6 +942,29 @@ class SettingsDialog(QDialog):
         desc.setWordWrap(True)
         cloud_layout.addWidget(desc)
 
+        # 文件云同步开关组（付费功能；这里只是 UX 开关，会员闸由 EntitlementService 控）
+        files_group = QGroupBox("文件云同步（付费功能）")
+        files_form = QFormLayout(files_group)
+        files_form.setSpacing(8)
+
+        self.files_sync_enabled_check = QCheckBox("启用文件云同步")
+        self.files_sync_enabled_check.setChecked(settings().files_sync_enabled)
+        files_form.addRow(self.files_sync_enabled_check)
+
+        self.files_auto_download_check = QCheckBox("新设备登录后自动下载云端文件")
+        self.files_auto_download_check.setChecked(settings().files_auto_download)
+        files_form.addRow(self.files_auto_download_check)
+
+        self.files_auto_download_limit = QSpinBox()
+        self.files_auto_download_limit.setRange(0, 10240)
+        self.files_auto_download_limit.setSingleStep(50)
+        self.files_auto_download_limit.setValue(settings().files_max_autodownload_mb)
+        self.files_auto_download_limit.setSpecialValueText("不限制")
+        self.files_auto_download_limit.setSuffix(" MB")
+        files_form.addRow("自动下载单文件上限", self.files_auto_download_limit)
+
+        cloud_layout.addWidget(files_group)
+
         self._cloud_content_container = QWidget()
         self._cloud_content_layout = QVBoxLayout(self._cloud_content_container)
         self._cloud_content_layout.setContentsMargins(0, 0, 0, 0)
@@ -1008,6 +1052,16 @@ class SettingsDialog(QDialog):
                 )
             except Exception as e:
                 logger.warning(f"保存 MySQL 配置到安全存储失败: {e}")
+
+        # 文件云同步字段持久化（独立于 get_settings 的批量 apply 流程）
+        try:
+            update_settings(
+                files_sync_enabled=self.files_sync_enabled_check.isChecked(),
+                files_auto_download=self.files_auto_download_check.isChecked(),
+                files_max_autodownload_mb=int(self.files_auto_download_limit.value()),
+            )
+        except Exception as e:
+            logger.warning(f"保存文件同步配置失败: {e}")
 
         self.accept()
 

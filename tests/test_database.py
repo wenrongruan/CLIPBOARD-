@@ -42,7 +42,7 @@ class TestDatabaseManager:
             )
             row = cursor.fetchone()
             assert row is not None
-            assert int(row[0]) == 2
+            assert int(row[0]) == DatabaseManager.SCHEMA_VERSION
 
     def test_connection_reuse(self, db):
         """持久连接应复用同一个对象"""
