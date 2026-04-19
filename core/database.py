@@ -3,6 +3,7 @@ import time
 import random
 import logging
 import threading
+import weakref
 from pathlib import Path
 from typing import Optional, Callable, Any
 from contextlib import contextmanager
@@ -165,7 +166,24 @@ class DatabaseManager(AbstractDatabaseManager):
         self._tls.conn = new_conn
         with self._conns_lock:
             self._all_conns.append(new_conn)
+        # 线程结束时自动回收：避免短生命周期工作线程泄漏 sqlite 连接/TLS 文件句柄
+        weakref.finalize(
+            threading.current_thread(), self._finalize_thread_conn, new_conn
+        )
         return new_conn
+
+    def _finalize_thread_conn(self, conn: sqlite3.Connection) -> None:
+        """线程终止时回收该线程 connection 并从全局列表摘除。"""
+        with self._conns_lock:
+            try:
+                self._all_conns.remove(conn)
+            except ValueError:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            # 线程终结阶段关闭连接失败无关紧要，记 debug 便于排查
+            logger.debug("close conn failed", exc_info=True)
 
     @contextmanager
     def get_connection(self) -> sqlite3.Connection:

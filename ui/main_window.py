@@ -817,6 +817,14 @@ class MainWindow(EdgeHiddenWindow):
             def _load():
                 try:
                     full = repo.get_item_by_id(item_id)
+                except RuntimeError as e:
+                    # Qt 对象已被销毁（窗口关闭竞态），直接放弃后续 emit
+                    if "has been deleted" in str(e):
+                        return
+                    logger.error(f"加载插件所需图片失败: {e}", exc_info=True)
+                    full = None
+                    signal.emit(plugin_id, action_id, full)
+                    return
                 except Exception as e:
                     logger.error(f"加载插件所需图片失败: {e}", exc_info=True)
                     full = None

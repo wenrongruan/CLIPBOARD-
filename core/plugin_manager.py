@@ -480,6 +480,8 @@ class PluginManager(QObject):
             if cleanup_timer.isActive():
                 cleanup_timer.stop()
             worker.deleteLater()
+            # QTimer 以 self(plugin_manager) 为父不会被 GC，显式回收避免长期累积
+            cleanup_timer.deleteLater()
 
         def _force_cleanup():
             if not worker.isFinished():
@@ -487,6 +489,7 @@ class PluginManager(QObject):
                 worker.terminate()
                 worker.wait(1000)
             worker.deleteLater()
+            cleanup_timer.deleteLater()
 
         cleanup_timer.timeout.connect(_force_cleanup)
         # Why: SingleShotConnection 让 _on_finished 只响应一次就自动断开；
@@ -535,7 +538,8 @@ class PluginManager(QObject):
         dirs = []
         # 内置插件：frozen 时从 _MEIPASS 目录找，源码时从项目根找
         if getattr(sys, 'frozen', False):
-            app_root = Path(sys._MEIPASS)
+            # 用 getattr 兜底：极端情况下 frozen 但 _MEIPASS 缺失时退化到空路径
+            app_root = Path(getattr(sys, '_MEIPASS', ''))
         else:
             app_root = Path(__file__).parent.parent
         builtin_dir = app_root / "plugins"

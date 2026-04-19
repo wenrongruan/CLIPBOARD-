@@ -1,3 +1,5 @@
+# DEPRECATED: 推荐使用 build_mac.sh / build_appstore.sh (PyInstaller)
+# 本 py2app 路径未与主构建流程同步，仅保留历史兼容
 """
 macOS 打包脚本
 使用 py2app 将应用打包为 macOS .app 文件
@@ -11,6 +13,8 @@ macOS 打包脚本
 from setuptools import setup
 import sys
 import platform
+
+print("[warn] build_macos.py 已弃用，建议改用 build_mac.sh / build_appstore.sh (PyInstaller)")
 
 if platform.system() != "Darwin":
     print("此脚本只能在 macOS 上运行")

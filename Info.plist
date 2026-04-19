@@ -18,6 +18,8 @@
     <string>AppIcon</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSApplicationCategoryType</key>
@@ -32,5 +34,9 @@
     <string>Copyright © 2024. All rights reserved.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>共享剪贴板可通过局域网连接 MySQL 数据库，实现多设备剪贴板同步共享。</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>需要通过 Apple Events 访问系统剪贴板服务。</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>需要辅助功能权限以支持全局粘贴热键。</string>
 </dict>
 </plist>

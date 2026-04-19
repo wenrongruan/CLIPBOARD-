@@ -61,7 +61,7 @@ def _locate_chat_image_gen():
     return None, None
 
 
-def _schedule_temp_cleanup(paths: list[str], delay_seconds: int = 300) -> None:
+def _schedule_temp_cleanup(paths: list[str], delay_seconds: int = 60) -> None:
     """启动 daemon 线程，在 delay 后删除临时文件。
     Why: subprocess.Popen 不等待，子进程读完临时文件就不再需要；不清理则
     每次 AI 生图都会在系统 temp 目录留一份副本（含完整剪贴板内容），
@@ -109,12 +109,26 @@ def _find_python() -> str:
     python = shutil.which("python") or shutil.which("python3")
     if python:
         return python
-    # 兜底：常见安装路径
-    for candidate in [
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python313\python.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\python.exe"),
-    ]:
+    # 兜底：按平台给出常见安装路径
+    import platform
+    system = platform.system()
+    if system == "Darwin":
+        candidates = [
+            "/opt/homebrew/bin/python3",
+            "/opt/homebrew/bin/python3.12",
+            "/opt/homebrew/bin/python3.11",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+        ]
+    elif system == "Linux":
+        candidates = ["/usr/bin/python3"]
+    else:
+        candidates = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python313\python.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\python.exe"),
+        ]
+    for candidate in candidates:
         if os.path.exists(candidate):
             return candidate
     return "python"

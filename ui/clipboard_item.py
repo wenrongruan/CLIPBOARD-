@@ -1,8 +1,7 @@
-from collections import OrderedDict
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QPixmap, QImage, QPixmapCache
 from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
@@ -13,10 +12,6 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem
-
-# 模块级 LRU pixmap 缓存，按 content_hash 缓存已缩放的 QPixmap
-_pixmap_cache: OrderedDict = OrderedDict()
-_PIXMAP_CACHE_MAX = 200
 
 
 class ClipboardItemWidget(QWidget):
@@ -48,25 +43,29 @@ class ClipboardItemWidget(QWidget):
             image_label = QLabel()
             image_label.setObjectName("imageLabel")
             cache_key = self.item.content_hash
-            if cache_key in _pixmap_cache:
-                # LRU: 访问时移到末尾
-                _pixmap_cache.move_to_end(cache_key)
-                scaled = _pixmap_cache[cache_key]
+            image_label.setFixedSize(56, 56)
+            cached = QPixmapCache.find(cache_key) if cache_key else None
+            if cached is not None:
+                # 命中缓存直接同步设置, 避免小图后台化开销
+                image_label.setPixmap(cached)
             else:
-                pixmap = QPixmap()
-                pixmap.loadFromData(self.item.image_thumbnail)
-                scaled = None
-                if not pixmap.isNull():
+                # 未命中: 占位 + 下一 tick 解码, 不阻塞首屏布局
+                image_label.setPixmap(QPixmap())
+                thumb_bytes = self.item.image_thumbnail
+                def _decode_and_set(lbl=image_label, key=cache_key, data=thumb_bytes):
+                    if lbl is None:
+                        return
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(data)
+                    if pixmap.isNull():
+                        return
                     scaled = pixmap.scaled(
                         56, 56, Qt.KeepAspectRatio, Qt.FastTransformation
                     )
-                    # LRU 淘汰：移除最久未使用的条目
-                    while len(_pixmap_cache) >= _PIXMAP_CACHE_MAX:
-                        _pixmap_cache.popitem(last=False)
-                    _pixmap_cache[cache_key] = scaled
-            if scaled:
-                image_label.setPixmap(scaled)
-            image_label.setFixedSize(56, 56)
+                    if key:
+                        QPixmapCache.insert(key, scaled)
+                    lbl.setPixmap(scaled)
+                QTimer.singleShot(0, _decode_and_set)
             layout.addWidget(image_label)
 
             # 图片信息

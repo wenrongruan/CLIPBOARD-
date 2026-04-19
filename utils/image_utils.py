@@ -10,13 +10,21 @@ def create_thumbnail(
     image_data: bytes, size: Tuple[int, int] = (100, 100)
 ) -> bytes:
     with Image.open(io.BytesIO(image_data)) as image:
-        # 保持宽高比
         image.thumbnail(size, Image.Resampling.BILINEAR)
-
-        # 转换为PNG格式
+        encode_src = _flatten_to_rgb(image)
         output = io.BytesIO()
-        image.save(output, format="PNG")
+        encode_src.save(output, format="JPEG", quality=80)
         return output.getvalue()
+
+
+def _flatten_to_rgb(image: Image.Image, bg=(255, 255, 255)) -> Image.Image:
+    """JPEG 不支持透明，RGBA/LA/P 合成白底；其他非 RGB 直接 convert。"""
+    if image.mode in ("RGBA", "LA", "P"):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, bg)
+        background.paste(rgba, mask=rgba.getchannel("A"))
+        return background
+    return image if image.mode == "RGB" else image.convert("RGB")
 
 
 def image_to_bytes(image: Image.Image, format: str = "PNG") -> bytes:

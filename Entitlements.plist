@@ -10,7 +10,7 @@
     <key>com.apple.developer.team-identifier</key>
     <string>N9B2B6LN88</string>
 
-    <!-- App Sandbox（Mac App Store 强制要求） -->
+    <!-- App Sandbox（Mac App Store 强制要求；沙盒下 pynput 全局热键会失效，仅 DevID 版可用） -->
     <key>com.apple.security.app-sandbox</key>
     <true/>
 

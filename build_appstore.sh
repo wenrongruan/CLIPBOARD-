@@ -37,8 +37,19 @@ PKG_SIGN_CERT="3rd Party Mac Developer Installer: wenrong ruan (N9B2B6LN88)"
 
 APP_BUNDLE="dist/${APP_NAME}.app"
 PKG_OUTPUT="SharedClipboard_appstore.pkg"
-ENTITLEMENTS="Entitlements.plist"
+ENTITLEMENTS="Entitlements.plist"   # MAS 沙盒版 entitlements（DevID 版请用 Entitlements.devid.plist）
 VENV_DIR=".venv_appstore"
+
+# 目标架构：默认 universal2；若本地 venv/wheels 非 universal2 将失败，
+# 可用 TARGET_ARCH=x86_64 覆盖。建议用 python.org 官方 universal2 installer 或
+# pip install --platform macosx_11_0_universal2 --only-binary=:all: 获取 fat wheels。
+TARGET_ARCH="${TARGET_ARCH:-universal2}"
+
+# 版本号从 config.py 动态读取（避免与源码脱节）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VER=$(cd "$SCRIPT_DIR" && python3 -c "from config import APP_VERSION; print(APP_VERSION)" 2>/dev/null || echo "0.0.0")
+# Build 号优先读环境变量 BUILD_NUMBER，否则用时间戳
+BUILD_NUM="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 step() { echo -e "\n${GREEN}[$1/7]${NC} $2"; }
@@ -65,12 +76,12 @@ echo "Bundle ID: ${BUNDLE_ID}"
 # ─── [2/7] 创建虚拟环境并安装依赖 ───────────────────────────────────────────────
 step 2 "创建虚拟环境并安装依赖"
 
-rm -rf "$VENV_DIR"  # 每次重建 venv，使用 x86_64 模式（目标架构）
-arch -x86_64 $PYTHON -m venv "$VENV_DIR"
+rm -rf "$VENV_DIR"  # 每次重建 venv（TARGET_ARCH=$TARGET_ARCH）
+$PYTHON -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
-arch -x86_64 pip install --quiet --upgrade pip
-arch -x86_64 pip install --quiet PySide6 Pillow pymysql  # 不安装 pynput（App Sandbox 不支持输入监控）
-arch -x86_64 pip install --quiet pyinstaller
+pip install --quiet --upgrade pip
+pip install --quiet PySide6 Pillow pymysql  # 不安装 pynput（App Sandbox 不支持输入监控）
+pip install --quiet pyinstaller
 echo "依赖安装完成"
 
 # ─── [3/7] 生成 AppIcon.icns ──────────────────────────────────────────────────
@@ -94,7 +105,7 @@ pyinstaller \
     --name "${APP_NAME}" \
     --windowed \
     --noconfirm \
-    --target-arch x86_64 \
+    --target-arch "$TARGET_ARCH" \
     $ICON_ARG \
     --add-data "icons:icons" \
     --add-data "core:core" \
@@ -115,18 +126,19 @@ echo "打包成功: ${APP_BUNDLE}"
 
 # 修正 Info.plist（PyInstaller 生成的版本号不正确）
 INFO_PLIST="${APP_BUNDLE}/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 3.0.0" "$INFO_PLIST"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion 6" "$INFO_PLIST" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 6" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VER" "$INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$INFO_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.utilities" "$INFO_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.utilities" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion 12.0" "$INFO_PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :LSMinimumSystemVersion string 12.0" "$INFO_PLIST"
-echo "Info.plist 已更新: 版本 3.0.0 (Build 6)"
+echo "Info.plist 已更新: 版本 ${VER} (Build ${BUILD_NUM})"
 
-# 嵌入 Provisioning Profile
-if [ -f "*.provisionprofile" ] 2>/dev/null || ls *.provisionprofile 2>/dev/null; then
-    PROFILE=$(ls *.provisionprofile 2>/dev/null | head -1)
+# 嵌入 Provisioning Profile（用数组展开 glob，避免引号内 glob 不展开）
+profiles=(*.provisionprofile)
+if [ -e "${profiles[0]}" ]; then
+    PROFILE="${profiles[0]}"
     cp "$PROFILE" "${APP_BUNDLE}/Contents/embedded.provisionprofile"
     echo "已嵌入 Provisioning Profile: $PROFILE"
 elif [ -f "${APP_BUNDLE}/Contents/embedded.provisionprofile" ]; then
@@ -146,15 +158,14 @@ if [ "$TEAM_ID" = "YOUR_TEAM_ID" ]; then
     warn "TEAM_ID 未设置，使用 ad-hoc 签名（仅用于本地测试，无法上传 App Store）"
     codesign --force --deep --sign - "$APP_BUNDLE"
 else
-    # 对所有 .so 和 .dylib 单独签名（PyInstaller 打包的 Python 扩展）
+    # 对所有 .so 和 .dylib 单独签名（子库不能带 entitlements，仅主可执行带）
     find "$APP_BUNDLE" \( -name "*.so" -o -name "*.dylib" \) | while read lib; do
         codesign --force --sign "$APP_SIGN_CERT" \
-            --entitlements "$ENTITLEMENTS" \
             --options runtime "$lib" 2>/dev/null || true
     done
 
-    # 签名主 App Bundle
-    codesign --force --deep \
+    # 签名主 App Bundle（子库已单独签过，这里不用 --deep）
+    codesign --force \
         --sign "$APP_SIGN_CERT" \
         --entitlements "$ENTITLEMENTS" \
         --options runtime \
@@ -196,11 +207,17 @@ echo ""
 echo "  方式一：Transporter（推荐，图形界面）"
 echo "    从 Mac App Store 安装 Transporter，拖入 ${PKG_OUTPUT} 上传"
 echo ""
-echo "  方式二：命令行上传"
-echo "    xcrun altool --upload-app \\"
-echo "        -f ${PKG_OUTPUT} -t macos \\"
-echo "        -u \"${APPLE_ID}\" \\"
+echo "  方式二：命令行上传（altool --upload-app 已停用）"
+echo "    # Mac App Store (.pkg) → 使用 altool --upload-package 或 Transporter"
+echo "    xcrun altool --upload-package ${PKG_OUTPUT} \\"
+echo "        --type macos --bundle-id ${BUNDLE_ID} \\"
+echo "        --bundle-version ${BUILD_NUM} --bundle-short-version-string ${VER} \\"
+echo "        --apple-id YOUR_APP_APPLE_ID \\"
 echo "        --apiKey YOUR_API_KEY --apiIssuer YOUR_ISSUER_ID"
+echo ""
+echo "  DevID 分发版请改用 notarytool 公证（本脚本不产出 DevID 版）："
+echo "    xcrun notarytool submit YourApp.zip --keychain-profile \"AC_PASSWORD\" --wait"
+echo "    xcrun stapler staple YourApp.app"
 echo ""
 echo "  上传前请确认已在 App Store Connect 中完成："
 echo "    1. 注册 Bundle ID: ${BUNDLE_ID}"

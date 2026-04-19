@@ -59,7 +59,6 @@ echo "[5/5] 打包应用..."
 pyinstaller --onefile --windowed \
     --name "共享剪贴板" \
     --osx-bundle-identifier "com.sharedclipboard.app" \
-    --osx-entitlements-file "" \
     --add-data "core:core" \
     --add-data "ui:ui" \
     --add-data "utils:utils" \
@@ -74,9 +73,23 @@ pyinstaller --onefile --windowed \
 echo "配置应用为菜单栏模式（隐藏 Dock 图标）..."
 cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
 
-# Ad-hoc 签名，避免 Gatekeeper "已损坏" 提示
+# 签名：默认 ad-hoc（仅本机可用）；如需正式 DevID 分发，设置 DEVID_SIGN_CERT 环境变量
+# 例：DEVID_SIGN_CERT="Developer ID Application: Your Name (TEAMID)" ./build_mac.sh
 echo "签名应用..."
-codesign --force --deep --sign - "dist/共享剪贴板.app"
+if [[ -n "$DEVID_SIGN_CERT" ]]; then
+    # 递归签名：先签子库（不带 entitlements），再签主 bundle（带 entitlements）
+    find "dist/共享剪贴板.app" \( -name "*.so" -o -name "*.dylib" \) -exec \
+        codesign --force --sign "$DEVID_SIGN_CERT" --options runtime {} \;
+    codesign --force --sign "$DEVID_SIGN_CERT" --options runtime \
+        --entitlements "Entitlements.devid.plist" \
+        "dist/共享剪贴板.app"
+    echo "已使用 DevID 证书签名（Hardened Runtime + Entitlements.devid.plist）"
+    echo "后续步骤（手动执行）："
+    echo "  xcrun notarytool submit dist/共享剪贴板.app.zip --keychain-profile \"AC_PASSWORD\" --wait"
+    echo "  xcrun stapler staple dist/共享剪贴板.app"
+else
+    codesign --force --deep --sign - "dist/共享剪贴板.app"
+fi
 xattr -cr "dist/共享剪贴板.app"
 
 echo ""

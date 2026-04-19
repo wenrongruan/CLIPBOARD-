@@ -600,7 +600,10 @@ def get_mysql_config() -> dict:
 # ============ 特殊逻辑 ============
 
 def get_default_hotkey() -> str:
-    return "<cmd>+v"  # pynput: macOS 为 Cmd, Windows 为 Win 键
+    # macOS 的 Cmd+V 与系统粘贴冲突,默认改用 Cmd+Shift+V
+    if IS_MACOS:
+        return "<cmd>+<shift>+v"
+    return "<cmd>+v"  # pynput: Windows 为 Win 键
 
 
 def get_effective_hotkey() -> str:

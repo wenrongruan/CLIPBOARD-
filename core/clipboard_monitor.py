@@ -1,8 +1,13 @@
 import logging
+import platform
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+
+_IS_MACOS = platform.system() == "Darwin"
+# macOS 下 dataChanged 信号可靠，用低频轮询兜底防极端丢失
+_MACOS_FALLBACK_POLL_MS = 3000
 
 from PySide6.QtCore import QObject, Signal, QTimer, Qt
 from PySide6.QtGui import QClipboard, QImage
@@ -11,7 +16,6 @@ from PySide6.QtWidgets import QApplication
 from .models import ClipboardItem, TextClipboardItem, ImageClipboardItem
 from .repository import ClipboardRepository
 from config import settings, THUMBNAIL_SIZE
-from PIL import Image
 from utils.hash_utils import compute_content_hash
 from utils.image_utils import create_thumbnail, image_to_bytes
 
@@ -40,6 +44,7 @@ class ClipboardMonitor(QObject):
         self._image_executor = ThreadPoolExecutor(max_workers=1)
         self._consecutive_failures = 0
         self._unhealthy_notified = False
+        self._signal_connected = False
 
         # 使用轮询定时器代替 dataChanged 信号（Windows 上更可靠）
         self._poll_timer = QTimer(self)
@@ -62,12 +67,23 @@ class ClipboardMonitor(QObject):
             self._monitoring = True
             # 记录当前剪贴板内容，避免启动时重复保存
             self._last_text = self.clipboard.text()
-            self._poll_timer.start(settings().poll_interval_ms)
-            logger.info("剪贴板监控已启动 (轮询模式)")
+            if _IS_MACOS:
+                # macOS 下 dataChanged 可靠，用信号为主 + 低频兜底轮询，避免 App Nap 被阻止
+                if not self._signal_connected:
+                    self.clipboard.dataChanged.connect(self._poll_clipboard)
+                    self._signal_connected = True
+                self._poll_timer.start(_MACOS_FALLBACK_POLL_MS)
+                logger.info("剪贴板监控已启动 (macOS 信号模式 + 低频兜底)")
+            else:
+                self._poll_timer.start(settings().poll_interval_ms)
+                logger.info("剪贴板监控已启动 (轮询模式)")
 
     def update_poll_interval(self, interval_ms: int):
         """更新轮询间隔（毫秒）"""
         if self._monitoring:
+            # macOS 下使用固定的兜底间隔，忽略用户设置
+            if _IS_MACOS:
+                return
             self._poll_timer.stop()
             self._poll_timer.start(interval_ms)
 
@@ -75,7 +91,14 @@ class ClipboardMonitor(QObject):
         if self._monitoring:
             self._monitoring = False
             self._poll_timer.stop()
-            self._image_executor.shutdown(wait=True)
+            if _IS_MACOS and self._signal_connected:
+                try:
+                    self.clipboard.dataChanged.disconnect(self._poll_clipboard)
+                except (TypeError, RuntimeError):
+                    pass
+                self._signal_connected = False
+            # wait=False 避免与后台任务通过 QTimer 投递主线程产生死锁
+            self._image_executor.shutdown(wait=False)
             logger.info("剪贴板监控已停止")
 
     def _poll_clipboard(self):
@@ -119,6 +142,12 @@ class ClipboardMonitor(QObject):
                     f"剪贴板监控连续失败 {self._consecutive_failures} 次，停止轮询"
                 )
                 self._poll_timer.stop()
+                if _IS_MACOS and self._signal_connected:
+                    try:
+                        self.clipboard.dataChanged.disconnect(self._poll_clipboard)
+                    except (TypeError, RuntimeError):
+                        pass
+                    self._signal_connected = False
                 self._monitoring = False
                 stop_msg = "剪贴板监控已停止，请重启应用或检查系统剪贴板权限"
                 self.monitor_stopped.emit(stop_msg)
@@ -223,6 +252,8 @@ class ClipboardMonitor(QObject):
     def _process_image_background(self, raw_bytes: bytes, width: int, height: int, s):
         """后台线程：PNG 编码、缩略图生成、数据库写入"""
         try:
+            # 延迟导入 PIL，缩短冷启动时间
+            from PIL import Image
             pil_img = Image.frombytes("RGBA", (width, height), raw_bytes)
             image_data = image_to_bytes(pil_img, format="PNG")
 

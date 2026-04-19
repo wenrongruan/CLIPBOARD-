@@ -456,7 +456,10 @@ class CloudSyncService(QObject):
         self._worker.push_done.connect(self._on_push_done)
         self._worker.push_error.connect(self._on_push_error)
         self._worker.quota_warning.connect(self.quota_warning)
-        self._worker.device_registered.connect(lambda: setattr(self, '_device_registered', True))
+        # 显式 QueuedConnection：信号发自 worker 线程，槽要在主线程写 _device_registered
+        self._worker.device_registered.connect(
+            lambda: setattr(self, '_device_registered', True), Qt.QueuedConnection
+        )
         # 用信号槽替代 QMetaObject.invokeMethod + Q_ARG 传递 list
         self._trigger_push.connect(self._worker.do_push, Qt.QueuedConnection)
         self._trigger_pull.connect(self._worker.do_pull, Qt.QueuedConnection)
@@ -546,6 +549,12 @@ class CloudSyncService(QObject):
         self._push_timer.stop()
         # 退出时落盘游标（改走 app_meta，单条 key-value 比全量 settings 便宜）
         self._persist_cursor()
+        # 先请求中断 + 关闭 httpx 客户端，强行解除阻塞中的网络 I/O，否则 wait 会被耗尽
+        self._worker_thread.requestInterruption()
+        try:
+            self.cloud_api.close()
+        except Exception as e:
+            logger.debug(f"关闭 cloud_api 客户端失败（忽略）: {e}")
         self._worker_thread.quit()
         self._worker_thread.wait(3000)
         logger.info("云端同步服务已停止")

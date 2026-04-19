@@ -33,6 +33,8 @@ class EdgeHiddenWindow(QWidget):
             )
             # macOS 下关闭透明背景, 避免内容未绘制时桌面穿透
             self.setAttribute(Qt.WA_TranslucentBackground, False)
+            # 切换 Space 时不抢焦点
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         else:
             self.setWindowFlags(
                 Qt.FramelessWindowHint
@@ -352,6 +354,11 @@ class EdgeHiddenWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         """鼠标按下事件 - 开始拖动"""
         if event.button() == Qt.LeftButton:
+            # 命中子控件（搜索框等）时不启动拖拽，避免顶部 40px 条盖住交互区
+            child = self.childAt(event.position().toPoint())
+            if child is not None and child is not self:
+                super().mousePressEvent(event)
+                return
             # 只在窗口顶部 40 像素区域允许拖动
             if event.position().y() <= 40:
                 self._dragging = True

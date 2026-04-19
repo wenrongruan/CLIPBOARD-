@@ -210,17 +210,26 @@ class ClipboardRepository:
                 # 否则短语查询要求 token 完全相等, 单字符/子串永远搜不到
                 fts_query = '"' + query.replace('"', '""') + '"*'
 
+                star_filter_ci = " AND ci.is_starred = 1" if starred_only else ""
+                # ci. 前缀避免与 fts 虚表同名列 (text_content/preview) 歧义
+                select_fields_ci = (
+                    "ci.id, ci.content_type, ci.text_content, NULL as image_data, "
+                    "ci.image_thumbnail, ci.content_hash, ci.preview, ci.device_id, "
+                    "ci.device_name, ci.created_at, ci.is_starred, ci.cloud_id"
+                )
                 count_sql = f"""
-                    SELECT COUNT(*) FROM clipboard_items
-                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?){star_filter}
+                    SELECT COUNT(*) FROM clipboard_fts f
+                    JOIN clipboard_items ci ON ci.id = f.rowid
+                    WHERE clipboard_fts MATCH ?{star_filter_ci}
                 """
                 total = self._scalar(conn, count_sql, (fts_query,))
 
                 sql = f"""
-                    SELECT {self._SELECT_FIELDS_NO_IMAGE}
-                    FROM clipboard_items
-                    WHERE id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?){star_filter}
-                    ORDER BY created_at DESC
+                    SELECT {select_fields_ci}
+                    FROM clipboard_fts f
+                    JOIN clipboard_items ci ON ci.id = f.rowid
+                    WHERE clipboard_fts MATCH ?{star_filter_ci}
+                    ORDER BY ci.created_at DESC
                     LIMIT ? OFFSET ?
                 """
                 rows = self._fetchall(conn, sql, (fts_query, page_size, offset))

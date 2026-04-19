@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -104,10 +105,14 @@ class _PluginInstallThread(QThread):
                     resolved_target = self._target_dir.resolve()
                     for member in zf.namelist():
                         member_path = (self._target_dir / member).resolve()
-                        if not str(member_path).startswith(str(resolved_target)):
+                        if not member_path.is_relative_to(resolved_target):
                             self.error.emit(self._plugin_id, f"安全检查失败: {member}")
+                            shutil.rmtree(self._target_dir, ignore_errors=True)
                             return
                     zf.extractall(self._target_dir)
+            except Exception:
+                shutil.rmtree(self._target_dir, ignore_errors=True)
+                raise
             finally:
                 os.unlink(tmp_path)
 

@@ -66,6 +66,19 @@ try:
 except ImportError:
     _HAS_KEYRING = False
 
+# 细分 keyring 异常类型：KeyringLocked 属于用户可恢复情形，单独打 warning 提示解锁
+try:
+    from keyring.errors import KeyringLocked as _KeyringLocked  # type: ignore
+except Exception:  # 模块缺失或老版本没有该异常
+    _KeyringLocked = None  # type: ignore
+
+
+def _log_keyring_error(op: str, key: str, exc: Exception, fallback_level: int = logging.WARNING):
+    if _KeyringLocked is not None and isinstance(exc, _KeyringLocked):
+        logger.warning("Keychain locked, user must unlock（keyring %s '%s'）", op, key)
+    else:
+        logger.log(fallback_level, "keyring %s '%s' 失败: %s", op, key, exc)
+
 # Windows DPAPI 回退(独立于 keyring,作为 keyring 之外的二级 fallback)
 # Why: 原先条件写成 `not _HAS_KEYRING`,exe 里 keyring 可用时 DATA_BLOB 不会被定义,
 # 但后面函数签名用 `DATA_BLOB` 作注解导致 NameError,exe 根本启动不了。
@@ -164,7 +177,7 @@ def retrieve_credential(key: str) -> str:
                 _set_active_backend("keyring")
                 return value
         except Exception as e:
-            logger.warning(f"keyring 读取失败: {e}")
+            _log_keyring_error("读取", key, e)
 
     # 从配置文件读取（可能是 DPAPI 加密或 base64 混淆的）
     raw = _read_from_config(key)
@@ -204,7 +217,7 @@ def delete_credential(key: str):
         try:
             keyring.delete_password(_SERVICE_NAME, key)
         except Exception as e:
-            logger.debug(f"keyring 删除凭据 '{key}' 失败（可能不存在）: {e}")
+            _log_keyring_error("删除", key, e, fallback_level=logging.DEBUG)
     _write_to_config(key, "")
 
 

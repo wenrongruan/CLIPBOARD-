@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QCursor
-from PySide6.QtCore import Qt, QMetaObject, Q_ARG, QUrl
+from PySide6.QtCore import Qt, QMetaObject, Q_ARG, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
 
 IS_MACOS = platform.system() == "Darwin"
@@ -132,6 +132,9 @@ class ClipboardApp:
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)  # 托盘模式
 
+        from PySide6.QtGui import QPixmapCache
+        QPixmapCache.setCacheLimit(10240)
+
         # 初始化语言设置
         set_language(settings().language)
 
@@ -171,7 +174,8 @@ class ClipboardApp:
     def _create_tray_icon(self):
         """创建系统托盘图标"""
         self.tray_icon = QSystemTrayIcon(self.app)
-        self.tray_icon.setIcon(get_app_icon())
+        # macOS 托盘需模板图(setIsMask)才能跟随深色菜单栏;Dock 仍用彩色 get_app_icon
+        self.tray_icon.setIcon(create_fallback_icon() if IS_MACOS else get_app_icon())
         self.tray_icon.setToolTip(t("app_name"))
 
         # 创建托盘菜单
@@ -269,10 +273,10 @@ class ClipboardApp:
         try:
             if getattr(self, "cloud_sync_service", None) is not None:
                 self.cloud_sync_service.persist_sync_cursor()
-        except Exception as e:
+        except Exception:
             # atexit 阶段 logger 可能已关闭；尽力 debug 一次，失败就只能放弃
             try:
-                logger.debug(f"atexit persist cursor failed: {e}")
+                logger.debug("atexit persist cloud cursor failed", exc_info=True)
             except Exception:
                 pass
 
@@ -330,14 +334,13 @@ class ClipboardApp:
 
     def _on_tray_activated(self, reason):
         """托盘图标被点击"""
+        # macOS 下系统会自动弹出 contextMenu，手动 popup 会双触发，直接交还系统
+        if IS_MACOS:
+            return
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if IS_MACOS:
-                # macOS 上左键点击显示菜单
-                self.tray_icon.contextMenu().popup(QCursor.pos())
-            else:
-                self._show_window()
+            self._show_window()
         elif reason == QSystemTrayIcon.ActivationReason.Context:
-            # 右键点击显示菜单（主要用于 macOS）
+            # 右键点击显示菜单
             self.tray_icon.contextMenu().popup(QCursor.pos())
 
     def _init_hotkey(self):
@@ -359,10 +362,27 @@ class ClipboardApp:
             })
             self.hotkey_listener.start()
             logger.info(f"全局热键已注册: {hotkey}")
+            # macOS: pynput 无权限时常静默失败，延迟检查线程存活
+            if IS_MACOS:
+                QTimer.singleShot(3000, self._check_hotkey_listener_alive)
         except Exception as e:
             logger.error(f"注册全局热键失败: {e}")
             if IS_MACOS:
                 self._prompt_input_monitoring_permission()
+
+    def _check_hotkey_listener_alive(self):
+        """macOS: 3 秒后检查热键监听是否真正在运行"""
+        listener = getattr(self, "hotkey_listener", None)
+        if listener is None:
+            return
+        # pynput Listener 通常有 running 属性；兜底用 is_alive()
+        running = getattr(listener, "running", None)
+        if running is None:
+            is_alive = getattr(listener, "is_alive", None)
+            running = bool(is_alive()) if callable(is_alive) else True
+        if not running:
+            logger.warning("pynput 热键监听未运行，疑似缺少输入监控权限")
+            self._prompt_input_monitoring_permission()
 
     def _prompt_input_monitoring_permission(self):
         """macOS: 引导用户授权输入监控权限"""
@@ -418,7 +438,7 @@ class ClipboardApp:
             from core.cloud_api import reset_cloud_client
             reset_cloud_client()
         except Exception:
-            pass
+            logger.debug("reset_cloud_client failed", exc_info=True)
         # 刷新延迟写入的配置
         flush_settings()
         # 关闭持久数据库连接
