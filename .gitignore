@@ -38,3 +38,4 @@ upload.sh
 
 # Website (not open source)
 website/
+.pillow_fuse/

@@ -82,6 +82,33 @@ source "$VENV_DIR/bin/activate"
 pip install --quiet --upgrade pip
 pip install --quiet PySide6 Pillow pymysql  # 不安装 pynput（App Sandbox 不支持输入监控）
 pip install --quiet pyinstaller
+
+# Pillow 不发布 universal2 wheel，本地默认装到当前架构的单拱 wheel，
+# 会导致 PyInstaller target-arch=universal2 时报 IncompatibleBinaryArchError。
+# 用 delocate-merge 把 arm64 + x86_64 wheel 融合为 universal2 后重装。
+if [ "$TARGET_ARCH" = "universal2" ]; then
+    PILLOW_VER=$(pip show Pillow | awk '/^Version:/ {print $2}')
+    PIL_WEBP=$(python -c "import PIL, os; print(os.path.join(os.path.dirname(PIL.__file__), '_webp.cpython-311-darwin.so'))")
+    if [ -f "$PIL_WEBP" ] && ! lipo -info "$PIL_WEBP" 2>/dev/null | grep -q "arm64 x86_64\|x86_64 arm64"; then
+        echo "Pillow ${PILLOW_VER} 不是 universal2，融合两个架构 wheel..."
+        pip install --quiet delocate
+        PILLOW_FUSE_DIR="$SCRIPT_DIR/.pillow_fuse"
+        rm -rf "$PILLOW_FUSE_DIR" && mkdir -p "$PILLOW_FUSE_DIR"
+        pip download --no-deps --only-binary=:all: \
+            --platform macosx_11_0_arm64 --python-version 3.11 --abi cp311 --implementation cp \
+            -d "$PILLOW_FUSE_DIR" "Pillow==$PILLOW_VER" >/dev/null
+        pip download --no-deps --only-binary=:all: \
+            --platform macosx_10_10_x86_64 --python-version 3.11 --abi cp311 --implementation cp \
+            -d "$PILLOW_FUSE_DIR" "Pillow==$PILLOW_VER" >/dev/null
+        ARM_WHL=$(ls "$PILLOW_FUSE_DIR"/*arm64.whl)
+        X86_WHL=$(ls "$PILLOW_FUSE_DIR"/*x86_64.whl)
+        delocate-merge "$ARM_WHL" "$X86_WHL" >/dev/null
+        UNIV_WHL=$(ls "$PILLOW_FUSE_DIR"/*universal2.whl)
+        pip install --quiet --force-reinstall --no-deps "$UNIV_WHL"
+        echo "Pillow 已替换为 universal2 版本"
+    fi
+fi
+
 echo "依赖安装完成"
 
 # ─── [3/7] 生成 AppIcon.icns ──────────────────────────────────────────────────
