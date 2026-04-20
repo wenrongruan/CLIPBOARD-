@@ -331,17 +331,28 @@ class FileListWidget(QWidget):
 
     # ---------- table interactions ----------
 
+    def _has_local_copy(self, f: CloudFile) -> bool:
+        return bool(f.local_path) and os.path.exists(f.local_path)
+
+    def _can_download(self, f: CloudFile) -> bool:
+        """云端有副本且本地没有——无论 state 是 REMOTE_ONLY 还是 SYNCED 但沙盒文件丢了。"""
+        return bool(f.cloud_id) and not self._has_local_copy(f)
+
     def _on_double_click(self, index):
         f = self.model.file_at(index.row())
         if not f:
             return
-        if f.sync_state == FileSyncState.REMOTE_ONLY.value:
-            self.sync_service.enqueue_download(f.id)
-            return
-        if f.local_path and os.path.exists(f.local_path):
+        if self._has_local_copy(f):
             QDesktopServices.openUrl(QUrl.fromLocalFile(f.local_path))
-        else:
-            QMessageBox.information(self, "本地副本缺失", "请先下载到本地再打开。")
+            return
+        if self._can_download(f):
+            self.sync_service.enqueue_download(f.id)
+            QMessageBox.information(
+                self, "正在下载",
+                f"本地副本缺失，已开始下载 '{f.name}'，完成后可再次双击打开。",
+            )
+            return
+        QMessageBox.information(self, "无法打开", "本地副本缺失且云端没有可用副本。")
 
     def _on_menu(self, pos):
         idx = self.table.indexAt(pos)
@@ -353,14 +364,14 @@ class FileListWidget(QWidget):
         menu = QMenu(self)
         open_act = menu.addAction("打开")
         open_act.triggered.connect(lambda: self._on_double_click(idx))
-        if f.local_path and os.path.exists(f.local_path):
+        if self._has_local_copy(f):
             reveal_act = menu.addAction("在 Finder/资源管理器中显示")
             reveal_act.triggered.connect(
                 lambda: QDesktopServices.openUrl(
                     QUrl.fromLocalFile(str(Path(f.local_path).parent))
                 )
             )
-        if f.sync_state == FileSyncState.REMOTE_ONLY.value:
+        if self._can_download(f):
             dl_act = menu.addAction("下载到本地")
             dl_act.triggered.connect(lambda: self.sync_service.enqueue_download(f.id))
         if f.sync_state in (FileSyncState.PENDING.value, FileSyncState.ERROR.value):

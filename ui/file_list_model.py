@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QModelIndex, Qt, QSize,
+    QAbstractTableModel, QModelIndex, QRect, Qt, QSize,
 )
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QStyleOptionProgressBar, QApplication, QStyle, QStyledItemDelegate,
+    QApplication, QStyle, QStyledItemDelegate,
 )
 
 from core.file_models import CloudFile, FileSyncState
@@ -161,19 +161,31 @@ class FileListModel(QAbstractTableModel):
 class ProgressDelegate(QStyledItemDelegate):
     """状态列：同步中时画进度条，其余画文字。"""
 
+    # Why: macOS 原生 QStyle.CE_ProgressBar 在 progress=0 时会完全不渲染（没有槽也没有文字），
+    # 0% → ~100% 的整个上传过程状态列看起来就是空白。自绘槽 + 填充 + 文字保证可见。
+    _TRACK_COLOR = QColor("#3c3c3c")
+    _FILL_COLOR = QColor("#0078d4")
+
     def paint(self, painter, option, index):
         data = index.data(Qt.UserRole + 1)
         if data and isinstance(data, tuple) and data[0]:
             done, total = data[1], max(1, data[2])
-            opt = QStyleOptionProgressBar()
-            opt.rect = option.rect.adjusted(4, 6, -4, -6)
-            opt.minimum = 0
-            opt.maximum = 100
             pct = int(min(100, max(0, done * 100 / total)))
-            opt.progress = pct
-            opt.textVisible = True
-            opt.text = f"{pct}%"
-            QApplication.style().drawControl(QStyle.CE_ProgressBar, opt, painter)
+            if option.state & QStyle.State_Selected:
+                painter.fillRect(option.rect, option.palette.highlight())
+            bar_rect = option.rect.adjusted(4, 6, -4, -6)
+            painter.save()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self._TRACK_COLOR)
+            painter.drawRoundedRect(bar_rect, 3, 3)
+            if pct > 0:
+                filled = QRect(bar_rect)
+                filled.setWidth(int(bar_rect.width() * pct / 100))
+                painter.setBrush(self._FILL_COLOR)
+                painter.drawRoundedRect(filled, 3, 3)
+            painter.setPen(option.palette.text().color())
+            painter.drawText(option.rect, Qt.AlignCenter, f"{pct}%")
+            painter.restore()
         else:
             super().paint(painter, option, index)
 
