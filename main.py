@@ -533,6 +533,10 @@ class ClipboardApp:
         # 关闭持久数据库连接
         if hasattr(self.db_manager, 'close'):
             self.db_manager.close()
+        # Why: ThreadPoolExecutor 的 atexit 会 join 所有 worker；若有网络请求
+        # 卡在 socket 上，进程就退不掉（托盘已 hide 但 Python 还活着）。
+        # 给正常收尾 1.5s，超时直接 _exit 兜底。
+        QTimer.singleShot(1500, lambda: os._exit(0))
         self.app.quit()
 
     def run(self) -> int:
