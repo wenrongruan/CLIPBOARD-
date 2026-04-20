@@ -217,9 +217,14 @@ class FileListWidget(QWidget):
         f = self.repo.get_by_id(local_id)
         if f:
             self.model.upsert(f)
+        if not ok:
+            QMessageBox.warning(
+                self, "同步失败",
+                f"'{(f.name if f else local_id)}' 传输失败：\n{err or '未知错误'}",
+            )
 
     def _on_sync_error(self, msg: str, status: int):
-        logger.debug(f"文件同步错误: {msg} (status={status})")
+        logger.warning(f"文件同步错误: {msg} (status={status})")
 
     # ---------- entitlement / gate ----------
 

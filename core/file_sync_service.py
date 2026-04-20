@@ -206,12 +206,12 @@ class _FileSyncWorker(QObject):
                 )
                 # 单段不需 complete，但服务端若需要我们也发一次
                 if plan.get("complete_url") or cloud_id:
-                    try:
-                        self.cloud_api.files_complete_upload(
-                            cloud_id, [{"part_number": 1, "etag": etag}] if etag else [],
-                        )
-                    except CloudAPIError as e:
-                        logger.debug(f"单段上传 complete 返回错误（忽略）: {e}")
+                    # Why: complete 用于把服务端 upload_status 从 1 翻到 2；失败时
+                    # 服务端会记录为 file not ready，其它设备下载时会拿到 409。
+                    # 以前这里直接吞掉异常，客户端把本地翻成 SYNCED 但服务端永远不可达。
+                    self.cloud_api.files_complete_upload(
+                        cloud_id, [{"part_number": 1, "etag": etag}] if etag else [],
+                    )
             self.repo.update_meta(
                 local_id, sync_state=FileSyncState.SYNCED.value, last_error=None,
             )
@@ -500,23 +500,27 @@ class FileCloudSyncService(QObject):
     @Slot(int, bool, str)
     def _on_upload_finished(self, local_id: int, ok: bool, err: str):
         self._uploading = False
-        if ok:
-            f = self.repo.get_by_id(local_id)
-            if f:
-                self.file_updated.emit(f)
-        else:
+        # 不管成功失败，都把当前行刷一遍：失败时 worker 已把 sync_state 翻到 ERROR，
+        # UI 靠这次 file_updated 才能把"同步中"的进度条换成"错误 + 原因"。
+        f = self.repo.get_by_id(local_id)
+        if f:
+            self.file_updated.emit(f)
+        if not ok:
             self.sync_error.emit(err or "上传失败", 0)
+        # 转发给 UI：之前只偷偷把成功刷到 file_updated，失败连信号都不发，
+        # 导致 file_list_widget 里对 upload_finished 的订阅形同虚设。
+        self.upload_finished.emit(local_id, ok, err)
         QTimer.singleShot(0, self._drive_queues)
 
     @Slot(int, bool, str)
     def _on_download_finished(self, local_id: int, ok: bool, err: str):
         self._downloading = False
-        if ok:
-            f = self.repo.get_by_id(local_id)
-            if f:
-                self.file_updated.emit(f)
-        else:
+        f = self.repo.get_by_id(local_id)
+        if f:
+            self.file_updated.emit(f)
+        if not ok:
             self.sync_error.emit(err or "下载失败", 0)
+        self.download_finished.emit(local_id, ok, err)
         QTimer.singleShot(0, self._drive_queues)
 
     # ---------- cursor ----------
