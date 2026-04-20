@@ -943,8 +943,21 @@ class SettingsDialog(QDialog):
     # ========== 云端同步 ==========
 
     def _setup_cloud_tab(self, tab_widget):
+        # Why: 对话框 setFixedSize(580, 560)，而登录后的 SubscriptionWidget 包含
+        # 账户信息 + 用量 + 多个按钮，比登录表单高得多；不套 QScrollArea 的话，
+        # 首次登录后切到已登录视图，下半部分（用量/退出登录按钮）会被裁掉。
         cloud_tab = QWidget()
-        cloud_layout = QVBoxLayout(cloud_tab)
+        cloud_outer = QVBoxLayout(cloud_tab)
+        cloud_outer.setContentsMargins(0, 0, 0, 0)
+        cloud_outer.setSpacing(0)
+
+        cloud_scroll = QScrollArea(cloud_tab)
+        cloud_scroll.setWidgetResizable(True)
+        cloud_scroll.setFrameShape(QScrollArea.NoFrame)
+        cloud_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        cloud_content = QWidget()
+        cloud_layout = QVBoxLayout(cloud_content)
         cloud_layout.setSpacing(12)
         cloud_layout.setContentsMargins(20, 20, 20, 20)
 
@@ -995,12 +1008,25 @@ class SettingsDialog(QDialog):
         else:
             self._show_cloud_login_form()
 
+        cloud_scroll.setWidget(cloud_content)
+        cloud_outer.addWidget(cloud_scroll)
         tab_widget.addTab(cloud_tab, "云端同步")
+
+    def _clear_cloud_content(self):
+        """移除 _cloud_content_layout 里的全部 widget/spacer，避免登录态切换后残留旧 UI。"""
+        layout = self._cloud_content_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget() if item is not None else None
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
 
     def _show_cloud_login_form(self):
         from .cloud_login_widget import CloudLoginWidget
         from core.cloud_api import get_cloud_client
 
+        self._clear_cloud_content()
         layout = self._cloud_content_layout
 
         form_group = QGroupBox("登录云端账户")
@@ -1018,13 +1044,22 @@ class SettingsDialog(QDialog):
 
     def _show_cloud_logged_in(self):
         from .subscription_widget import SubscriptionWidget
+        self._clear_cloud_content()
         widget = SubscriptionWidget(self._cloud_api)
+        # 退出登录后把 UI 切回登录表单，避免用户以为"没反应"
+        try:
+            widget.logout_completed.connect(self._show_cloud_login_form)
+        except Exception:
+            pass
         self._cloud_content_layout.addWidget(widget)
 
     def _on_cloud_login_success(self, result: dict):
-        self._cloud_login_widget.status_label.setText("登录成功！重启应用后启用云端同步。")
+        # Why: 旧实现只更新一条"重启后生效"的文字，用户永远看不到套餐/用量，
+        # 只有重启应用才能看到 SubscriptionWidget。登录成功后直接切换到已登录视图，
+        # 用量/套餐/登出按钮立即可见；云端同步服务本身仍需重启应用才会挂载。
         if self._plugin_manager and self._cloud_api:
             self._plugin_manager.set_cloud_client(self._cloud_api)
+        self._show_cloud_logged_in()
 
     # ========== 保存 ==========
 

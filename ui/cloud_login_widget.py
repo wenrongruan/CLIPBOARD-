@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
+    QVBoxLayout,
     QFormLayout,
     QLineEdit,
     QPushButton,
@@ -44,31 +45,43 @@ class CloudLoginWidget(QWidget):
         self._setup_ui()
 
     def _setup_ui(self):
-        form_layout = QFormLayout(self)
-        form_layout.setSpacing(10)
+        # Why: 原先把 email/password/登录按钮/状态/注册链接全塞进同一个 QFormLayout，
+        # 按钮与密码框之间只有单行 spacing，视觉上挤成一团；拆成 Form（输入）+ VBox（按钮/提示）
+        # 两段后，按钮上方天然有一段留白，整体更易读。
+        root = QVBoxLayout(self)
+        root.setSpacing(14)
+        root.setContentsMargins(0, 4, 0, 0)
+
+        form_layout = QFormLayout()
+        form_layout.setSpacing(12)
         form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form_layout.setLabelAlignment(Qt.AlignLeft)
 
         self.email_edit = QLineEdit()
         self.email_edit.setPlaceholderText("your@email.com")
+        self.email_edit.setMinimumHeight(30)
         form_layout.addRow("邮箱:", self.email_edit)
 
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.Password)
         self.password_edit.setPlaceholderText("密码")
+        self.password_edit.setMinimumHeight(30)
         form_layout.addRow("密码:", self.password_edit)
+
+        root.addLayout(form_layout)
 
         self.login_btn = QPushButton("登录")
         self.login_btn.setObjectName("okButton")
         self.login_btn.setMinimumHeight(36)
         self.login_btn.clicked.connect(self._do_login)
-        form_layout.addRow("", self.login_btn)
+        root.addSpacing(2)
+        root.addWidget(self.login_btn)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
-        form_layout.addRow("", self.status_label)
+        root.addWidget(self.status_label)
 
         # 注册链接
         link_style = "color: #58a6ff; text-decoration: none;"
@@ -78,7 +91,7 @@ class CloudLoginWidget(QWidget):
         )
         register_label.setOpenExternalLinks(True)
         register_label.setStyleSheet("color: #888888; font-size: 12px;")
-        form_layout.addRow("", register_label)
+        root.addWidget(register_label)
 
         # 回车键触发登录
         self.password_edit.returnPressed.connect(self._do_login)

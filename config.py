@@ -556,8 +556,43 @@ def _retrieve_credential_safe(key: str) -> str:
         return ""
 
 
+def _read_auth_json_token(field: str) -> str:
+    """从 ~/.shared_clipboard/auth.json 读取 access_token / refresh_token。
+
+    Why: keyring 在某些环境下（例如 Windows Server、Credential Manager 被清空、
+    keyring 后端意外降级）会让"登录成功后重启应用，凭据读不回来"的问题反复出现。
+    登录流程本身会把完整 token 写到 auth.json（供 chat_image_gen 等外部工具复用），
+    这里把它当二级 fallback：只有 keyring / 加密存储都没取到时，才去 auth.json
+    捞一次；读不到就返回空串，调用方当未登录处理。
+    """
+    try:
+        from pathlib import Path
+        auth_file = Path.home() / ".shared_clipboard" / "auth.json"
+        if not auth_file.exists():
+            return ""
+        with open(auth_file, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
+        value = data.get(field) or ""
+        return value if isinstance(value, str) else ""
+    except Exception as e:
+        logger.debug(f"auth.json 读取 {field} 失败: {e}")
+        return ""
+
+
 def get_cloud_access_token() -> str:
-    return _retrieve_credential_safe("cloud_access_token")
+    token = _retrieve_credential_safe("cloud_access_token")
+    if token:
+        return token
+    # keyring/加密存储没拿到，兜底读 auth.json；命中后顺手补写回 keyring，
+    # 让下一次走常规路径即可拿到，不必每次都读文件
+    fallback = _read_auth_json_token("access_token")
+    if fallback:
+        try:
+            from utils.secure_store import store_credential
+            store_credential("cloud_access_token", fallback)
+        except Exception:
+            logger.debug("auth.json fallback 回写 keyring 失败", exc_info=True)
+    return fallback
 
 
 def set_cloud_access_token(token: str) -> None:
@@ -566,7 +601,17 @@ def set_cloud_access_token(token: str) -> None:
 
 
 def get_cloud_refresh_token() -> str:
-    return _retrieve_credential_safe("cloud_refresh_token")
+    token = _retrieve_credential_safe("cloud_refresh_token")
+    if token:
+        return token
+    fallback = _read_auth_json_token("refresh_token")
+    if fallback:
+        try:
+            from utils.secure_store import store_credential
+            store_credential("cloud_refresh_token", fallback)
+        except Exception:
+            logger.debug("auth.json fallback 回写 keyring 失败", exc_info=True)
+    return fallback
 
 
 def set_cloud_refresh_token(token: str) -> None:
