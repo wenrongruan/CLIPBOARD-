@@ -575,6 +575,7 @@ class CloudAPIClient:
         part_offset: int = 0,
         part_size: Optional[int] = None,
         progress_cb=None,
+        extra_headers: Optional[dict] = None,
     ) -> str:
         """向 OSS presigned URL 发 PUT（支持分片）。
 
@@ -618,14 +619,21 @@ class CloudAPIClient:
                         last_emit_sent = sent
                     yield data
 
+        request_headers = httpx.Headers({
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(size),
+        })
+        if extra_headers:
+            for key, value in extra_headers.items():
+                if value is None:
+                    continue
+                request_headers[str(key)] = str(value)
+
         try:
             resp = self._client.put(
                 url,
                 content=_iter(),
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "Content-Length": str(size),
-                },
+                headers=request_headers,
                 timeout=httpx.Timeout(connect=10.0, read=120.0, write=300.0, pool=300.0),
             )
         except httpx.HTTPError as e:

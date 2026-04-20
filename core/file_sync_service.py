@@ -168,14 +168,27 @@ class _FileSyncWorker(QObject):
         )
 
         mode = plan.get("upload_mode", "single")
+        upload_headers = plan.get("upload_headers")
+        if not isinstance(upload_headers, dict):
+            upload_headers = None
         try:
+            if mode == "exists":
+                self.repo.update_meta(
+                    local_id, sync_state=FileSyncState.SYNCED.value, last_error=None,
+                )
+                self.repo.clear_parts(local_id)
+                self.upload_finished.emit(local_id, True, "")
+                return
             if mode == "multipart":
                 self._do_multipart(local_id, f, plan, cloud_id)
             else:
                 url = plan.get("upload_url", "")
+                if upload_headers is None:
+                    upload_headers = {"x-oss-object-acl": "private"}
                 etag = self.cloud_api.upload_file_to_url(
                     url, f.local_path,
                     progress_cb=lambda done, total: self.upload_progress.emit(local_id, done, total),
+                    extra_headers=upload_headers,
                 )
                 # 单段不需 complete，但服务端若需要我们也发一次
                 if plan.get("complete_url") or cloud_id:
@@ -190,7 +203,8 @@ class _FileSyncWorker(QObject):
             )
             self.repo.clear_parts(local_id)
             self.upload_finished.emit(local_id, True, "")
-            self.entitlement.record_local_upload(f.size_bytes)
+            if mode != "exists":
+                self.entitlement.record_local_upload(f.size_bytes)
         except CloudAPIError as e:
             self.repo.set_sync_state(local_id, FileSyncState.ERROR.value, str(e))
             self.upload_finished.emit(local_id, False, str(e))

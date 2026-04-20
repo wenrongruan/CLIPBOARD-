@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+## File Upload Notes
+
+- `/files/upload` 单段响应若包含 `upload_headers`，客户端必须原样转发给 OSS。
+- `/files/upload` 返回 `upload_mode=exists` 时表示命中同 SHA 去重，客户端不应再次直传文件。
+
 本文件只给仓库内的 agent 使用。
 
 ## 工作约定
