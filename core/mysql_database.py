@@ -432,3 +432,45 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
                 return False, f"MySQL 连接失败: {error_msg}"
         except Exception as e:
             return False, f"MySQL 连接失败: {str(e)}"
+
+    # website/api 公共库独有的标志表。命中任意一张即判定为"这是 api 的公共库"，
+    # 客户端个人 MySQL 里不会出现这些表。
+    # Why: 历史上客户端和 api 共用过同一个库, `clipboard_items` / `cloud_files` /
+    #      `cloud_file_upload_parts` 三张同名表 schema 不一致导致 "Unknown column" 报错。
+    API_RESERVED_TABLES = ("subscriptions", "api_keys", "schema_migrations")
+
+    @staticmethod
+    def detect_api_reserved_tables(
+        host: str, port: int, user: str, password: str, database: str
+    ) -> list:
+        """
+        检测目标库是否包含 website/api 专用的标志表。
+        返回: 命中的表名列表（为空代表这是一个干净的个人库）。
+        """
+        if not PYMYSQL_AVAILABLE or not database:
+            return []
+
+        try:
+            conn = pymysql.connect(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+                charset='utf8mb4',
+                connect_timeout=5,
+            )
+        except pymysql.Error:
+            # 连接不上就别管了, 让上层的 test_connection 给出准确报错。
+            return []
+
+        try:
+            hits = []
+            with conn.cursor() as cursor:
+                for tbl in MySQLDatabaseManager.API_RESERVED_TABLES:
+                    cursor.execute("SHOW TABLES LIKE %s", (tbl,))
+                    if cursor.fetchone():
+                        hits.append(tbl)
+            return hits
+        finally:
+            conn.close()

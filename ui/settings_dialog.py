@@ -846,6 +846,21 @@ class SettingsDialog(QDialog):
             )
 
             if success:
+                # Why: 连上以后再检测目标库是否是 website/api 的公共库，防止客户端
+                #      个人 MySQL 误指到 api 公共库造成 schema 冲突。
+                reserved = MySQLDatabaseManager.detect_api_reserved_tables(
+                    host, port, user, password, database
+                )
+                if reserved:
+                    QMessageBox.critical(
+                        self,
+                        f"MySQL — {t('error')}",
+                        f"该库 '{database}' 是主程序（website/api）专用公共库，"
+                        f"不能作为客户端个人库使用。\n\n"
+                        f"检测到 api 标志表: {', '.join(reserved)}\n\n"
+                        f"请换一个库名（例如 clipboard_personal）。"
+                    )
+                    return
                 QMessageBox.information(self, f"MySQL — {t('connection_success')}", message)
             else:
                 QMessageBox.warning(self, f"MySQL — {t('connection_failed')}", message)
@@ -1037,6 +1052,22 @@ class SettingsDialog(QDialog):
                         QMessageBox.No,
                     )
                     if reply != QMessageBox.Yes:
+                        return
+                else:
+                    # Why: 连通性通过后兜底检测目标库是否是 api 公共库，防止和 Test 按钮
+                    #      绕开：即便用户没点 Test 直接按 OK，也不允许把个人库指到 api 公共库。
+                    reserved = MySQLDatabaseManager.detect_api_reserved_tables(
+                        host, port, user, password, database
+                    )
+                    if reserved:
+                        QMessageBox.critical(
+                            self,
+                            f"MySQL — {t('error')}",
+                            f"该库 '{database}' 是主程序（website/api）专用公共库，"
+                            f"不能作为客户端个人库使用。\n\n"
+                            f"检测到 api 标志表: {', '.join(reserved)}\n\n"
+                            f"请换一个库名（例如 clipboard_personal）。"
+                        )
                         return
             except ImportError:
                 QMessageBox.warning(
