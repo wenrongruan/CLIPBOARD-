@@ -28,7 +28,12 @@ from core.cloud_api import CloudAPIClient
 from core.entitlement_service import EntitlementService, Plan, MAX_SINGLE_FILE_BYTES
 from core.file_models import CloudFile, FileSyncState
 from core.file_repository import CloudFileRepository
-from core.file_storage import hash_and_copy_into_container, guess_mime, make_bookmark
+from core.file_storage import (
+    hash_and_copy_into_container,
+    guess_mime,
+    make_bookmark,
+    materialize_for_open,
+)
 
 from .file_list_model import FileListModel, ProgressDelegate
 
@@ -343,7 +348,12 @@ class FileListWidget(QWidget):
         if not f:
             return
         if self._has_local_copy(f):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(f.local_path))
+            try:
+                open_path = materialize_for_open(f.local_path, f.name)
+            except Exception as e:
+                logger.warning(f"准备打开路径失败，退回沙盒副本: {e}")
+                open_path = f.local_path
+            QDesktopServices.openUrl(QUrl.fromLocalFile(open_path))
             return
         if self._can_download(f):
             self.sync_service.enqueue_download(f.id)

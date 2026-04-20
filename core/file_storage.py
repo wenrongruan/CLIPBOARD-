@@ -11,6 +11,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import shutil
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -68,6 +69,39 @@ def hash_and_copy_into_container(
             pass
         raise
     return sha, total, dest
+
+
+def materialize_for_open(local_path: str, display_name: str) -> str:
+    """把 `<sha>.bin` 暴露成带原始扩展名的副本，供系统 Launch Services 识别。
+
+    在 `<files_local_dir>/open_view/<sha>/<原名>` 下创建硬链接（同卷），失败则复制。
+    返回可直接交给 `open` / `QDesktopServices` 的路径。
+    """
+    from config import get_files_local_dir
+    safe_name = os.path.basename(display_name or "").strip() or "file"
+    sha_stem = Path(local_path).stem or "item"
+    root = Path(get_files_local_dir()) / "open_view" / sha_stem
+    root.mkdir(parents=True, exist_ok=True)
+    dst = root / safe_name
+    try:
+        src_size = os.path.getsize(local_path)
+    except OSError:
+        src_size = -1
+    if dst.exists():
+        try:
+            if dst.stat().st_size == src_size and src_size >= 0:
+                return str(dst)
+        except OSError:
+            pass
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+    try:
+        os.link(local_path, dst)
+    except OSError:
+        shutil.copyfile(local_path, dst)
+    return str(dst)
 
 
 def remove_from_container(sha: str) -> None:
