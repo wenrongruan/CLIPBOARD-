@@ -29,11 +29,21 @@ _UPLOAD_QUEUE_MAX = 500
 _DOWNLOAD_QUEUE_MAX = 500
 
 
+def _pick_upload_headers(obj: dict) -> Optional[dict]:
+    """从 plan / part 里取 upload_headers，非 dict 时返回 None。
+
+    服务端要求客户端原样透传签名头给 OSS，否则 403 SignatureDoesNotMatch。
+    """
+    h = obj.get("upload_headers")
+    return h if isinstance(h, dict) else None
+
+
 class _FileSyncWorker(QObject):
     """后台 HTTP 工作者。所有发起请求的槽都运行在 worker 线程。"""
 
     upload_progress = Signal(int, int, int)    # (local_id, done, total)
     download_progress = Signal(int, int, int)
+    upload_started = Signal(int)               # (local_id) 用于通知 UI 状态已翻到 syncing
     upload_finished = Signal(int, bool, str)   # (local_id, success, err)
     download_finished = Signal(int, bool, str)
     pull_done = Signal(list, int)              # (list[CloudFile], max_server_id)
@@ -166,11 +176,12 @@ class _FileSyncWorker(QObject):
             sync_state=FileSyncState.SYNCING.value,
             last_error=None,
         )
+        # 通知 UI 状态已变：否则 model 里的 CloudFile 仍是 PENDING，
+        # ProgressDelegate 永远画不出"同步中"的进度条（只显示"待上传"文字）。
+        self.upload_started.emit(local_id)
 
         mode = plan.get("upload_mode", "single")
-        upload_headers = plan.get("upload_headers")
-        if not isinstance(upload_headers, dict):
-            upload_headers = None
+        upload_headers = _pick_upload_headers(plan)
         try:
             if mode == "exists":
                 self.repo.update_meta(
@@ -220,6 +231,8 @@ class _FileSyncWorker(QObject):
         already = self.repo.get_parts(local_id)  # {part_number: etag}
         part_size = int(plan.get("part_size") or self.cloud_api.FILE_PART_SIZE)
         total = f.size_bytes
+        # 签名头可能在 plan 顶层（各 part 共用）或每个 part 里，per-part 优先
+        plan_headers = _pick_upload_headers(plan)
         done_before_current = 0
         for p in parts_plan:
             pn = int(p["part_number"])
@@ -243,6 +256,7 @@ class _FileSyncWorker(QObject):
                 p["url"], f.local_path,
                 part_offset=offset, part_size=this_size,
                 progress_cb=_cb,
+                extra_headers=_pick_upload_headers(p) or plan_headers,
             )
             self.repo.record_part(local_id, pn, etag)
             done_before_current += this_size
@@ -336,6 +350,7 @@ class FileCloudSyncService(QObject):
         self._worker.pull_error.connect(self._on_pull_error)
         self._worker.upload_progress.connect(self.upload_progress)
         self._worker.download_progress.connect(self.download_progress)
+        self._worker.upload_started.connect(self._on_upload_started)
         self._worker.upload_finished.connect(self._on_upload_finished)
         self._worker.download_finished.connect(self._on_download_finished)
 
@@ -467,6 +482,12 @@ class FileCloudSyncService(QObject):
             logger.debug(f"文件拉取失败（不阻塞）: {msg}")
 
     # ---------- upload/download callbacks ----------
+
+    @Slot(int)
+    def _on_upload_started(self, local_id: int):
+        f = self.repo.get_by_id(local_id)
+        if f:
+            self.file_updated.emit(f)
 
     @Slot(int, bool, str)
     def _on_upload_finished(self, local_id: int, ok: bool, err: str):

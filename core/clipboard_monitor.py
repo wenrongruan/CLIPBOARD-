@@ -113,7 +113,15 @@ class ClipboardMonitor(QObject):
 
             # 单次快照供本 tick 全部分支使用,减少 RLock 往返
             s = settings()
-            if mime_data.hasImage() and s.save_images:
+            # Why: Finder 复制文件时剪贴板同时含 file:// URL 和文件图标预览图，
+            # 必须先识别为"文件拷贝"走文本分支，否则图标会被当成图片存入历史。
+            is_file_copy = mime_data.hasUrls() and any(
+                u.isLocalFile() for u in mime_data.urls()
+            )
+            if is_file_copy:
+                if mime_data.hasText() and s.save_text:
+                    self._handle_text(s)
+            elif mime_data.hasImage() and s.save_images:
                 self._handle_image(s)
             elif mime_data.hasText() and s.save_text:
                 self._handle_text(s)
@@ -274,7 +282,7 @@ class ClipboardMonitor(QObject):
                 try:
                     self.repository.touch_item(existing.id, now_ms)
                     existing.created_at = now_ms
-                    QTimer.singleShot(0, lambda it=existing: self.item_added.emit(it))
+                    self.item_added.emit(existing)
                 except Exception as e:
                     logger.warning(f"重复图片置顶失败: {e}")
                 return
@@ -302,12 +310,11 @@ class ClipboardMonitor(QObject):
             self._maybe_cleanup()
 
             logger.info(f"保存图片成功: {width}x{height}")
-            # 回到主线程发送信号
-            QTimer.singleShot(0, lambda: self.item_added.emit(item))
+            self.item_added.emit(item)
 
         except Exception as e:
             logger.error(f"后台处理图片失败: {e}")
-            QTimer.singleShot(0, lambda: self.error_occurred.emit(f"图片保存失败: {e}"))
+            self.error_occurred.emit(f"图片保存失败: {e}")
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
         if isinstance(item, TextClipboardItem) and item.text_content:
