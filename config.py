@@ -39,7 +39,7 @@ class SyncMode(str, Enum):
 # ============ 模块级常量 ============
 
 APP_NAME = "SharedClipboard"
-APP_VERSION = "3.2.7"
+APP_VERSION = "3.3.0"
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
