@@ -325,17 +325,22 @@ class ClipboardApp:
             self.cloud_sync_service.new_items_available.connect(
                 self._advance_sync_after_cloud
             )
-            self.cloud_sync_service.start()
+            # Why: 主窗口刚 show 时，UI 渲染、插件加载、剪贴板监听写库会抢主线程
+            # 和 SQLite 锁；首次 pull/push 及其主线程 DB 扫描会让快速操作卡顿。
+            # 延后 20 秒再启动云端同步，给 UI 留出稳定窗口。
+            QTimer.singleShot(20000, self.cloud_sync_service.start)
             # Why: 正常 _quit 流程会调 stop() 落盘；atexit 是针对 SIGTERM/
             # 未捕获异常等非正常退出的兜底，确保游标不丢失。
             atexit.register(self._atexit_persist_cloud_cursor)
 
         if self.file_sync_service:
-            try:
-                self.file_sync_service.start()
-                atexit.register(self._atexit_persist_file_cursor)
-            except Exception as e:
-                logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
+            def _start_file_sync():
+                try:
+                    self.file_sync_service.start()
+                    atexit.register(self._atexit_persist_file_cursor)
+                except Exception as e:
+                    logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
+            QTimer.singleShot(20000, _start_file_sync)
 
     def _atexit_persist_cloud_cursor(self):
         """进程退出兜底：持久化云端同步游标。"""

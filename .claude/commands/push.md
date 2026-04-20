@@ -26,6 +26,11 @@
 - 提交成功后执行 `git push`
 - 报告推送结果
 
+### 4. 部署（仅 website 子项目）
+- 如果 website 子项目本次有推送，SSH 到正式环境执行 `git pull`：
+  - `ssh vps-90 "cd /www/wwwroot/www.jlike.com/jlike.com && git pull"`
+- 报告 pull 结果
+
 ## 输出格式
 
 完成后汇总报告每个项目的操作结果：
