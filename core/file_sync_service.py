@@ -91,6 +91,9 @@ class _FileSyncWorker(QObject):
                 existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)
                 if is_deleted and existing is not None and existing.id:
                     self.repo.mark_deleted(existing.id)
+                    # mark_deleted 只改 DB；同步翻 in-memory 对象的 is_deleted，
+                    # 否则 _on_pull_done 里 `if f.is_deleted` 为假，会错把删除事件发成 file_added。
+                    existing.is_deleted = True
                     parsed.append(existing)
                     continue
                 if existing is None:
@@ -252,11 +255,16 @@ class _FileSyncWorker(QObject):
                 # emit 时传入全局进度，便于 UI 渲染整体百分比
                 self.upload_progress.emit(local_id, _snap + done_in_part, _total)
 
+            part_headers = _pick_upload_headers(p) or plan_headers
+            # OSS multipart 的 UploadPart presigned URL 通常不签 Content-Type，
+            # 客户端硬塞会导致签名不匹配 → 403；除非服务端在 upload_headers 里显式指定，否则不发。
+            part_ct = (part_headers or {}).get("Content-Type") if part_headers else None
             etag = self.cloud_api.upload_file_to_url(
                 p["url"], f.local_path,
                 part_offset=offset, part_size=this_size,
                 progress_cb=_cb,
-                extra_headers=_pick_upload_headers(p) or plan_headers,
+                extra_headers=part_headers,
+                default_content_type=part_ct,
             )
             self.repo.record_part(local_id, pn, etag)
             done_before_current += this_size

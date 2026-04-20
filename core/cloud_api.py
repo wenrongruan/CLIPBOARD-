@@ -576,11 +576,15 @@ class CloudAPIClient:
         part_size: Optional[int] = None,
         progress_cb=None,
         extra_headers: Optional[dict] = None,
+        default_content_type: Optional[str] = "application/octet-stream",
     ) -> str:
         """向 OSS presigned URL 发 PUT（支持分片）。
 
         - part_offset / part_size: multipart 切片位置；None 表示整个文件
         - progress_cb(sent_in_this_call, total_in_this_call): 每约 200 ms 或 1 MB 调用一次
+        - default_content_type: 默认加在请求头里的 Content-Type；传 None 表示不发。
+          OSS multipart UploadPart 的 presigned URL 通常不把 Content-Type 纳入签名，
+          此时客户端若硬加会导致 V4 SignatureDoesNotMatch。
         返回响应 header 的 ETag（去引号）；非 2xx 抛 CloudAPIError。
         """
         if not self._validate_storage_url(url, self._ALLOWED_UPLOAD_DOMAINS):
@@ -619,10 +623,9 @@ class CloudAPIClient:
                         last_emit_sent = sent
                     yield data
 
-        request_headers = httpx.Headers({
-            "Content-Type": "application/octet-stream",
-            "Content-Length": str(size),
-        })
+        request_headers = httpx.Headers({"Content-Length": str(size)})
+        if default_content_type:
+            request_headers["Content-Type"] = default_content_type
         if extra_headers:
             for key, value in extra_headers.items():
                 if value is None:
