@@ -148,7 +148,7 @@ class FileListWidget(QWidget):
         )
         gb_layout = QHBoxLayout(self.gate_banner)
         gb_layout.setContentsMargins(10, 6, 10, 6)
-        self.gate_banner_text = QLabel("文件云同步需要 Pro 或 Premium 订阅")
+        self.gate_banner_text = QLabel("文件云同步需要付费订阅（Basic / Super / Ultimate）")
         self.gate_banner_text.setStyleSheet("color: #fbbf24; background: transparent; border: none;")
         gb_layout.addWidget(self.gate_banner_text, 1)
         go = QPushButton("去升级")
@@ -222,8 +222,9 @@ class FileListWidget(QWidget):
         ent = self.entitlement.current()
         self.plan_label.setText({
             Plan.FREE: "套餐: 免费版",
-            Plan.PRO: "套餐: Pro",
-            Plan.PREMIUM: "套餐: Premium",
+            Plan.BASIC: "套餐: Basic",
+            Plan.SUPER: "套餐: Super",
+            Plan.ULTIMATE: "套餐: Ultimate",
         }.get(ent.plan, f"套餐: {ent.plan.value}"))
 
         quota = ent.files_quota_bytes

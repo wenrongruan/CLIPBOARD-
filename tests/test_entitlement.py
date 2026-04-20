@@ -66,13 +66,13 @@ def test_free_user_cannot_use_files(repo):
     assert _wait_for(lambda: svc.current().plan == Plan.FREE)
     ok, reason = svc.can_use_files()
     assert not ok
-    assert "Pro" in reason or "升级" in reason or "free" in reason.lower()
+    assert "付费" in reason or "升级" in reason or "Basic" in reason
 
 
-def test_pro_user_can_use_and_upload(repo):
+def test_basic_user_can_use_and_upload(repo):
     svc = EntitlementService(
         cloud_api=_FakeCloudAPI({
-            "plan": "pro",
+            "plan": "basic",
             "status": "active",
             "files": {
                 "quota_bytes": 5 * (1 << 30),
@@ -93,8 +93,8 @@ def test_pro_user_can_use_and_upload(repo):
 def test_single_file_1gb_limit(repo):
     svc = EntitlementService(
         cloud_api=_FakeCloudAPI({
-            "plan": "premium", "status": "active",
-            "files": {"quota_bytes": 100 * (1 << 30), "used_bytes": 0},
+            "plan": "ultimate", "status": "active",
+            "files": {"quota_bytes": 200 * (1 << 30), "used_bytes": 0},
         }),
         repository=repo,
     )
@@ -109,7 +109,7 @@ def test_single_file_1gb_limit(repo):
 def test_quota_exceeded_rejected(repo):
     svc = EntitlementService(
         cloud_api=_FakeCloudAPI({
-            "plan": "pro", "status": "active",
+            "plan": "basic", "status": "active",
             "files": {"quota_bytes": 100 * (1 << 20), "used_bytes": 80 * (1 << 20)},
         }),
         repository=repo,
@@ -124,23 +124,23 @@ def test_quota_exceeded_rejected(repo):
 
 def test_cache_persists_across_instances(repo):
     cloud = _FakeCloudAPI({
-        "plan": "pro", "status": "active",
-        "files": {"quota_bytes": 5 * (1 << 30), "used_bytes": 0},
+        "plan": "super", "status": "active",
+        "files": {"quota_bytes": 50 * (1 << 30), "used_bytes": 0},
     })
     svc = EntitlementService(cloud_api=cloud, repository=repo)
     svc.refresh_async()
     assert _wait_for(lambda: svc.current().files_enabled)
 
-    # 新开一个 EntitlementService，应该从 app_meta 读出 pro
+    # 新开一个 EntitlementService，应该从 app_meta 读出 super
     svc2 = EntitlementService(cloud_api=None, repository=repo)
-    assert svc2.current().plan == Plan.PRO
+    assert svc2.current().plan == Plan.SUPER
     assert svc2.current().files_enabled
 
 
 def test_invalidate_clears_cache(repo):
     svc = EntitlementService(
         cloud_api=_FakeCloudAPI({
-            "plan": "pro", "status": "active",
+            "plan": "basic", "status": "active",
             "files": {"quota_bytes": 5 * (1 << 30), "used_bytes": 0},
         }),
         repository=repo,

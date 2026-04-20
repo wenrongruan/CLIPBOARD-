@@ -145,8 +145,17 @@ class _FileSyncWorker(QObject):
             }
             plan = self.cloud_api.files_request_upload(meta)
         except CloudAPIError as e:
-            self.repo.set_sync_state(local_id, FileSyncState.ERROR.value, str(e))
-            self.upload_finished.emit(local_id, False, str(e))
+            detail = str(e)
+            debug = (e.payload or {}).get("debug")
+            sqlstate = (e.payload or {}).get("sqlstate")
+            if debug or sqlstate:
+                detail = f"{e} [debug={debug} sqlstate={sqlstate}]"
+            logger.warning(
+                "request_upload 失败 local_id=%s name=%s size=%s status=%s: %s",
+                local_id, f.name, f.size_bytes, e.status_code, detail,
+            )
+            self.repo.set_sync_state(local_id, FileSyncState.ERROR.value, detail)
+            self.upload_finished.emit(local_id, False, detail)
             return
 
         cloud_id = int(plan.get("cloud_id") or plan.get("file_id") or 0)

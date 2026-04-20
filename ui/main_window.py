@@ -244,6 +244,7 @@ class MainWindow(EdgeHiddenWindow):
 
         # --- 文件页 ---
         self.file_list_widget = None
+        self._file_page_placeholder = None
         if self.file_sync_service and self.file_repository and self.entitlement_service:
             try:
                 from .file_list_widget import FileListWidget
@@ -309,6 +310,7 @@ class MainWindow(EdgeHiddenWindow):
 
             pl.addStretch()
             self._stack.addWidget(placeholder)
+            self._file_page_placeholder = placeholder
 
         # 搜索防抖定时器
         self._search_timer = QTimer(self)
@@ -351,6 +353,74 @@ class MainWindow(EdgeHiddenWindow):
             self.file_list_widget.reload()
             if self.entitlement_service:
                 self.entitlement_service.refresh_async()
+
+    def _bootstrap_files_stack_after_login(self):
+        """未登录启动后首次登录成功：补建 entitlement + 文件仓 + 文件同步，
+        并把"我的文件"的升级占位替换成真实的 FileListWidget。"""
+        if self.cloud_api is None or not self.cloud_api.is_authenticated:
+            return
+        try:
+            if self.entitlement_service is None:
+                from core.entitlement_service import get_entitlement_service
+                self.entitlement_service = get_entitlement_service(
+                    cloud_api=self.cloud_api, repository=self.repository,
+                )
+            else:
+                self.entitlement_service.set_cloud_api(self.cloud_api)
+            self.entitlement_service.refresh_async()
+
+            if self.file_repository is None:
+                from core.file_repository import CloudFileRepository
+                self.file_repository = CloudFileRepository(self.repository.db)
+
+            if self.file_sync_service is None and settings().files_sync_enabled:
+                from core.file_sync_service import FileCloudSyncService
+                self.file_sync_service = FileCloudSyncService(
+                    self.file_repository,
+                    self.cloud_api,
+                    self.entitlement_service,
+                    self.repository,
+                )
+                try:
+                    self.file_sync_service.start()
+                except Exception as e:
+                    logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
+        except Exception as e:
+            logger.warning(f"登录后补建文件同步栈失败: {e}", exc_info=True)
+            return
+
+        if self.file_list_widget is not None:
+            # 已经是真实 widget，仅刷新
+            self.file_list_widget.reload()
+            return
+
+        if not (self.file_sync_service and self.file_repository and self.entitlement_service):
+            return
+
+        try:
+            from .file_list_widget import FileListWidget
+            widget = FileListWidget(
+                self.file_repository,
+                self.file_sync_service,
+                self.entitlement_service,
+                self.cloud_api,
+            )
+        except Exception as e:
+            logger.warning(f"初始化文件页失败: {e}", exc_info=True)
+            return
+
+        # 用真实 widget 替换占位
+        if self._file_page_placeholder is not None:
+            idx = self._stack.indexOf(self._file_page_placeholder)
+            if idx >= 0:
+                self._stack.removeWidget(self._file_page_placeholder)
+            self._file_page_placeholder.deleteLater()
+            self._file_page_placeholder = None
+        self.file_list_widget = widget
+        self._stack.addWidget(widget)
+        # 若用户当前就在文件页，切回去以显示新 widget
+        if self._stack.currentIndex() == 1:
+            self._stack.setCurrentIndex(1)
 
     def _toggle_starred_filter(self):
         self._starred_only = not self._starred_only
@@ -706,6 +776,9 @@ class MainWindow(EdgeHiddenWindow):
             self.cloud_api = dialog_cloud_api
             if self.plugin_manager:
                 self.plugin_manager.set_cloud_client(self.cloud_api)
+            # 未登录启动的场景：登录成功后要立刻拉起付费闸和文件同步栈，
+            # 否则"我的文件"会一直停在升级引导占位上
+            self._bootstrap_files_stack_after_login()
         if result == QDialog.Accepted:
             dlg_settings = dialog.get_settings()
             need_restart = False

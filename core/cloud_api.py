@@ -303,14 +303,22 @@ class CloudAPIClient:
         # 处理错误响应
         if response.status_code >= 400:
             error_data: dict = {}
+            body_preview = ""
             try:
                 error_data = response.json() or {}
                 message = error_data.get("error", error_data.get("detail", f"服务器错误 ({response.status_code})"))
             except Exception:
-                body_preview = response.text[:200] if response.text else ""
+                body_preview = response.text[:500] if response.text else ""
                 message = f"服务器错误 ({response.status_code})"
-                if body_preview:
-                    logger.debug(f"错误响应体: {body_preview}")
+            # 5xx 或服务端带 debug/sqlstate 时常态打 warning，避免用户只看到"internal error"却无上下文
+            if response.status_code >= 500 or error_data.get("debug") or error_data.get("sqlstate"):
+                logger.warning(
+                    "云端 %s %s 失败: status=%s error=%r debug=%r sqlstate=%r body=%r",
+                    method, path, response.status_code, message,
+                    error_data.get("debug"), error_data.get("sqlstate"), body_preview,
+                )
+            elif body_preview:
+                logger.debug(f"错误响应体: {body_preview}")
             raise CloudAPIError(message, response.status_code, error_data)
 
         return response

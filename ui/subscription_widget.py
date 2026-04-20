@@ -223,7 +223,12 @@ class SubscriptionWidget(QWidget):
         try:
             from core.entitlement_service import get_entitlement_service, Plan
             ent = get_entitlement_service().current()
-            plan_name_map = {Plan.FREE: "免费版", Plan.PRO: "专业版 (Pro)", Plan.PREMIUM: "高级版 (Premium)"}
+            plan_name_map = {
+                Plan.FREE: "免费版",
+                Plan.BASIC: "Basic",
+                Plan.SUPER: "Super",
+                Plan.ULTIMATE: "Ultimate",
+            }
             self.plan_label.setText(plan_name_map.get(ent.plan, str(ent.plan.value)))
             status_map = {"active": "有效", "expired": "已过期", "cancelled": "已取消",
                            "trial": "试用中", "inactive": "未激活"}
@@ -235,7 +240,7 @@ class SubscriptionWidget(QWidget):
                 pct = min(100, int(ent.files_used_bytes * 100 / max(1, ent.files_quota_bytes)))
                 self.files_usage_progress.setValue(pct)
             else:
-                self.files_count_label.setText("仅 Pro / Premium 可用")
+                self.files_count_label.setText("仅 Basic / Super / Ultimate 可用")
         except Exception as e:
             logger.debug(f"本地 entitlement 预填失败: {e}")
 
@@ -263,7 +268,12 @@ class SubscriptionWidget(QWidget):
                 max_items = plan.get("max_items", 30)
                 max_devices = plan.get("max_devices", 2)
             else:
-                plan_name_map = {"free": "免费版", "pro": "专业版", "premium": "高级版"}
+                plan_name_map = {
+                    "free": "免费版",
+                    "basic": "Basic",
+                    "super": "Super",
+                    "ultimate": "Ultimate",
+                }
                 plan_name = plan_name_map.get(plan, str(plan))
                 max_items = sub.get("max_records", 30)
                 max_devices = sub.get("max_devices", 2)
@@ -336,7 +346,7 @@ class SubscriptionWidget(QWidget):
                     f"QProgressBar::chunk{{background-color:{color};border-radius:4px;}}"
                 )
             else:
-                self.files_count_label.setText("仅 Pro / Premium 可用")
+                self.files_count_label.setText("仅 Basic / Super / Ultimate 可用")
                 self.files_usage_progress.setValue(0)
 
         except CloudAPIError as e:

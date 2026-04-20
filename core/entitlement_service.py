@@ -8,6 +8,7 @@
 重要约定：
 - 本地缓存可被篡改，但不影响服务端强校验（上传到 /files/request-upload 时会二次确认）
 - plan == 'free' 或 status != 'active' → files_enabled = False
+- 档位命名与云端 website/api/config.php 对齐：free / basic / super / ultimate
 - 文件单体上限硬编码 1 GB，与服务端保持一致
 """
 
@@ -30,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 # 客户端硬上限：1 GB/单文件。服务端也会校验，这里只是为了尽早拦截。
 MAX_SINGLE_FILE_BYTES = 1 << 30
-_DEFAULT_PRO_QUOTA_BYTES = 5 * (1 << 30)        # 5 GB（仅当云端没下发时兜底）
-_DEFAULT_PREMIUM_QUOTA_BYTES = 50 * (1 << 30)   # 50 GB 兜底
+# 配额兜底值，仅在云端响应缺少 files.quota_bytes 时使用。权威值见 website/api/config.php 的 'plans'。
+_DEFAULT_BASIC_QUOTA_BYTES = 5 * (1 << 30)         # 5 GB
+_DEFAULT_SUPER_QUOTA_BYTES = 50 * (1 << 30)        # 50 GB
+_DEFAULT_ULTIMATE_QUOTA_BYTES = 200 * (1 << 30)    # 200 GB
 _CACHE_TTL_SEC = 60 * 60                         # 60 min
 _OFFLINE_GRACE_SEC = 7 * 24 * 60 * 60            # 7 天
 _APP_META_KEY = "entitlement_cache"
@@ -39,11 +42,14 @@ _APP_META_KEY = "entitlement_cache"
 
 class Plan(str, Enum):
     FREE = "free"
-    PRO = "pro"
-    PREMIUM = "premium"
+    BASIC = "basic"
+    SUPER = "super"
+    ULTIMATE = "ultimate"
 
     @classmethod
     def parse(cls, raw) -> "Plan":
+        # 未知字符串（含老缓存里的 'pro'/'premium'）兜底为 FREE；下一次 refresh_async
+        # 从服务端拉到正确值后会自动自愈。
         if isinstance(raw, dict):
             raw = raw.get("tier") or raw.get("name") or raw.get("code") or "free"
         try:
@@ -69,10 +75,12 @@ class Entitlement:
 
 
 def _default_quota_for(plan: Plan) -> int:
-    if plan == Plan.PRO:
-        return _DEFAULT_PRO_QUOTA_BYTES
-    if plan == Plan.PREMIUM:
-        return _DEFAULT_PREMIUM_QUOTA_BYTES
+    if plan == Plan.BASIC:
+        return _DEFAULT_BASIC_QUOTA_BYTES
+    if plan == Plan.SUPER:
+        return _DEFAULT_SUPER_QUOTA_BYTES
+    if plan == Plan.ULTIMATE:
+        return _DEFAULT_ULTIMATE_QUOTA_BYTES
     return 0
 
 
@@ -104,7 +112,7 @@ class EntitlementService(QObject):
         e = self.current()
         if not e.files_enabled:
             if e.plan == Plan.FREE:
-                return False, "文件云同步需要 Pro 或 Premium 订阅，请先升级套餐。"
+                return False, "文件云同步需要付费订阅（Basic / Super / Ultimate），请先升级套餐。"
             if e.status != "active":
                 return False, f"订阅当前状态为 {e.status}，无法使用文件云同步。"
             return False, "当前套餐暂不支持文件云同步。"
