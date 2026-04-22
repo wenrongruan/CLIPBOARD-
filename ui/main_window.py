@@ -175,10 +175,10 @@ class MainWindow(EdgeHiddenWindow):
 
         layout.addLayout(header_layout)
 
-        # Tab 切换：历史 / 我的文件
+        # Tab 切换：剪贴板 / 我的文件
         tab_row = QHBoxLayout()
-        tab_row.setSpacing(4)
-        self.history_tab_btn = QPushButton("历史")
+        tab_row.setSpacing(12)
+        self.history_tab_btn = QPushButton("剪贴板")
         self.history_tab_btn.setObjectName("tabBtn")
         self.history_tab_btn.setCheckable(True)
         self.history_tab_btn.setChecked(True)

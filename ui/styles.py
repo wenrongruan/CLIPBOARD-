@@ -89,6 +89,32 @@ QPushButton:disabled {
     color: #666666;
 }
 
+QPushButton#tabBtn {
+    background-color: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 6px 2px 8px 2px;
+    color: #8f8f8f;
+    font-weight: 600;
+}
+
+QPushButton#tabBtn:hover {
+    background-color: transparent;
+    border-color: transparent;
+    color: #d8d8d8;
+}
+
+QPushButton#tabBtn:pressed {
+    background-color: transparent;
+}
+
+QPushButton#tabBtn:checked {
+    background-color: transparent;
+    color: #ffffff;
+    border-bottom: 2px solid #4fc3f7;
+}
+
 QListWidget {
     background-color: #2b2b2b;
     border: none;
@@ -322,6 +348,47 @@ QComboBox QAbstractItemView {
     border: 1px solid #555555;
     color: #ffffff;
     selection-background-color: #0078d4;
+}
+
+QTableView {
+    background-color: #2f2f2f;
+    alternate-background-color: #343434;
+    border: 1px solid #555555;
+    gridline-color: #4a4a4a;
+    color: #ffffff;
+    selection-background-color: rgba(0, 120, 212, 0.28);
+    selection-color: #ffffff;
+}
+
+QTableView::item {
+    padding: 6px 8px;
+    border: none;
+}
+
+QTableView::item:selected {
+    background-color: rgba(0, 120, 212, 0.28);
+    color: #ffffff;
+}
+
+QHeaderView::section {
+    background-color: #363636;
+    color: #dcdcdc;
+    padding: 6px 8px;
+    border: none;
+    border-right: 1px solid #4a4a4a;
+    border-bottom: 1px solid #555555;
+    font-weight: 600;
+}
+
+QHeaderView::section:hover {
+    background-color: #404040;
+}
+
+QTableCornerButton::section {
+    background-color: #363636;
+    border: none;
+    border-right: 1px solid #4a4a4a;
+    border-bottom: 1px solid #555555;
 }
 
 QGroupBox {
