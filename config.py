@@ -162,6 +162,9 @@ class AppSettings:
     files_auto_download: bool = False
     files_max_autodownload_mb: int = 200
 
+    # 来源 App 捕获：是否把窗口标题写入 source_title 字段（隐私考虑，默认关）
+    capture_source_title: bool = False
+
 
 # ============ 序列化 ============
 
@@ -222,6 +225,7 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         files_sync_enabled=bool(data.get("files_sync_enabled", True)),
         files_auto_download=bool(data.get("files_auto_download", False)),
         files_max_autodownload_mb=int(data.get("files_max_autodownload_mb", 200)),
+        capture_source_title=bool(data.get("capture_source_title", False)),
     )
     return snapshot, extras
 
@@ -261,6 +265,7 @@ def _snapshot_to_dict(s: AppSettings, extras: dict) -> dict:
         "files_sync_enabled": s.files_sync_enabled,
         "files_auto_download": s.files_auto_download,
         "files_max_autodownload_mb": s.files_max_autodownload_mb,
+        "capture_source_title": s.capture_source_title,
     })
     return d
 

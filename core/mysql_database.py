@@ -25,7 +25,7 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
     placeholder = "%s"
     is_mysql = True
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -218,6 +218,39 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
                 )
                 conn.commit()
                 logger.info("MySQL Schema 已迁移到 v4")
+
+            if current_version < 5:
+                # v4 → v5: v3.4 新增 space_id / source_app / source_title。
+                # Why: ClipboardRepository._SELECT_FIELDS 默认读这三列，若库侧缺列，
+                # UI 首次加载就会炸 1054 Unknown column。
+                v5_columns = [
+                    ("space_id", "VARCHAR(64) DEFAULT NULL"),
+                    ("source_app", "VARCHAR(255) DEFAULT NULL"),
+                    ("source_title", "TEXT DEFAULT NULL"),
+                ]
+                for col_name, col_type in v5_columns:
+                    try:
+                        cursor.execute(
+                            f"ALTER TABLE clipboard_items ADD COLUMN {col_name} {col_type}"
+                        )
+                    except pymysql.Error as e:
+                        if "Duplicate column name" not in str(e) and "1060" not in str(e):
+                            raise
+                try:
+                    cursor.execute(
+                        "CREATE INDEX idx_clipboard_items_space "
+                        "ON clipboard_items(space_id)"
+                    )
+                except pymysql.Error as e:
+                    if "Duplicate key name" not in str(e) and "1061" not in str(e):
+                        raise
+
+                cursor.execute(
+                    "INSERT INTO app_meta (`key`, `value`) VALUES ('schema_version', '5') "
+                    "ON DUPLICATE KEY UPDATE `value` = '5'"
+                )
+                conn.commit()
+                logger.info("MySQL Schema 已迁移到 v5（新增 space_id / source_app / source_title）")
 
     def _create_connection(self) -> "pymysql.connections.Connection":
         """创建新的 MySQL 连接"""

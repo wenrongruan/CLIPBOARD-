@@ -96,14 +96,16 @@ class TestSearch:
         repo.add_item(_make_item("python programming", hash_suffix="1"))
         repo.add_item(_make_item("java code", hash_suffix="2"))
 
-        items, total = repo.search("python")
+        # v3.4: search() 签名改为 (QuerySpec, ...) -> list；
+        # 老 (keyword) -> (items, total) 契约挪到 search_by_keyword
+        items, total = repo.search_by_keyword("python")
         assert total >= 1
         assert any("python" in it.text_content for it in items)
 
     def test_search_no_match(self, repo):
         repo.add_item(_make_item("hello world", hash_suffix="1"))
 
-        items, total = repo.search("zzzznotfound")
+        items, total = repo.search_by_keyword("zzzznotfound")
         assert total == 0
 
 

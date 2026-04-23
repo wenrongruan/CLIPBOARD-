@@ -15,11 +15,33 @@ from PySide6.QtWidgets import QApplication
 
 from .models import ClipboardItem, TextClipboardItem, ImageClipboardItem
 from .repository import ClipboardRepository
+from .source_app import get_current_source_app
 from config import settings, THUMBNAIL_SIZE
 from utils.hash_utils import compute_content_hash
 from utils.image_utils import create_thumbnail, image_to_bytes
 
 logger = logging.getLogger(__name__)
+
+
+def _capture_source(capture_title: bool, seen_failures: set) -> tuple:
+    """捕获当前前台应用，返回 (source_app, source_title)。
+
+    失败时降级：首次失败记 WARNING，同类异常之后降级 DEBUG，避免日志刷屏。
+    `seen_failures` 由 caller 持有，跨调用累积已见异常类型。
+    """
+    try:
+        src = get_current_source_app()
+    except Exception as e:
+        exc_type = type(e).__name__
+        if exc_type not in seen_failures:
+            seen_failures.add(exc_type)
+            logger.warning(f"捕获来源 App 失败（首次 {exc_type}）: {e}")
+        else:
+            logger.debug(f"捕获来源 App 再次失败 ({exc_type}): {e}")
+        return "", ""
+    source_app_value = src.bundle_id or src.app_name or ""
+    source_title_value = src.window_title if capture_title else ""
+    return source_app_value, source_title_value
 
 
 class ClipboardMonitor(QObject):
@@ -45,6 +67,8 @@ class ClipboardMonitor(QObject):
         self._consecutive_failures = 0
         self._unhealthy_notified = False
         self._signal_connected = False
+        # 记录已见过的 source_app 异常类型，避免首次后刷屏 WARNING
+        self._source_app_seen_failures: set = set()
 
         # 使用轮询定时器代替 dataChanged 信号（Windows 上更可靠）
         self._poll_timer = QTimer(self)
@@ -195,12 +219,19 @@ class ClipboardMonitor(QObject):
                 logger.warning(f"重复文本置顶失败: {e}")
             return
 
+        source_app_value, source_title_value = _capture_source(
+            getattr(s, "capture_source_title", False),
+            self._source_app_seen_failures,
+        )
+
         item = TextClipboardItem(
             text_content=text,
             content_hash=content_hash,
             device_id=s.device_id,
             device_name=s.device_name,
             created_at=now_ms,
+            source_app=source_app_value,
+            source_title=source_title_value,
         )
         item.preview = item.get_display_preview()
 
@@ -252,12 +283,21 @@ class ClipboardMonitor(QObject):
                 for row in range(height)
             )
 
-        logger.info(f"检测到新图片: {width}x{height}，提交后台处理")
-        self._image_executor.submit(
-            self._process_image_background, raw_bytes, width, height, s
+        # Why: 在主线程（信号触发点）捕获来源 App，保证拿到的是"复制瞬间"的前台窗口，
+        # 而不是后台线程真正处理到这张图时的前台窗口。
+        source_app_value, source_title_value = _capture_source(
+            getattr(s, "capture_source_title", False),
+            self._source_app_seen_failures,
         )
 
-    def _process_image_background(self, raw_bytes: bytes, width: int, height: int, s):
+        logger.info(f"检测到新图片: {width}x{height}，提交后台处理")
+        self._image_executor.submit(
+            self._process_image_background, raw_bytes, width, height, s,
+            source_app_value, source_title_value,
+        )
+
+    def _process_image_background(self, raw_bytes: bytes, width: int, height: int, s,
+                                   source_app_value: str = "", source_title_value: str = ""):
         """后台线程：PNG 编码、缩略图生成、数据库写入"""
         try:
             # 延迟导入 PIL，缩短冷启动时间
@@ -302,6 +342,8 @@ class ClipboardMonitor(QObject):
                 device_id=s.device_id,
                 device_name=s.device_name,
                 created_at=int(time.time() * 1000),
+                source_app=source_app_value,
+                source_title=source_title_value,
             )
 
             item_id = self.repository.add_item(item)

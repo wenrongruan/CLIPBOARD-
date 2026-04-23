@@ -144,6 +144,28 @@ class DatabaseManager(AbstractDatabaseManager):
 
             conn.commit()
 
+        # v3.4+：执行基于文件的迁移（sql/migrations/*.sql，按字典序）。
+        # 放在 _init_database 末尾保证主表与 app_meta 已就绪；MySQL 方言迁移目录
+        # 尚未落地，本次仅在 SQLite 上生效。
+        self._run_file_migrations()
+
+    def _run_file_migrations(self) -> None:
+        """执行 sql/migrations 下的幂等迁移。失败不致命（记日志后继续）。"""
+        try:
+            from core.db_migrations import run_migrations
+            migrations_dir = Path(__file__).parent.parent / "sql" / "migrations"
+            if not migrations_dir.exists():
+                return
+            with self.get_connection() as conn:
+                run_migrations(
+                    conn,
+                    migrations_dir,
+                    dialect="sqlite",
+                    db_path=Path(self.db_path),
+                )
+        except Exception:
+            logger.exception("执行文件迁移失败（SQLite）")
+
     def _migrate_schema(self, conn):
         """执行 Schema 迁移"""
         # 检查当前版本

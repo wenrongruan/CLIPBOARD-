@@ -79,8 +79,15 @@ class ClipboardItemWidget(QWidget):
             preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             info_layout.addWidget(preview_label)
 
+            meta_row = QHBoxLayout()
+            meta_row.setSpacing(4)
+            meta_row.setContentsMargins(0, 0, 0, 0)
+            src_icon = self._make_source_icon_label()
+            if src_icon is not None:
+                meta_row.addWidget(src_icon)
             meta_label = self._make_meta_label()
-            info_layout.addWidget(meta_label)
+            meta_row.addWidget(meta_label, 1)
+            info_layout.addLayout(meta_row)
 
             info_layout.addStretch()
             layout.addLayout(info_layout, 1)
@@ -99,8 +106,15 @@ class ClipboardItemWidget(QWidget):
 
             content_layout.addStretch()
 
+            meta_row = QHBoxLayout()
+            meta_row.setSpacing(4)
+            meta_row.setContentsMargins(0, 0, 0, 0)
+            src_icon = self._make_source_icon_label()
+            if src_icon is not None:
+                meta_row.addWidget(src_icon)
             meta_label = self._make_meta_label()
-            content_layout.addWidget(meta_label)
+            meta_row.addWidget(meta_label, 1)
+            content_layout.addLayout(meta_row)
 
             layout.addLayout(content_layout, 1)
 
@@ -158,6 +172,28 @@ class ClipboardItemWidget(QWidget):
         # 若保留默认 Preferred policy 会撑大行宽, 把右侧 28px 按钮列挤出可视区。
         label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         return label
+
+    def _make_source_icon_label(self):
+        """若 item 有 source_app，返回一个 16x16 的 QLabel；否则返回 None。
+        图标从 SourceAppIconCache 懒加载，失败返回 None（不撑布局）。"""
+        source_app = getattr(self.item, "source_app", "") or ""
+        if not source_app:
+            return None
+        try:
+            from .source_app_icons import SourceAppIconCache
+            icon = SourceAppIconCache.instance().get(source_app, "")
+            if icon is None or icon.isNull():
+                return None
+            pix = icon.pixmap(16, 16)
+            if pix.isNull():
+                return None
+            lbl = QLabel()
+            lbl.setFixedSize(16, 16)
+            lbl.setPixmap(pix)
+            lbl.setToolTip(source_app)
+            return lbl
+        except Exception:
+            return None
 
     @staticmethod
     def _get_multiline_preview(item: ClipboardItem, max_lines: int = 3, max_chars: int = 120) -> str:

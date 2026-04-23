@@ -296,6 +296,24 @@ class ClipboardApp:
         self.plugin_manager.load_plugins()
         logger.debug(f"[startup] PluginManager.load_plugins 用时 {time.time()-_t:.3f}s")
 
+        # v3.4: 空间 / 标签 / 分享服务
+        self.space_service = None
+        self.tag_service = None
+        self.share_service = None
+        try:
+            from core.space_service import SpaceService
+            from core.tag_service import TagService
+            from core.share_service import ShareService
+            self.space_service = SpaceService(self.repository)
+            self.tag_service = TagService(self.repository)
+            # ShareService 用 factory 懒取 cloud_api（登录状态动态）
+            self.share_service = ShareService(
+                self.repository,
+                cloud_api_factory=lambda: self.cloud_api,
+            )
+        except Exception as svc_err:
+            logger.warning(f"v3.4 服务初始化失败（侧栏/分享功能将降级）: {svc_err}", exc_info=True)
+
         _t = time.time()
         self.main_window = MainWindow(
             self.repository,
@@ -307,6 +325,9 @@ class ClipboardApp:
             file_sync_service=self.file_sync_service,
             file_repository=self.file_repository,
             entitlement_service=self.entitlement_service,
+            space_service=self.space_service,
+            tag_service=self.tag_service,
+            share_service=self.share_service,
         )
         logger.debug(f"[startup] MainWindow(__init__) 用时 {time.time()-_t:.3f}s, 累计 t=+{time.time()-_STARTUP_T0:.2f}s")
 

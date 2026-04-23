@@ -26,12 +26,15 @@ class CloudSyncState(Enum):
 
 class _SyncWorker(QObject):
     """在工作线程中执行同步 HTTP 请求，避免阻塞主线程"""
-    pull_done = Signal(list, int)   # (new_items, max_server_id)
-    pull_error = Signal(str, int)   # (message, status_code)
-    push_done = Signal(int)         # uploaded_count
-    push_error = Signal(str, int, list)  # (message, status_code, failed_batch)
+    # space_id=None 表示个人空间；带 str 才是团队空间。
+    # 信号携带 space_key (None 或 str) 便于主线程按空间分别维护游标。
+    pull_done = Signal(object, list, int)   # (space_key, new_items, max_server_id)
+    pull_error = Signal(object, str, int)   # (space_key, message, status_code)
+    push_done = Signal(object, int)         # (space_key, uploaded_count)
+    push_error = Signal(object, str, int, list)  # (space_key, message, status_code, failed_batch)
     quota_warning = Signal(int, int)
     device_registered = Signal()    # 设备注册成功
+    spaces_pulled = Signal(list)    # list_spaces 成功后发射 [dict, ...]
 
     # app_meta 表中存放永久放弃同步的 server_id 集合（JSON list）
     # Why: 进程重启后若某 server_id 的图片下载始终失败，无持久化时会从该 id
@@ -52,11 +55,18 @@ class _SyncWorker(QObject):
         self._skip_counter_loaded: bool = False
         self._skip_counter_dirty: bool = False
 
-    @Slot(int)
-    def do_pull(self, last_sync_id: int):
-        """从云端拉取新记录（在工作线程中执行）"""
+    @Slot(object, int)
+    def do_pull(self, space_key, last_sync_id: int):
+        """从云端拉取新记录（在工作线程中执行）
+
+        space_key: None 表示个人空间；str 表示团队空间 id，用于过滤 /clipboard/sync
+        并在信号回传时区分落库到哪条游标。
+        """
         try:
-            data = self.cloud_api.sync(since_id=last_sync_id, device_id=self._device_id)
+            data = self.cloud_api.sync(
+                since_id=last_sync_id, device_id=self._device_id,
+                space_id=space_key if space_key else None,
+            )
             items_data = data.get("items", [])
 
             # 第一遍：解析所有条目，收集 content_hash
@@ -84,6 +94,8 @@ class _SyncWorker(QObject):
             max_server_id = last_sync_id
 
             for server_id, item in parsed_items:
+                # 记录来源 space：服务端会在 item 中回填 space_id（None=个人）。
+                # 以服务端值为准；fallback 到当前同步的 space_key 保持一致性。
                 existing = existing_map.get(item.content_hash)
                 if existing is None:
                     item_id = self.repository.add_item(item)
@@ -113,17 +125,20 @@ class _SyncWorker(QObject):
             if self._skip_counter_dirty:
                 self._save_skip_counter()
                 self._skip_counter_dirty = False
-            self.pull_done.emit(new_items, max_server_id)
+            self.pull_done.emit(space_key, new_items, max_server_id)
 
         except CloudAPIError as e:
-            self.pull_error.emit(str(e), e.status_code)
+            self.pull_error.emit(space_key, str(e), e.status_code)
         except Exception as e:
-            logger.error(f"云端同步检查失败: {e}")
-            self.pull_error.emit(str(e), 0)
+            logger.error(f"云端同步检查失败 (space={space_key}): {e}")
+            self.pull_error.emit(space_key, str(e), 0)
 
-    @Slot(list)
-    def do_push(self, batch: list):
-        """将本地条目推送到云端（在工作线程中执行）"""
+    @Slot(object, list)
+    def do_push(self, space_key, batch: list):
+        """将本地条目推送到云端（在工作线程中执行）
+
+        batch 内的条目已按同一 space 分组，space_key 会作为 item.space_id 透传。
+        """
         try:
             # 转换为上传格式(根据子类决定 text_content 字段)
             upload_items = []
@@ -139,6 +154,20 @@ class _SyncWorker(QObject):
                     "created_at": item.created_at,
                     "is_starred": item.is_starred,
                 }
+                # v3.4：携带 space/来源 App/窗口标题。
+                # space_id 以 item 自身为准；None 表示个人空间，服务端按缺字段处理。
+                if getattr(item, "space_id", None):
+                    item_dict["space_id"] = item.space_id
+                elif space_key:
+                    # batch 已按 space_key 分组；item 本身没带就用分组键兜底
+                    item_dict["space_id"] = space_key
+                # 空字符串不发，减少 payload（服务端 coalesce 为 NULL）
+                src_app = getattr(item, "source_app", "") or ""
+                if src_app:
+                    item_dict["source_app"] = src_app
+                src_title = getattr(item, "source_title", "") or ""
+                if src_title:
+                    item_dict["source_title"] = src_title
                 upload_items.append(item_dict)
                 if isinstance(item, ImageClipboardItem) and item.image_data:
                     image_items.append(item)
@@ -166,13 +195,27 @@ class _SyncWorker(QObject):
                     self._upload_image_for_item(item, server_id)
 
             uploaded_count = len(server_items) if server_items else len(batch)
-            self.push_done.emit(uploaded_count)
+            self.push_done.emit(space_key, uploaded_count)
 
         except CloudAPIError as e:
-            self.push_error.emit(str(e), e.status_code, batch)
+            self.push_error.emit(space_key, str(e), e.status_code, batch)
         except Exception as e:
-            logger.error(f"云端推送异常: {e}")
-            self.push_error.emit(str(e), 0, batch)
+            logger.error(f"云端推送异常 (space={space_key}): {e}")
+            self.push_error.emit(space_key, str(e), 0, batch)
+
+    @Slot()
+    def do_list_spaces(self):
+        """拉取参与的 space 列表（在工作线程中执行）。
+        失败静默：外层会 fallback 到只同步个人空间。"""
+        try:
+            spaces = self.cloud_api.list_spaces()
+            self.spaces_pulled.emit(spaces if isinstance(spaces, list) else [])
+        except CloudAPIError as e:
+            logger.info(f"list_spaces 失败（降级为仅同步个人空间）: {e}")
+            self.spaces_pulled.emit([])
+        except Exception as e:
+            logger.warning(f"list_spaces 异常: {e}")
+            self.spaces_pulled.emit([])
 
     @Slot()
     def _do_register_device(self):
@@ -355,6 +398,15 @@ class _SyncWorker(QObject):
                     "created_at": item.created_at,
                     "is_starred": item.is_starred,
                 }
+                # v3.4：同样透传 space / source_app / source_title
+                if getattr(item, "space_id", None):
+                    item_dict["space_id"] = item.space_id
+                src_app = getattr(item, "source_app", "") or ""
+                if src_app:
+                    item_dict["source_app"] = src_app
+                src_title = getattr(item, "source_title", "") or ""
+                if src_title:
+                    item_dict["source_title"] = src_title
                 upload_items.append(item_dict)
                 if isinstance(item, ImageClipboardItem) and item.image_data:
                     image_items.append(item)
@@ -402,10 +454,14 @@ class CloudSyncService(QObject):
     upload_completed = Signal(int)       # 上传成功的 item 数量
     quota_warning = Signal(int, int)     # (当前已用, 最大额度)
     queue_overflow = Signal(int)         # 离线队列溢出，参数为被丢弃的条目 id
+    # v3.4：space 维度
+    spaces_pulled = Signal(list)         # list_spaces 成功后发射，便于 UI / SpaceService 更新
+    space_sync_progress = Signal(object, int, int)  # (space_key, current, total)
 
     # 内部信号：跨线程调度 worker 方法（避免 Q_ARG 不支持 list 类型）
-    _trigger_push = Signal(list)
-    _trigger_pull = Signal(int)
+    _trigger_push = Signal(object, list)   # (space_key, batch)
+    _trigger_pull = Signal(object, int)    # (space_key, last_sync_id)
+    _trigger_list_spaces = Signal()
 
     # 自适应轮询参数（与 SyncService 一致）
     _MIN_INTERVAL_MS = 1000
@@ -418,28 +474,49 @@ class CloudSyncService(QObject):
     # 数据库扫描未同步条目的最小间隔（秒）
     _DB_SCAN_INTERVAL_SEC = 10
 
-    # app_meta 中存放云同步游标的键名
+    # app_meta 中存放云同步游标的键名（兼容旧版本：无 space_id 的单一游标）
     _META_CURSOR_KEY = "cloud_last_sync_id"
+    # v3.4：按 space 区分的游标前缀；key 形如 cloud_sync_cursor:personal / cloud_sync_cursor:<uuid>
+    _META_CURSOR_KEY_PREFIX = "cloud_sync_cursor:"
+    # 持久化参与的 space 列表（用于无网络启动时也能按上次的 space 集合同步）
+    _META_SPACES_KEY = "cloud_sync_spaces"
 
     # 游标节流落盘阈值：每 N 次推进或经过 SEC 秒才写一次，避免热路径频繁 DB 写。
     # 崩溃场景最多丢 N 条 / SEC 秒的进度，由 stop() 与 atexit 兜底收敛。
     _PERSIST_EVERY_N = 10
     _PERSIST_EVERY_SEC = 120.0
 
-    def __init__(self, repository: ClipboardRepository, cloud_api: CloudAPIClient, parent=None):
+    def __init__(
+        self,
+        repository: ClipboardRepository,
+        cloud_api: CloudAPIClient,
+        entitlement_service=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.repository = repository
         self.cloud_api = cloud_api
+        self._entitlement_service = entitlement_service  # 可选，用于降级策略判断
         s = settings()
         self._device_id = s.device_id
         self._device_name = s.device_name
         # Why: 游标改为优先从 app_meta 读（轻量 key-value 落盘），兼容旧版本
         # 时 fallback 到 settings.json；读取到任意一处有值就用，用后不再写回老字段。
         self._last_sync_id = self._load_cursor_from_meta(s.cloud_last_sync_id)
+        # v3.4：按 space 区分的游标。key=None 为个人空间；其余为 space_id (str)。
+        # 个人空间游标从旧的 _last_sync_id 继承，确保升级后不重拉全量。
+        self._space_cursors: dict = {None: self._last_sync_id}
+        # 已知的 space id 列表（None 恒在内）。list_spaces 成功后刷新。
+        self._known_spaces: list = [None]
+        self._load_known_spaces_from_meta()
         self._state: CloudSyncState = CloudSyncState.STOPPED
         self._current_interval = self._MIN_INTERVAL_MS
-        self._pulling = False  # 正交的 in-flight 标志:拉取请求是否在途
-        self._pushing = False  # 同上,推送请求
+        # in-flight 标志按 space 维护；存活 key = 正在拉/推的 space
+        self._pulling_spaces: set = set()
+        self._pushing_spaces: set = set()
+        # 向后兼容：供老代码/测试读（值为 any space 在途）
+        self._pulling = False
+        self._pushing = False
 
         # 待上传队列（离线队列）— 仅存新增条目，保证新数据不被失败重试挤出
         self._pending_upload_queue: deque = deque(maxlen=500)
@@ -463,6 +540,8 @@ class CloudSyncService(QObject):
         # 用信号槽替代 QMetaObject.invokeMethod + Q_ARG 传递 list
         self._trigger_push.connect(self._worker.do_push, Qt.QueuedConnection)
         self._trigger_pull.connect(self._worker.do_pull, Qt.QueuedConnection)
+        self._trigger_list_spaces.connect(self._worker.do_list_spaces, Qt.QueuedConnection)
+        self._worker.spaces_pulled.connect(self._on_spaces_pulled, Qt.QueuedConnection)
         self._worker_thread.start()
 
         # 拉取定时器
@@ -481,8 +560,33 @@ class CloudSyncService(QObject):
         self._last_cursor_persist_ts = time.monotonic()
         self._last_db_scan_ts = 0.0  # DB 扫描未同步条目的上次时间
 
+        # v3.4：把 CloudAPIClient 注入 ShareService（如果该模块存在）
+        # Why: ShareService 用 cloud_api_factory 做依赖注入，这里是 CloudSyncService
+        # 首次拿到 cloud_api 的中心点，避免在 main.py 加专门连线。导入失败则静默跳过。
+        try:
+            from core import share_service as _share_service  # type: ignore
+            factory_setter = getattr(_share_service, "set_cloud_api_factory", None)
+            if callable(factory_setter):
+                factory_setter(lambda: self.cloud_api)
+            else:
+                # 直接把 cloud_api 赋给模块级属性作兜底
+                setattr(_share_service, "cloud_api_factory", lambda: self.cloud_api)
+        except ImportError:
+            pass  # share_service 未实现，跳过
+        except Exception as e:
+            logger.debug(f"ShareService 注入失败（忽略）: {e}")
+
     def _load_cursor_from_meta(self, fallback: int) -> int:
-        """从 app_meta 读游标；读不到时用传入的 settings.json 值兜底（向后兼容）。"""
+        """从 app_meta 读游标；读不到时用传入的 settings.json 值兜底（向后兼容）。
+        个人空间的游标优先读 v3.4 新 key（cloud_sync_cursor:personal），
+        失败回落到旧 key（cloud_last_sync_id），再回落到 settings。"""
+        try:
+            new_key = f"{self._META_CURSOR_KEY_PREFIX}personal"
+            raw = self.repository.get_meta(new_key, None)
+            if raw is not None and str(raw).strip():
+                return int(raw)
+        except Exception as e:
+            logger.debug(f"读取新格式游标失败: {e}")
         try:
             raw = self.repository.get_meta(self._META_CURSOR_KEY, None)
             if raw is not None and str(raw).strip():
@@ -491,12 +595,58 @@ class CloudSyncService(QObject):
             logger.debug(f"读取云同步游标失败（走 settings.json 兜底）: {e}")
         return fallback
 
-    def _persist_cursor(self) -> None:
-        """把 _last_sync_id 写入 app_meta。失败静默（热路径不要抛）。"""
+    def _cursor_meta_key(self, space_key) -> str:
+        """生成 app_meta 中该 space 对应的 key。"""
+        suffix = "personal" if space_key is None else str(space_key)
+        return f"{self._META_CURSOR_KEY_PREFIX}{suffix}"
+
+    def _load_cursor_for_space(self, space_key) -> int:
+        """按 space 读游标；个人空间走 _load_cursor_from_meta 的兜底逻辑。"""
+        if space_key is None:
+            return self._space_cursors.get(None, 0)
         try:
-            self.repository.set_meta(self._META_CURSOR_KEY, str(self._last_sync_id))
+            raw = self.repository.get_meta(self._cursor_meta_key(space_key), None)
+            if raw is not None and str(raw).strip():
+                return int(raw)
+        except Exception as e:
+            logger.debug(f"读取 space={space_key} 游标失败: {e}")
+        return 0
+
+    def _persist_cursor(self) -> None:
+        """把内存中所有 space 游标落盘到 app_meta。失败静默（热路径不要抛）。"""
+        try:
+            # 兼容旧 key：个人空间同时写 cloud_last_sync_id，便于降级回退。
+            personal = self._space_cursors.get(None, self._last_sync_id)
+            self._last_sync_id = personal  # 保持双字段同步
+            self.repository.set_meta(self._META_CURSOR_KEY, str(personal))
+            for space_key, cursor in self._space_cursors.items():
+                self.repository.set_meta(
+                    self._cursor_meta_key(space_key), str(int(cursor)),
+                )
         except Exception as e:
             logger.debug(f"写入云同步游标失败: {e}")
+
+    def _load_known_spaces_from_meta(self) -> None:
+        """启动时加载持久化的 space 列表（离线启动时仍能按上次集合同步）。"""
+        try:
+            raw = self.repository.get_meta(self._META_SPACES_KEY, None)
+            if raw:
+                ids = json.loads(raw)
+                if isinstance(ids, list):
+                    self._known_spaces = [None] + [str(x) for x in ids if x]
+                    # 把各 space 游标加载进来
+                    for sid in self._known_spaces:
+                        if sid not in self._space_cursors:
+                            self._space_cursors[sid] = self._load_cursor_for_space(sid)
+        except Exception as e:
+            logger.debug(f"加载 known_spaces 失败: {e}")
+
+    def _persist_known_spaces(self) -> None:
+        try:
+            ids = [s for s in self._known_spaces if s is not None]
+            self.repository.set_meta(self._META_SPACES_KEY, json.dumps(ids))
+        except Exception as e:
+            logger.debug(f"写入 known_spaces 失败: {e}")
 
     @property
     def state(self) -> CloudSyncState:
@@ -520,6 +670,10 @@ class CloudSyncService(QObject):
 
         # 注册设备
         self._register_device()
+
+        # v3.4：启动时先刷一次 space 列表，回调里会把 _known_spaces 更新。
+        # 失败不阻断——会 fallback 到仅同步个人空间。
+        self._trigger_list_spaces.emit()
 
         # 启动拉取定时器
         self._pull_timer.start(interval_ms)
@@ -564,14 +718,18 @@ class CloudSyncService(QObject):
         if self._state != CloudSyncState.RUNNING:
             logger.debug(f"force_sync 被忽略,当前状态: {self._state.value}")
             return
+        self._pulling_spaces.clear()
+        self._pushing_spaces.clear()
         self._pulling = False
         self._pushing = False
         self._pull_from_cloud()
         self._push_to_cloud()
 
     def reset_sync_position(self):
-        """重置同步位置"""
+        """重置同步位置（全部 space 清零）"""
         self._last_sync_id = 0
+        for key in list(self._space_cursors.keys()):
+            self._space_cursors[key] = 0
         self._persist_cursor()
         logger.info("云端同步位置已重置")
 
@@ -602,30 +760,50 @@ class CloudSyncService(QObject):
 
     # ========== 拉取逻辑 ==========
 
-    def _pull_from_cloud(self):
-        """从云端拉取新记录(主线程调度,实际 HTTP 在工作线程执行)"""
-        if self._state != CloudSyncState.RUNNING or self._pulling:
-            return
-        self._pulling = True
-        self._trigger_pull.emit(self._last_sync_id)
+    def _get_spaces_to_sync(self) -> list:
+        """返回本轮需要同步的 space key 列表；个人空间（None）恒在首位。
+        未能获得 space 列表（未登录/网络差）时只同步个人空间。"""
+        spaces = [None]
+        for sid in self._known_spaces:
+            if sid is not None and sid not in spaces:
+                spaces.append(sid)
+        return spaces
 
-    @Slot(list, int)
-    def _on_pull_done(self, new_items: list, max_server_id: int):
+    def _pull_from_cloud(self):
+        """从云端拉取新记录(主线程调度,实际 HTTP 在工作线程执行)。
+        v3.4：对所有 space（个人 + team）各拉一次，由 worker 并行（实际上 Qt 队列串行）。"""
+        if self._state != CloudSyncState.RUNNING:
+            return
+        for space_key in self._get_spaces_to_sync():
+            if space_key in self._pulling_spaces:
+                continue
+            self._pulling_spaces.add(space_key)
+            self._pulling = True  # 向后兼容
+            cursor = self._space_cursors.get(space_key, 0)
+            self._trigger_pull.emit(space_key, cursor)
+
+    @Slot(object, list, int)
+    def _on_pull_done(self, space_key, new_items: list, max_server_id: int):
         """拉取完成回调（主线程）。
         游标以节流方式增量落盘（每 N 次或每 T 秒任一触发），stop()/atexit 兜底。"""
-        self._pulling = False
+        self._pulling_spaces.discard(space_key)
+        self._pulling = bool(self._pulling_spaces)
         cursor_advanced = False
-        if max_server_id > self._last_sync_id:
-            self._last_sync_id = max_server_id
+        cur = self._space_cursors.get(space_key, 0)
+        if max_server_id > cur:
+            self._space_cursors[space_key] = max_server_id
+            if space_key is None:
+                self._last_sync_id = max_server_id  # 双字段同步
             cursor_advanced = True
 
         if new_items:
-            logger.debug(f"从云端拉取了 {len(new_items)} 条新记录")
+            logger.debug(f"从云端拉取了 {len(new_items)} 条新记录 (space={space_key})")
             self.new_items_available.emit(new_items)
             if self._current_interval != self._MIN_INTERVAL_MS:
                 self._current_interval = self._MIN_INTERVAL_MS
                 self._pull_timer.setInterval(self._current_interval)
-        else:
+        elif not self._pulling_spaces:
+            # 所有 space 都空才退化间隔；否则过于激进
             self._increase_interval()
 
         # Why: 仅在游标真正推进时才计数，避免空轮询刷满节流窗口。
@@ -638,10 +816,11 @@ class CloudSyncService(QObject):
                 self._last_cursor_persist_ts = now
                 self._persist_cursor()
 
-    @Slot(str, int)
-    def _on_pull_error(self, message: str, status_code: int):
+    @Slot(object, str, int)
+    def _on_pull_error(self, space_key, message: str, status_code: int):
         """拉取失败回调(主线程)"""
-        self._pulling = False
+        self._pulling_spaces.discard(space_key)
+        self._pulling = bool(self._pulling_spaces)
         if status_code == 401:
             logger.warning("云端认证失败,请重新登录")
             # 停止轮询,避免反复刷 401 日志
@@ -649,9 +828,34 @@ class CloudSyncService(QObject):
             self._push_timer.stop()
             self._transition(CloudSyncState.AUTH_FAILED)
             self.sync_error.emit("云端认证失败,请在设置中重新登录")
+        elif status_code == 403:
+            # 订阅不够权限访问该 space（例如降级后）；记录但不 crash，不打断其他 space
+            logger.warning(
+                f"云端拉取 403 (space={space_key}): {message}；可能订阅不支持此空间",
+            )
+            self.sync_error.emit(f"无权限访问空间 {space_key}: {message}")
         else:
-            logger.error(f"云端拉取失败: {message}")
+            logger.error(f"云端拉取失败 (space={space_key}): {message}")
             self.sync_error.emit(message)
+
+    @Slot(list)
+    def _on_spaces_pulled(self, spaces: list):
+        """list_spaces 成功后的回调：更新 _known_spaces，落盘，发 signal 给 UI/SpaceService。"""
+        try:
+            ids = [None]
+            for sp in spaces or []:
+                sid = sp.get("id") if isinstance(sp, dict) else None
+                if sid and sid not in ids:
+                    ids.append(str(sid))
+            self._known_spaces = ids
+            # 为新 space 初始化游标
+            for sid in ids:
+                if sid not in self._space_cursors:
+                    self._space_cursors[sid] = self._load_cursor_for_space(sid)
+            self._persist_known_spaces()
+            self.spaces_pulled.emit(spaces or [])
+        except Exception as e:
+            logger.debug(f"_on_spaces_pulled 处理异常: {e}")
 
     def restart_after_reauth(self):
         """重新登录后恢复同步定时器"""
@@ -677,8 +881,9 @@ class CloudSyncService(QObject):
     # ========== 推送逻辑 ==========
 
     def _push_to_cloud(self):
-        """将本地待上传条目推送到云端(主线程调度,实际 HTTP 在工作线程执行)"""
-        if self._state != CloudSyncState.RUNNING or self._pushing:
+        """将本地待上传条目推送到云端(主线程调度,实际 HTTP 在工作线程执行)。
+        v3.4：按 space_id 分组，每组一次 batch_create。订阅降级后 team space 不 push。"""
+        if self._state != CloudSyncState.RUNNING:
             return
 
         # 队列为空时，定期从数据库扫描未同步的条目
@@ -688,22 +893,62 @@ class CloudSyncService(QObject):
         if not self._pending_upload_queue and not self._retry_queue:
             return
 
-        self._pushing = True
-
         # 每 10 次推送检查一次配额
         self._quota_check_counter += 1
         if self._quota_check_counter % 10 == 1:
             QMetaObject.invokeMethod(self._worker, "do_check_quota", Qt.QueuedConnection)
 
         # 优先处理重试队列，其次新数据
-        batch = []
+        batch: list = []
         while self._retry_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
             batch.append(self._retry_queue.popleft())
         while self._pending_upload_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
             batch.append(self._pending_upload_queue.popleft())
 
-        logger.warning(f"云端推送：发送 {len(batch)} 条记录")
-        self._trigger_push.emit(batch)
+        if not batch:
+            return
+
+        # 按 space_id 分组
+        groups: dict = {}
+        for item in batch:
+            key = getattr(item, "space_id", None) or None
+            groups.setdefault(key, []).append(item)
+
+        # 订阅降级策略：非 team 计划禁止推送 team space（但仍允许个人空间）
+        can_push_team = self._can_edit_team_space()
+        for space_key, items in groups.items():
+            if space_key is not None and not can_push_team:
+                logger.info(
+                    f"订阅不支持 team space 编辑，跳过 push {len(items)} 条 (space={space_key})",
+                )
+                continue
+            if space_key in self._pushing_spaces:
+                # 把这批退回 retry_queue 下轮再推
+                for it in items:
+                    if len(self._retry_queue) < self._retry_queue.maxlen:
+                        self._retry_queue.append(it)
+                continue
+            self._pushing_spaces.add(space_key)
+            self._pushing = True
+            logger.warning(
+                f"云端推送：发送 {len(items)} 条记录 (space={space_key})",
+            )
+            self._trigger_push.emit(space_key, items)
+
+    def _can_edit_team_space(self) -> bool:
+        """订阅降级后 team space 为只读（不 push）；team 计划允许编辑所有空间。
+        没有 entitlement_service 时默认 True（兼容老启动路径；服务端会兜底拒绝）。"""
+        svc = self._entitlement_service
+        if svc is None:
+            return True
+        try:
+            ent = svc.current()
+        except Exception:
+            return True
+        # 约定：ultimate / super 及其他付费档位视为 team，free / basic 不能编辑 team space。
+        # plan 名取自 entitlement_service.Plan 枚举；其 .value 为小写字符串。
+        plan_value = getattr(getattr(ent, "plan", None), "value", "") or ""
+        return plan_value in ("super", "ultimate")
 
     def _load_unsynced_from_db(self):
         """从数据库扫描未同步的条目加入上传队列（有冷却间隔避免频繁查询）"""
@@ -720,19 +965,23 @@ class CloudSyncService(QObject):
         except Exception as e:
             logger.warning(f"数据库扫描未同步条目失败: {e}")
 
-    @Slot(int)
-    def _on_push_done(self, uploaded_count: int):
+    @Slot(object, int)
+    def _on_push_done(self, space_key, uploaded_count: int):
         """推送完成回调（主线程）"""
-        self._pushing = False
+        self._pushing_spaces.discard(space_key)
+        self._pushing = bool(self._pushing_spaces)
         self.upload_completed.emit(uploaded_count)
-        logger.warning(f"云端推送成功：已上传 {uploaded_count} 条记录")
+        logger.warning(
+            f"云端推送成功：已上传 {uploaded_count} 条记录 (space={space_key})",
+        )
 
-    @Slot(str, int, list)
-    def _on_push_error(self, message: str, status_code: int, failed_batch: list):
+    @Slot(object, str, int, list)
+    def _on_push_error(self, space_key, message: str, status_code: int, failed_batch: list):
         """推送失败回调（主线程）"""
-        self._pushing = False
-        logger.error(f"云端推送失败: {message}")
-        # 配额不足时不重试
+        self._pushing_spaces.discard(space_key)
+        self._pushing = bool(self._pushing_spaces)
+        logger.error(f"云端推送失败 (space={space_key}): {message}")
+        # 配额不足（403）时不重试
         if status_code != 403:
             # 失败批次进入独立 retry_queue，不挤占新数据队列
             retry_max = self._retry_queue.maxlen

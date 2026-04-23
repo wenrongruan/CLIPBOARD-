@@ -28,6 +28,16 @@ class ClipboardItem:
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     is_starred: bool = False
     cloud_id: Optional[int] = None
+    # v3.4: 空间 / 来源 App / 标签
+    # space_id: None 表示个人空间；非 None 为 UUID
+    space_id: Optional[str] = None
+    # source_app: 来源 App bundle id / exe 名
+    source_app: str = ""
+    # source_title: 窗口标题（隐私考虑默认不捕获，但字段保留）
+    source_title: str = ""
+    # tag_ids: 冗余展示字段；权威数据在 clipboard_tags 关联表
+    # 由 Repository 在 SELECT 时 JOIN 填充，to_db_tuple 不包含它
+    tag_ids: list = field(default_factory=list)
 
     def __post_init__(self):
         if type(self) is ClipboardItem:
@@ -57,6 +67,7 @@ class ClipboardItem:
         raise NotImplementedError
 
     def to_db_tuple(self) -> tuple:
+        # v3.4: 末尾追加 space_id / source_app / source_title（不含 tag_ids）
         return (
             self.content_type.value,
             *self._payload_db_fields(),
@@ -66,6 +77,9 @@ class ClipboardItem:
             self.device_name,
             self.created_at,
             int(self.is_starred),
+            self.space_id,
+            self.source_app,
+            self.source_title,
         )
 
     @classmethod
@@ -76,6 +90,15 @@ class ClipboardItem:
         Repository._SELECT_FIELDS 统一包含全部列。
         """
         ct = ContentType(row["content_type"])
+
+        # sqlite3.Row 不支持 .get()，用 try/except KeyError 兼容老库
+        def _row_get(key, default=None):
+            try:
+                val = row[key]
+            except (KeyError, IndexError):
+                return default
+            return val if val is not None else default
+
         common = dict(
             id=row["id"],
             content_hash=row["content_hash"] or "",
@@ -85,6 +108,10 @@ class ClipboardItem:
             created_at=row["created_at"] or 0,
             is_starred=bool(row["is_starred"]),
             cloud_id=row["cloud_id"],
+            # v3.4 新字段，老库没有这些列时回落默认值
+            space_id=_row_get("space_id", None),
+            source_app=_row_get("source_app", "") or "",
+            source_title=_row_get("source_title", "") or "",
         )
         if ct == ContentType.TEXT:
             return TextClipboardItem(**common, text_content=row["text_content"] or "")

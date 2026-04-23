@@ -9,8 +9,8 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from config import (
@@ -135,10 +135,21 @@ def _restore_cloud_api_from_config():
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent=None, plugin_manager=None, cloud_api=None):
+    def __init__(
+        self,
+        parent=None,
+        plugin_manager=None,
+        cloud_api=None,
+        space_service=None,
+        entitlement_service=None,
+        initial_tab: str = "",
+    ):
         super().__init__(parent)
         self._plugin_manager = plugin_manager
         self._cloud_api = cloud_api
+        self._space_service = space_service
+        self._entitlement_service = entitlement_service
+        self._initial_tab = initial_tab or ""
         self.setWindowTitle(t("settings"))
         self.setFixedSize(580, 560)
         self.setStyleSheet(MAIN_STYLE)
@@ -156,12 +167,18 @@ class SettingsDialog(QDialog):
         tab_widget = QTabWidget()
         layout.addWidget(tab_widget)
 
+        self._tab_name_to_index: dict = {}
         self._build_general_tab(tab_widget)
         self._build_database_tab(tab_widget)
         self._build_filter_tab(tab_widget)
         self._setup_plugin_tab(tab_widget)
         self._setup_cloud_tab(tab_widget)
+        self._build_team_tab(tab_widget)
         self._build_about_tab(tab_widget)
+
+        # 按参数切到指定 tab
+        if self._initial_tab and self._initial_tab in self._tab_name_to_index:
+            tab_widget.setCurrentIndex(self._tab_name_to_index[self._initial_tab])
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_btn = button_box.button(QDialogButtonBox.Ok)
@@ -207,7 +224,19 @@ class SettingsDialog(QDialog):
         hotkey_layout.addWidget(hotkey_help)
         general_layout.addRow(t("global_hotkey"), hotkey_layout)
 
-        tab_widget.addTab(general_tab, t("general"))
+        # v3.4: 捕获窗口标题（默认关；开启后把前台窗口标题写入 source_title 字段）
+        self.capture_source_title_check = QCheckBox("捕获窗口标题（存入来源记录）")
+        self.capture_source_title_check.setToolTip(
+            "仅在需要后续搜索或审计窗口标题时开启。默认关闭以保护隐私。"
+        )
+        self.capture_source_title_check.setChecked(
+            bool(getattr(settings(), "capture_source_title", False))
+        )
+        general_layout.addRow("隐私", self.capture_source_title_check)
+
+        idx = tab_widget.addTab(general_tab, t("general"))
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["general"] = idx
 
     # ========== 数据库 ==========
 
@@ -332,7 +361,9 @@ class SettingsDialog(QDialog):
         db_layout.addWidget(self.mysql_group)
         db_layout.addStretch()
 
-        tab_widget.addTab(db_tab, t("database"))
+        idx = tab_widget.addTab(db_tab, t("database"))
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["database"] = idx
 
         self._on_db_type_changed(self.db_type_group.checkedId())
 
@@ -399,7 +430,150 @@ class SettingsDialog(QDialog):
         filter_layout.addWidget(storage_group)
         filter_layout.addStretch()
 
-        tab_widget.addTab(filter_tab, t("filter_storage"))
+        idx = tab_widget.addTab(filter_tab, t("filter_storage"))
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["filter"] = idx
+
+    # ========== 团队 (v3.4) ==========
+
+    def _build_team_tab(self, tab_widget):
+        """团队管理：只在 TEAM/SUPER/ULTIMATE 档位可用。"""
+        team_tab = QWidget()
+        team_layout = QVBoxLayout(team_tab)
+        team_layout.setSpacing(10)
+        team_layout.setContentsMargins(12, 12, 12, 12)
+
+        ent = None
+        if self._entitlement_service is not None:
+            try:
+                ent = self._entitlement_service.current()
+            except Exception:
+                ent = None
+        plan_val = ""
+        if ent is not None and ent.plan is not None:
+            plan_val = getattr(ent.plan, "value", str(ent.plan))
+
+        team_enabled = plan_val in ("team", "super", "ultimate")
+
+        if not team_enabled:
+            tip = QLabel("升级到 Team 档位（或 Super / Ultimate）以解锁团队功能。")
+            tip.setWordWrap(True)
+            tip.setStyleSheet("color:#aaa;padding:16px;")
+            team_layout.addWidget(tip)
+            upgrade_btn = QPushButton("查看套餐")
+            upgrade_btn.clicked.connect(self._open_pricing_page)
+            team_layout.addWidget(upgrade_btn)
+            team_layout.addStretch()
+            idx = tab_widget.addTab(team_tab, "团队")
+            if hasattr(self, "_tab_name_to_index"):
+                self._tab_name_to_index["team"] = idx
+            return
+
+        # --- 上半区：team 空间列表 + 新建按钮 ---
+        spaces_label = QLabel("团队空间")
+        spaces_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        team_layout.addWidget(spaces_label)
+
+        self._team_space_list = QListWidget()
+        self._team_space_list.itemSelectionChanged.connect(self._on_team_space_selected)
+        team_layout.addWidget(self._team_space_list, 1)
+
+        space_btn_row = QHBoxLayout()
+        new_space_btn = QPushButton("新建空间")
+        new_space_btn.clicked.connect(self._on_team_new_space)
+        space_btn_row.addWidget(new_space_btn)
+        invite_btn = QPushButton("邀请成员")
+        invite_btn.clicked.connect(self._on_team_invite_member)
+        space_btn_row.addWidget(invite_btn)
+        space_btn_row.addStretch()
+        team_layout.addLayout(space_btn_row)
+
+        # --- 下半区：成员列表 ---
+        members_label = QLabel("成员")
+        members_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        team_layout.addWidget(members_label)
+
+        self._team_member_list = QListWidget()
+        team_layout.addWidget(self._team_member_list, 1)
+
+        idx = tab_widget.addTab(team_tab, "团队")
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["team"] = idx
+
+        self._refresh_team_spaces()
+
+    def _refresh_team_spaces(self):
+        if not hasattr(self, "_team_space_list"):
+            return
+        self._team_space_list.clear()
+        if self._space_service is None:
+            return
+        try:
+            spaces = self._space_service.list_spaces()
+        except Exception as exc:
+            logger.debug(f"list_spaces 失败: {exc}")
+            spaces = []
+        for sp in spaces:
+            label = f"{sp.name or sp.id[:8]}  ({sp.type})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, sp.id)
+            self._team_space_list.addItem(item)
+
+    def _on_team_space_selected(self):
+        if not hasattr(self, "_team_member_list"):
+            return
+        self._team_member_list.clear()
+        item = self._team_space_list.currentItem()
+        if item is None or self._space_service is None:
+            return
+        space_id = item.data(Qt.UserRole)
+        try:
+            members = self._space_service.list_members(space_id)
+        except Exception as exc:
+            logger.debug(f"list_members 失败: {exc}")
+            members = []
+        for m in members:
+            self._team_member_list.addItem(f"{m.user_id}  [{m.role}]")
+
+    def _on_team_new_space(self):
+        if self._space_service is None:
+            return
+        name, ok = QInputDialog.getText(self, "新建团队空间", "空间名称：")
+        if not ok or not name.strip():
+            return
+        try:
+            self._space_service.create_space(name=name.strip(), type_="team")
+        except Exception as exc:
+            QMessageBox.warning(self, "创建失败", str(exc))
+            return
+        self._refresh_team_spaces()
+
+    def _on_team_invite_member(self):
+        if self._space_service is None:
+            return
+        item = self._team_space_list.currentItem() if hasattr(self, "_team_space_list") else None
+        if item is None:
+            QMessageBox.information(self, "提示", "请先选择一个团队空间。")
+            return
+        space_id = item.data(Qt.UserRole)
+        user_id, ok = QInputDialog.getText(
+            self, "邀请成员", "请输入成员 user_id（或邮箱）：",
+        )
+        if not ok or not user_id.strip():
+            return
+        try:
+            self._space_service.add_member(
+                space_id=space_id, user_id=user_id.strip(), role="editor",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "邀请失败", str(exc))
+            return
+        self._on_team_space_selected()
+
+    def _open_pricing_page(self):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
 
     # ========== 关于 ==========
 
@@ -446,7 +620,9 @@ class SettingsDialog(QDialog):
         about_layout.addWidget(links_group)
         about_layout.addStretch()
 
-        tab_widget.addTab(about_tab, t("about"))
+        idx = tab_widget.addTab(about_tab, t("about"))
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["about"] = idx
 
     # ========== 插件 ==========
 
@@ -531,7 +707,9 @@ class SettingsDialog(QDialog):
         btn_layout.addStretch()
         plugin_layout.addLayout(btn_layout)
 
-        tab_widget.addTab(plugin_tab, t("plugins"))
+        idx = tab_widget.addTab(plugin_tab, t("plugins"))
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["plugins"] = idx
 
         self._refresh_plugin_list()
         if not IS_APPSTORE_BUILD:
@@ -1010,7 +1188,9 @@ class SettingsDialog(QDialog):
 
         cloud_scroll.setWidget(cloud_content)
         cloud_outer.addWidget(cloud_scroll)
-        tab_widget.addTab(cloud_tab, "云端同步")
+        idx = tab_widget.addTab(cloud_tab, "云端同步")
+        if hasattr(self, "_tab_name_to_index"):
+            self._tab_name_to_index["cloud"] = idx
 
     def _clear_cloud_content(self):
         """移除 _cloud_content_layout 里的全部 widget/spacer，避免登录态切换后残留旧 UI。"""
@@ -1128,6 +1308,14 @@ class SettingsDialog(QDialog):
             )
         except Exception as e:
             logger.warning(f"保存文件同步配置失败: {e}")
+
+        # v3.4: 隐私 - 窗口标题捕获开关
+        try:
+            update_settings(
+                capture_source_title=self.capture_source_title_check.isChecked(),
+            )
+        except Exception as e:
+            logger.warning(f"保存 capture_source_title 失败: {e}")
 
         self.accept()
 

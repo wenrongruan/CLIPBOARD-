@@ -45,6 +45,8 @@ class Plan(str, Enum):
     BASIC = "basic"
     SUPER = "super"
     ULTIMATE = "ultimate"
+    # v3.4: 团队付费档
+    TEAM = "team"
 
     @classmethod
     def parse(cls, raw) -> "Plan":
@@ -68,6 +70,11 @@ class Entitlement:
     max_file_size_bytes: int = MAX_SINGLE_FILE_BYTES
     fetched_at: int = 0
     offline_grace_until: int = 0
+    # v3.4: 团队/分享能力
+    team_seats: int = 0           # 团队席位（0 = 不适用）
+    team_spaces: int = 0          # 允许的团队空间数（0 = 不适用）
+    can_share_link: bool = False  # 是否允许创建 share-link
+    is_team_owner: bool = False   # 当前用户是否为团队拥有者
 
     @property
     def remaining_bytes(self) -> int:
@@ -210,6 +217,20 @@ class EntitlementService(QObject):
         else:
             files_enabled = bool(files_enabled_server) and plan != Plan.FREE and status == "active"
 
+        # v3.4: team/share 字段（两种风格兼容 —— 顶层或 team 子块）
+        team_block = data.get("team") if isinstance(data.get("team"), dict) else {}
+        team_seats = int(team_block.get("seats") or data.get("team_seats") or 0)
+        team_spaces = int(team_block.get("spaces") or data.get("team_spaces") or 0)
+        is_team_owner = bool(team_block.get("is_owner") or data.get("is_team_owner") or False)
+        # 允许创建共享链接：服务端下发为准；没有字段时 non-free + active 默认允许
+        share_raw = data.get("can_share_link")
+        if share_raw is None:
+            share_raw = (data.get("share") or {}).get("enabled") if isinstance(data.get("share"), dict) else None
+        if share_raw is None:
+            can_share_link = plan != Plan.FREE and status == "active"
+        else:
+            can_share_link = bool(share_raw)
+
         now = int(time.time())
         ent = Entitlement(
             plan=plan,
@@ -220,6 +241,10 @@ class EntitlementService(QObject):
             max_file_size_bytes=max_single,
             fetched_at=now,
             offline_grace_until=now + _OFFLINE_GRACE_SEC if files_enabled else 0,
+            team_seats=max(0, team_seats),
+            team_spaces=max(0, team_spaces),
+            can_share_link=can_share_link,
+            is_team_owner=is_team_owner,
         )
         with self._lock:
             self._apply_locked(ent)
@@ -256,6 +281,11 @@ class EntitlementService(QObject):
                 "max_file_size_bytes": ent.max_file_size_bytes,
                 "fetched_at": ent.fetched_at,
                 "offline_grace_until": ent.offline_grace_until,
+                # v3.4
+                "team_seats": ent.team_seats,
+                "team_spaces": ent.team_spaces,
+                "can_share_link": ent.can_share_link,
+                "is_team_owner": ent.is_team_owner,
             }
             self._repository.set_meta(_APP_META_KEY, json.dumps(payload))
         except Exception as e:
@@ -285,6 +315,11 @@ class EntitlementService(QObject):
                 max_file_size_bytes=int(data.get("max_file_size_bytes", MAX_SINGLE_FILE_BYTES)),
                 fetched_at=int(data.get("fetched_at", 0)),
                 offline_grace_until=int(data.get("offline_grace_until", 0)),
+                # v3.4 新字段：老缓存没这些 key，用 .get 兜底默认值
+                team_seats=int(data.get("team_seats", 0) or 0),
+                team_spaces=int(data.get("team_spaces", 0) or 0),
+                can_share_link=bool(data.get("can_share_link", False)),
+                is_team_owner=bool(data.get("is_team_owner", False)),
             )
         except (TypeError, ValueError) as e:
             logger.debug(f"entitlement 缓存反序列化失败: {e}")

@@ -1,7 +1,7 @@
 import os
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal, QTimer, QSize
 from PySide6.QtWidgets import (
@@ -15,12 +15,16 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QDialog,
+    QInputDialog,
     QMessageBox,
     QFileDialog,
     QProgressDialog,
     QStackedWidget,
     QButtonGroup,
+    QToolButton,
 )
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 
 from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
 from core.repository import ClipboardRepository
@@ -84,6 +88,9 @@ class MainWindow(EdgeHiddenWindow):
         file_sync_service=None,
         file_repository=None,
         entitlement_service=None,
+        space_service=None,
+        tag_service=None,
+        share_service=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -96,6 +103,15 @@ class MainWindow(EdgeHiddenWindow):
         self.file_sync_service = file_sync_service
         self.file_repository = file_repository
         self.entitlement_service = entitlement_service
+        # v3.4: 空间 / 标签 / 分享服务（可选注入；未注入时侧栏与分享菜单降级为只读/灰）
+        self.space_service = space_service
+        self.tag_service = tag_service
+        self.share_service = share_service
+        # 当前过滤条件（由 Sidebar 更新）
+        self._current_space_id: Optional[str] = None
+        self._current_tag_id: Optional[str] = None
+        # 当前视图模式："list" 或 "timeline"
+        self._view_mode = "list"
 
         # 如果没有传入 cloud_api，但有已保存的 token，则创建客户端
         if not self.cloud_api:
@@ -121,10 +137,35 @@ class MainWindow(EdgeHiddenWindow):
         self._load_items()
 
     def _setup_ui(self):
-        # 直接在窗口上设置布局
-        layout = QVBoxLayout(self)
+        # v3.4: 外层改为 QHBoxLayout，左侧是 Sidebar，右侧是主内容
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # --- Sidebar ---
+        try:
+            from .sidebar import Sidebar
+            self.sidebar = Sidebar(
+                space_service=self.space_service,
+                tag_service=self.tag_service,
+                entitlement_service=self.entitlement_service,
+            )
+            self.sidebar.space_changed.connect(self._on_sidebar_space_changed)
+            self.sidebar.tag_filter_changed.connect(self._on_sidebar_tag_changed)
+            self.sidebar.create_space_requested.connect(self._on_sidebar_create_space)
+            self.sidebar.manage_team_requested.connect(self._on_sidebar_manage_team)
+            self.sidebar.upgrade_requested.connect(self._on_sidebar_upgrade)
+            root.addWidget(self.sidebar)
+        except Exception as exc:
+            logger.warning(f"Sidebar 初始化失败，将继续以无侧栏模式运行: {exc}", exc_info=True)
+            self.sidebar = None
+
+        # --- 右侧主内容容器 ---
+        main_container = QWidget()
+        layout = QVBoxLayout(main_container)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
+        root.addWidget(main_container, 1)
 
         # 顶部：搜索和设置
         header_layout = QHBoxLayout()
@@ -134,6 +175,22 @@ class MainWindow(EdgeHiddenWindow):
         self.search_input.setPlaceholderText(t("search_placeholder"))
         self.search_input.textChanged.connect(self._on_search_changed)
         header_layout.addWidget(self.search_input, 1)
+
+        # 搜索语法帮助按钮
+        self.search_help_btn = QPushButton("ⓘ")
+        self.search_help_btn.setToolTip(
+            "支持结构化搜索：\n"
+            "  from:chrome  — 按来源 app 过滤\n"
+            "  tag:work    — 按标签过滤\n"
+            "  after:2026-04-01  before:2026-05-01\n"
+            "  size:>1MB\n"
+            "  is:starred  is:text  is:image\n"
+            "  \"引号短语\"  /正则/\n"
+            "  -from:foo   — 否定"
+        )
+        self.search_help_btn.setFixedSize(24, 24)
+        self.search_help_btn.clicked.connect(self._show_search_help)
+        header_layout.addWidget(self.search_help_btn)
 
         self.star_filter_btn = QPushButton("☆")
         self.star_filter_btn.setToolTip(t("show_starred_only"))
@@ -205,13 +262,47 @@ class MainWindow(EdgeHiddenWindow):
         clip_layout.setContentsMargins(0, 0, 0, 0)
         clip_layout.setSpacing(6)
 
+        # v3.4: 视图切换（列表 / 时间线）
+        view_row = QHBoxLayout()
+        view_row.setSpacing(4)
+        self.view_list_btn = QToolButton()
+        self.view_list_btn.setText("列表")
+        self.view_list_btn.setCheckable(True)
+        self.view_list_btn.setChecked(True)
+        self.view_timeline_btn = QToolButton()
+        self.view_timeline_btn.setText("时间线")
+        self.view_timeline_btn.setCheckable(True)
+        self._view_group = QButtonGroup(self)
+        self._view_group.setExclusive(True)
+        self._view_group.addButton(self.view_list_btn, 0)
+        self._view_group.addButton(self.view_timeline_btn, 1)
+        self._view_group.idClicked.connect(self._on_view_changed)
+        view_row.addWidget(self.view_list_btn)
+        view_row.addWidget(self.view_timeline_btn)
+        view_row.addStretch()
+        clip_layout.addLayout(view_row)
+
+        # 列表视图 + 时间线视图的堆叠
+        self._view_stack = QStackedWidget()
+        clip_layout.addWidget(self._view_stack, 1)
+
         self.list_widget = QListWidget()
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.setSpacing(1)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
-        clip_layout.addWidget(self.list_widget, 1)
+        self._view_stack.addWidget(self.list_widget)
+
+        # 时间线视图懒加载（首次切换时才填充数据）
+        self.timeline_view = None
+        try:
+            from .timeline_view import TimelineView
+            self.timeline_view = TimelineView()
+            self.timeline_view.item_clicked.connect(self._on_timeline_item_clicked)
+            self._view_stack.addWidget(self.timeline_view)
+        except Exception as exc:
+            logger.debug(f"TimelineView 初始化失败: {exc}")
 
         # 复制反馈标签
         self.copy_feedback_label = QLabel()
@@ -431,15 +522,30 @@ class MainWindow(EdgeHiddenWindow):
     def _load_items(self):
         try:
             if self._search_query:
-                items, total = self.repository.search(
+                items, total = self.repository.search_by_keyword(
                     self._search_query, self._current_page, self._page_size,
-                    starred_only=self._starred_only
+                    starred_only=self._starred_only,
+                    space_id=self._current_space_id,
                 )
+            elif self._current_tag_id:
+                # tag 过滤走独立 API（不带分页 total，近似处理）
+                items = self.repository.get_items_by_tag(
+                    self._current_tag_id,
+                    page=self._current_page + 1,
+                    page_size=self._page_size,
+                )
+                total = len(items)
             else:
                 items, total = self.repository.get_items(
                     self._current_page, self._page_size,
                     starred_only=self._starred_only
                 )
+                # space_id 过滤：由于老 get_items 不支持，这里在内存上做简单过滤
+                # （个人空间：space_id 为 None/空；团队空间：只留匹配 id 的）
+                if self._current_space_id is not None:
+                    target = self._current_space_id
+                    items = [i for i in items if (i.space_id or None) == target]
+                    total = len(items)
 
             self._items = items
             self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
@@ -490,6 +596,73 @@ class MainWindow(EdgeHiddenWindow):
             list_item, widget = self._make_list_item(item)
             self.list_widget.addItem(list_item)
             self.list_widget.setItemWidget(list_item, widget)
+
+        # 时间线视图也同步刷新（仅在已创建时）
+        if self.timeline_view is not None:
+            self.timeline_view.set_items(self._items)
+
+    # ========== v3.4: 侧栏 + 视图切换回调 ==========
+
+    def _on_sidebar_space_changed(self, space_id):
+        self._current_space_id = space_id
+        if self.space_service is not None:
+            try:
+                self.space_service.set_current_space(space_id)
+            except Exception as exc:
+                logger.debug(f"set_current_space 失败: {exc}")
+        self._current_page = 0
+        self._load_items()
+
+    def _on_sidebar_tag_changed(self, tag_id):
+        self._current_tag_id = tag_id
+        self._current_page = 0
+        self._load_items()
+
+    def _on_sidebar_create_space(self):
+        # Sidebar 内部已处理创建，这里仅需刷新状态
+        if self.sidebar is not None:
+            self.sidebar.refresh_spaces()
+
+    def _on_sidebar_manage_team(self):
+        # 打开设置对话框，默认切到"团队" tab
+        self._show_settings(initial_tab="team")
+
+    def _on_sidebar_upgrade(self):
+        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+
+    def _on_view_changed(self, view_id: int):
+        if view_id == 1:
+            self._view_mode = "timeline"
+            if self.timeline_view is not None:
+                self._view_stack.setCurrentWidget(self.timeline_view)
+                self.timeline_view.set_items(self._items)
+        else:
+            self._view_mode = "list"
+            self._view_stack.setCurrentWidget(self.list_widget)
+
+    def _on_timeline_item_clicked(self, item_id: int):
+        # 从当前 _items 中找到匹配项，走原有的 click 处理
+        for it in self._items:
+            if it.id == item_id:
+                self._on_item_clicked(it)
+                return
+
+    def _show_search_help(self):
+        QMessageBox.information(
+            self,
+            "搜索语法",
+            "支持以下结构化搜索：\n\n"
+            "关键词：直接输入即可（多个关键词 AND 连接）\n"
+            "from:chrome — 按来源 App 过滤\n"
+            "tag:work — 按标签过滤\n"
+            "space:<id> — 按空间过滤\n"
+            "after:2026-04-01 / before:2026-05-01 — 日期范围\n"
+            "size:>1MB / size:<=500KB — 内容大小\n"
+            "is:starred / is:text / is:image — 类型过滤\n"
+            '"引号短语" — 精确短语匹配\n'
+            "/正则/ — 正则表达式\n"
+            "-key:value — 取反（如 -from:chrome）\n",
+        )
 
     def _update_pagination(self):
         self.page_label.setText(f"{self._current_page + 1} / {self._total_pages}")
@@ -767,8 +940,15 @@ class MainWindow(EdgeHiddenWindow):
         """最小化窗口（完全隐藏）"""
         self.hide_window()
 
-    def _show_settings(self):
-        dialog = SettingsDialog(self, plugin_manager=self.plugin_manager, cloud_api=self.cloud_api)
+    def _show_settings(self, initial_tab: str = ""):
+        dialog = SettingsDialog(
+            self,
+            plugin_manager=self.plugin_manager,
+            cloud_api=self.cloud_api,
+            space_service=self.space_service,
+            entitlement_service=self.entitlement_service,
+            initial_tab=initial_tab,
+        )
         result = dialog.exec()
         # 无论确认还是取消，都同步登录状态（用户可能在对话框中登录了云端）
         dialog_cloud_api = dialog.get_cloud_api()
@@ -966,6 +1146,27 @@ class MainWindow(EdgeHiddenWindow):
         delete_action = menu.addAction(f"🗑 {t('ctx_delete')}")
         delete_action.triggered.connect(lambda: self._on_item_delete(item))
 
+        # v3.4: 分享 + 打标签
+        menu.addSeparator()
+        share_action = menu.addAction("🔗 分享这些条目...")
+        share_action.triggered.connect(lambda: self._on_share_items([item]))
+        # 仅当 entitlement 允许时启用
+        if self.entitlement_service is not None:
+            try:
+                can_share = bool(self.entitlement_service.current().can_share_link)
+            except Exception:
+                can_share = False
+            if not can_share:
+                share_action.setEnabled(False)
+                share_action.setToolTip("当前套餐不支持分享链接")
+        elif self.share_service is None:
+            share_action.setEnabled(False)
+
+        tag_action = menu.addAction("🏷 添加标签...")
+        tag_action.triggered.connect(lambda: self._on_add_tags(item))
+        if self.tag_service is None:
+            tag_action.setEnabled(False)
+
         # 插件操作
         if self.plugin_manager:
             groups = self.plugin_manager.get_plugin_actions_grouped(item)
@@ -1149,6 +1350,57 @@ class MainWindow(EdgeHiddenWindow):
         if self.plugin_manager:
             self.plugin_manager.cancel_action()
         self.copy_feedback_label.hide()
+
+    # ========== v3.4: 分享 + 打标签 ==========
+
+    def _on_share_items(self, items: List[ClipboardItem]):
+        if not items:
+            return
+        if self.share_service is None:
+            QMessageBox.warning(self, "分享不可用", "未初始化 ShareService，无法创建分享链接。")
+            return
+        try:
+            from .share_dialog import ShareLinkDialog
+        except Exception as exc:
+            QMessageBox.critical(self, "错误", f"无法加载分享对话框：{exc}")
+            return
+        dlg = ShareLinkDialog(
+            items=items,
+            share_service=self.share_service,
+            space_id=self._current_space_id or "",
+            parent=self,
+        )
+        dlg.exec()
+
+    def _on_add_tags(self, item: ClipboardItem):
+        if self.tag_service is None:
+            QMessageBox.warning(self, "标签不可用", "未初始化 TagService。")
+            return
+        text, ok = QInputDialog.getText(
+            self, "添加标签", "输入标签名（多个用逗号分隔）：",
+        )
+        if not ok or not text:
+            return
+        names = [n.strip() for n in text.split(",") if n.strip()]
+        if not names:
+            return
+        space_id = item.space_id or self._current_space_id or ""
+        try:
+            tag_ids = self.tag_service.apply_tag_names(
+                item_id=item.id,
+                space_id=space_id,
+                tag_names=names,
+            )
+        except Exception as exc:
+            logger.warning(f"添加标签失败: {exc}", exc_info=True)
+            QMessageBox.warning(self, "添加失败", f"添加标签失败：{exc}")
+            return
+        # 让侧栏刷新标签列表
+        if self.sidebar is not None:
+            self.sidebar.refresh_tags(space_id if space_id else None)
+        self._show_copy_feedback(True)
+        if hasattr(self, "copy_feedback_label"):
+            self.copy_feedback_label.setText(f"已添加 {len(tag_ids)} 个标签")
 
     def _request_quit(self):
         """请求退出应用"""
