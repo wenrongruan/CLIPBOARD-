@@ -174,66 +174,76 @@ class EdgeHiddenWindow(QWidget):
                 zone,
             )
 
+    def _effective_size(self) -> tuple[int, int]:
+        # 子控件（侧边栏等）的最小尺寸可能把窗口撑得比 WINDOW_WIDTH 大，
+        # 隐藏位置必须按真实宽度算，否则藏不干净会漏出一截。
+        width = max(self._window_width, self.width())
+        height = max(self._window_height, self.height())
+        return width, height
+
     def _get_hidden_geometry(self, screen_rect: QRect) -> QRect:
         margin = self._hidden_margin
+        width, height = self._effective_size()
 
         if self._dock_edge == "right":
             return QRect(
                 screen_rect.right() - margin,
-                (screen_rect.height() - self._window_height) // 2 + screen_rect.top(),
-                self._window_width,
-                self._window_height,
+                (screen_rect.height() - height) // 2 + screen_rect.top(),
+                width,
+                height,
             )
         elif self._dock_edge == "left":
             return QRect(
-                screen_rect.left() - self._window_width + margin,
-                (screen_rect.height() - self._window_height) // 2 + screen_rect.top(),
-                self._window_width,
-                self._window_height,
+                screen_rect.left() - width + margin,
+                (screen_rect.height() - height) // 2 + screen_rect.top(),
+                width,
+                height,
             )
         elif self._dock_edge == "top":
             return QRect(
-                (screen_rect.width() - self._window_width) // 2 + screen_rect.left(),
-                screen_rect.top() - self._window_height + margin,
-                self._window_width,
-                self._window_height,
+                (screen_rect.width() - width) // 2 + screen_rect.left(),
+                screen_rect.top() - height + margin,
+                width,
+                height,
             )
         else:  # bottom
             return QRect(
-                (screen_rect.width() - self._window_width) // 2 + screen_rect.left(),
+                (screen_rect.width() - width) // 2 + screen_rect.left(),
                 screen_rect.bottom() - margin,
-                self._window_width,
-                self._window_height,
+                width,
+                height,
             )
 
     def _get_visible_geometry(self, screen_rect: QRect) -> QRect:
+        width, height = self._effective_size()
+
         if self._dock_edge == "right":
             return QRect(
-                screen_rect.right() - self._window_width,
-                (screen_rect.height() - self._window_height) // 2 + screen_rect.top(),
-                self._window_width,
-                self._window_height,
+                screen_rect.right() - width,
+                (screen_rect.height() - height) // 2 + screen_rect.top(),
+                width,
+                height,
             )
         elif self._dock_edge == "left":
             return QRect(
                 screen_rect.left(),
-                (screen_rect.height() - self._window_height) // 2 + screen_rect.top(),
-                self._window_width,
-                self._window_height,
+                (screen_rect.height() - height) // 2 + screen_rect.top(),
+                width,
+                height,
             )
         elif self._dock_edge == "top":
             return QRect(
-                (screen_rect.width() - self._window_width) // 2 + screen_rect.left(),
+                (screen_rect.width() - width) // 2 + screen_rect.left(),
                 screen_rect.top(),
-                self._window_width,
-                self._window_height,
+                width,
+                height,
             )
         else:  # bottom
             return QRect(
-                (screen_rect.width() - self._window_width) // 2 + screen_rect.left(),
-                screen_rect.bottom() - self._window_height,
-                self._window_width,
-                self._window_height,
+                (screen_rect.width() - width) // 2 + screen_rect.left(),
+                screen_rect.bottom() - height,
+                width,
+                height,
             )
 
     def _move_to_hidden_position(self, screen_rect: QRect):
