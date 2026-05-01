@@ -271,6 +271,21 @@ class FileListWidget(QWidget):
                     f"QProgressBar{{background:#333;border:none;border-radius:3px;}}"
                     f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
                 )
+                # P4.5: 跨入"接近满"阈值时一次性提示，不在每次刷新都打扰
+                threshold = 95 if pct >= 95 else (85 if pct >= 85 else 0)
+                last_threshold = getattr(self, "_last_quota_threshold", 0)
+                if threshold and threshold > last_threshold:
+                    if threshold >= 95:
+                        msg = (
+                            f"文件云同步空间已用 {pct}%，接近上限。"
+                            "升级套餐可获得更大容量；或在表格中删除不再需要的文件。"
+                        )
+                    else:
+                        msg = (
+                            f"文件云同步已用 {pct}%。如需更大容量，可考虑升级套餐。"
+                        )
+                    self._show_sync_status(msg)
+                self._last_quota_threshold = threshold
                 self._last_usage_pct = pct
         else:
             self.quota_label.setText("已用 -- / --")

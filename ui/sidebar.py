@@ -252,7 +252,9 @@ class Sidebar(QWidget):
     def _refresh_upgrade_button(self) -> None:
         """根据登录状态、entitlement、是否存在非个人空间，统一刷新扩展入口可见性。
 
-        默认（未登录、free 档位、无团队空间）：所有扩展入口隐藏，主路径只剩"标签"。
+        P4 触发原则：升级提示只在触达限制时出现。侧栏不再常驻"了解云端增强"按钮——
+        用户可在「设置 → 云端同步」中查看 SubscriptionWidget；即将满额、分享受限、
+        文件配额满等场景由具体功能上下文触发。
         """
         # 登录状态
         try:
@@ -269,10 +271,8 @@ class Sidebar(QWidget):
             except Exception:
                 ent = None
 
-        plan_val = "free"
         has_team_features = False
         if ent is not None:
-            plan_val = getattr(ent.plan, "value", str(ent.plan)) if ent.plan is not None else "free"
             has_team_features = bool(
                 getattr(ent, "team_seats", 0) or getattr(ent, "is_team_owner", False)
             )
@@ -285,11 +285,8 @@ class Sidebar(QWidget):
         # 管理团队按钮：仅团队权益用户
         self.manage_team_btn.setVisible(bool(has_team_features))
 
-        # 升级按钮：登录后且非 Team 档位才提示；未登录时不在主路径打扰
-        if has_login and plan_val != "team":
-            self.upgrade_btn.setVisible(True)
-        else:
-            self.upgrade_btn.setVisible(False)
+        # 升级按钮：始终隐藏；改由触达限制场景按需弹提示
+        self.upgrade_btn.setVisible(False)
 
 
 class _CreateSpaceDialog(QDialog):

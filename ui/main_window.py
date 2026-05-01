@@ -1210,17 +1210,9 @@ class MainWindow(EdgeHiddenWindow):
         more_menu = menu.addMenu("⋯ 更多操作")
 
         share_action = more_menu.addAction("🔗 分享这些条目...")
+        # P4: 不再因权益不足而灰化；改为点击后弹场景化提示，让用户知道为什么、去哪升级
         share_action.triggered.connect(lambda: self._on_share_items([item]))
-        # 仅当 entitlement 允许时启用
-        if self.entitlement_service is not None:
-            try:
-                can_share = bool(self.entitlement_service.current().can_share_link)
-            except Exception:
-                can_share = False
-            if not can_share:
-                share_action.setEnabled(False)
-                share_action.setToolTip("当前套餐不支持分享链接")
-        elif self.share_service is None:
+        if self.share_service is None and self.entitlement_service is None:
             share_action.setEnabled(False)
 
         tag_action = more_menu.addAction("🏷 添加标签...")
@@ -1418,6 +1410,32 @@ class MainWindow(EdgeHiddenWindow):
         if self.share_service is None:
             QMessageBox.warning(self, "分享不可用", "未初始化 ShareService，无法创建分享链接。")
             return
+
+        # P4: 在打开分享对话框前先检查 entitlement.can_share_link；不允许时弹场景化提示
+        if self.entitlement_service is not None:
+            try:
+                can_share = bool(self.entitlement_service.current().can_share_link)
+            except Exception:
+                can_share = True  # 取不到权益时让后端自己拦
+            if not can_share:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Information)
+                box.setWindowTitle("分享链接需要升级套餐")
+                box.setText(
+                    "分享链接是付费增强能力——把这一组文本/图片发给同事、客户"
+                    "或自己其他设备一次性使用，链接到期自动失效。\n\n"
+                    "你当前的套餐暂不支持创建分享链接。"
+                )
+                view_btn = box.addButton("查看套餐", QMessageBox.AcceptRole)
+                box.addButton("取消", QMessageBox.RejectRole)
+                box.exec()
+                if box.clickedButton() is view_btn:
+                    try:
+                        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+                    except Exception:
+                        pass
+                return
+
         try:
             from .share_dialog import ShareLinkDialog
         except Exception as exc:
