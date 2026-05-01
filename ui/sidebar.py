@@ -73,10 +73,25 @@ class Sidebar(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
 
-        # --- Space 切换 ---
+        # --- 标签树（主路径，始终展示）---
+        tag_label = QLabel("标签")
+        tag_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        layout.addWidget(tag_label)
+
+        self.tag_list = QListWidget()
+        self.tag_list.setSelectionMode(QListWidget.SingleSelection)
+        self.tag_list.itemSelectionChanged.connect(self._on_tag_selection_changed)
+        layout.addWidget(self.tag_list, 1)
+
+        # --- Space 切换（默认隐藏；登录且存在非个人 space 时再显示）---
+        self.space_section = QWidget()
+        space_layout = QVBoxLayout(self.space_section)
+        space_layout.setContentsMargins(0, 0, 0, 0)
+        space_layout.setSpacing(4)
+
         space_label = QLabel("空间")
         space_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
-        layout.addWidget(space_label)
+        space_layout.addWidget(space_label)
 
         space_row = QHBoxLayout()
         space_row.setSpacing(4)
@@ -90,40 +105,22 @@ class Sidebar(QWidget):
         self.create_space_btn.clicked.connect(self._on_create_space_clicked)
         space_row.addWidget(self.create_space_btn)
 
-        layout.addLayout(space_row)
+        space_layout.addLayout(space_row)
+        layout.addWidget(self.space_section)
+        self.space_section.setVisible(False)
 
-        manage_row = QHBoxLayout()
-        manage_row.setSpacing(4)
+        # --- 团队（按权益显示）---
         self.manage_team_btn = QPushButton("管理团队")
         self.manage_team_btn.clicked.connect(self.manage_team_requested.emit)
-        manage_row.addWidget(self.manage_team_btn)
-        layout.addLayout(manage_row)
+        layout.addWidget(self.manage_team_btn)
+        self.manage_team_btn.setVisible(False)
 
-        # --- 标签树 ---
-        tag_label = QLabel("标签")
-        tag_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
-        layout.addWidget(tag_label)
-
-        self.tag_list = QListWidget()
-        self.tag_list.setSelectionMode(QListWidget.SingleSelection)
-        self.tag_list.itemSelectionChanged.connect(self._on_tag_selection_changed)
-        layout.addWidget(self.tag_list, 1)
-
-        # --- 保存的搜索（内存版占位）---
-        saved_label = QLabel("保存的搜索")
-        saved_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
-        layout.addWidget(saved_label)
-
-        self.saved_search_list = QListWidget()
-        self.saved_search_list.setMaximumHeight(80)
-        self.saved_search_list.setToolTip("尚未实现持久化，仅内存保存")
-        layout.addWidget(self.saved_search_list)
-
-        # --- 升级区 ---
-        self.upgrade_btn = QPushButton("升级到 Team")
+        # --- 升级 / 了解云端增强（默认隐藏；登录且非 Team 档位时再显示）---
+        self.upgrade_btn = QPushButton("了解云端增强")
         self.upgrade_btn.setObjectName("okButton")
         self.upgrade_btn.clicked.connect(self.upgrade_requested.emit)
         layout.addWidget(self.upgrade_btn)
+        self.upgrade_btn.setVisible(False)
 
     # ------------------------------------------------------------------
     # 刷新方法（给外部调用）
@@ -166,6 +163,11 @@ class Sidebar(QWidget):
             self.space_combo.setCurrentIndex(target_index)
         finally:
             self._suppress_space_signal = False
+        # 空间数据更新后同步刷新可见性
+        try:
+            self._refresh_upgrade_button()
+        except Exception:
+            pass
 
     def refresh_tags(self, space_id: Optional[str]) -> None:
         """刷新当前 space 的标签列表。"""
@@ -248,22 +250,46 @@ class Sidebar(QWidget):
         self.refresh_spaces()
 
     def _refresh_upgrade_button(self) -> None:
-        """根据 entitlement.plan 决定是否隐藏升级按钮。"""
+        """根据登录状态、entitlement、是否存在非个人空间，统一刷新扩展入口可见性。
+
+        默认（未登录、free 档位、无团队空间）：所有扩展入口隐藏，主路径只剩"标签"。
+        """
+        # 登录状态
+        try:
+            from config import get_cloud_access_token
+            has_login = bool(get_cloud_access_token())
+        except Exception:
+            has_login = False
+
+        # entitlement
         ent = None
         if self._entitlement_service is not None:
             try:
                 ent = self._entitlement_service.current()
             except Exception:
                 ent = None
-        if ent is None:
+
+        plan_val = "free"
+        has_team_features = False
+        if ent is not None:
+            plan_val = getattr(ent.plan, "value", str(ent.plan)) if ent.plan is not None else "free"
+            has_team_features = bool(
+                getattr(ent, "team_seats", 0) or getattr(ent, "is_team_owner", False)
+            )
+
+        has_non_personal_space = bool(self._spaces)
+
+        # Space 区块：登录 + 至少一个团队空间
+        self.space_section.setVisible(has_login and has_non_personal_space)
+
+        # 管理团队按钮：仅团队权益用户
+        self.manage_team_btn.setVisible(bool(has_team_features))
+
+        # 升级按钮：登录后且非 Team 档位才提示；未登录时不在主路径打扰
+        if has_login and plan_val != "team":
             self.upgrade_btn.setVisible(True)
-            return
-        plan_val = getattr(ent.plan, "value", str(ent.plan)) if ent.plan is not None else "free"
-        # 只在 TEAM 档位隐藏
-        if plan_val == "team":
-            self.upgrade_btn.setVisible(False)
         else:
-            self.upgrade_btn.setVisible(True)
+            self.upgrade_btn.setVisible(False)
 
 
 class _CreateSpaceDialog(QDialog):

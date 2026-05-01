@@ -158,12 +158,16 @@ class AppSettings:
     disabled_plugins: Tuple[str, ...] = ()
 
     # 文件云同步（仅付费用户可用，配额与单文件上限由云端下发）
-    files_sync_enabled: bool = True
+    # 默认关闭，避免新装机用户在主界面看到付费入口；用户登录并主动开启后再启用。
+    files_sync_enabled: bool = False
     files_auto_download: bool = False
     files_max_autodownload_mb: int = 200
 
     # 来源 App 捕获：是否把窗口标题写入 source_title 字段（隐私考虑，默认关）
     capture_source_title: bool = False
+
+    # 首次启动 3 步引导是否已完成或跳过
+    onboarding_done: bool = False
 
 
 # ============ 序列化 ============

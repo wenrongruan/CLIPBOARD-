@@ -31,6 +31,7 @@ from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
 from core.plugin_api import PluginResult, PluginResultAction
+from core import analytics
 from config import (
     IS_MACOS,
     PAGE_SIZE,
@@ -135,6 +136,11 @@ class MainWindow(EdgeHiddenWindow):
         self._setup_ui()
         self._connect_signals()
         self._load_items()
+
+        # 首次启动 3 步引导（非阻塞，跳过即关闭）
+        self._onboarding_dialog = None
+        if not getattr(settings, "onboarding_done", False):
+            QTimer.singleShot(600, self._maybe_show_onboarding)
 
     def _setup_ui(self):
         # v3.4: 外层改为 QHBoxLayout，左侧是 Sidebar，右侧是主内容
@@ -682,6 +688,11 @@ class MainWindow(EdgeHiddenWindow):
     def _on_search_changed(self, text: str):
         self._search_timer.stop()
         self._search_timer.start(300)  # 300ms 防抖
+        if text.strip():
+            try:
+                analytics.mark_first(analytics.FIRST_SEARCH)
+            except Exception:
+                pass
 
     def _do_search(self):
         self._search_query = self.search_input.text().strip()
@@ -701,6 +712,10 @@ class MainWindow(EdgeHiddenWindow):
         self._feedback_timer.start(2000)
 
     def _on_item_clicked(self, item: ClipboardItem):
+        try:
+            analytics.mark_first(analytics.FIRST_COPY_HISTORY)
+        except Exception:
+            pass
         # 图片需要从数据库获取完整数据 — 异步加载避免阻塞主线程
         if item.is_image:
             self.copy_feedback_label.setText("正在加载图片...")
@@ -789,6 +804,10 @@ class MainWindow(EdgeHiddenWindow):
             logger.warning(f"删除云端副本失败: {error}")
 
     def _on_item_star(self, item: ClipboardItem):
+        try:
+            analytics.mark_first(analytics.FIRST_STAR)
+        except Exception:
+            pass
         self.repository.toggle_star(item.id)
         new_starred = not item.is_starred
 
@@ -922,6 +941,46 @@ class MainWindow(EdgeHiddenWindow):
             self._prepend_item(item)
         elif self._current_page == 0 and not self._search_query:
             self._load_items()
+        try:
+            analytics.mark_first(analytics.FIRST_RECORD)
+        except Exception:
+            pass
+        if self._onboarding_dialog is not None:
+            try:
+                self._onboarding_dialog.advance_on_copy()
+            except Exception:
+                pass
+
+    def _maybe_show_onboarding(self) -> None:
+        """惰性创建首启引导，避免阻塞启动。"""
+        if self._onboarding_dialog is not None:
+            return
+        if getattr(settings, "onboarding_done", False):
+            return
+        try:
+            from .onboarding_dialog import OnboardingDialog
+            self._onboarding_dialog = OnboardingDialog(self)
+            self._onboarding_dialog.finished_or_skipped.connect(self._on_onboarding_done)
+            self._onboarding_dialog.show()
+        except Exception as exc:
+            logger.debug(f"显示首启引导失败: {exc}")
+            self._onboarding_dialog = None
+
+    def _on_onboarding_done(self) -> None:
+        self._onboarding_dialog = None
+
+    def show_window(self):
+        super().show_window()
+        try:
+            analytics.mark_first(analytics.FIRST_WAKE)
+        except Exception:
+            pass
+        if self._onboarding_dialog is not None:
+            try:
+                self._onboarding_dialog.advance_on_wake()
+                self._onboarding_dialog.raise_()
+            except Exception:
+                pass
 
     def _on_new_items(self, items: List[ClipboardItem]):
         # 来自其他设备的新记录
@@ -1146,9 +1205,11 @@ class MainWindow(EdgeHiddenWindow):
         delete_action = menu.addAction(f"🗑 {t('ctx_delete')}")
         delete_action.triggered.connect(lambda: self._on_item_delete(item))
 
-        # v3.4: 分享 + 打标签
+        # 第二组：扩展能力收纳到「更多操作」子菜单，避免压过主操作
         menu.addSeparator()
-        share_action = menu.addAction("🔗 分享这些条目...")
+        more_menu = menu.addMenu("⋯ 更多操作")
+
+        share_action = more_menu.addAction("🔗 分享这些条目...")
         share_action.triggered.connect(lambda: self._on_share_items([item]))
         # 仅当 entitlement 允许时启用
         if self.entitlement_service is not None:
@@ -1162,29 +1223,27 @@ class MainWindow(EdgeHiddenWindow):
         elif self.share_service is None:
             share_action.setEnabled(False)
 
-        tag_action = menu.addAction("🏷 添加标签...")
+        tag_action = more_menu.addAction("🏷 添加标签...")
         tag_action.triggered.connect(lambda: self._on_add_tags(item))
         if self.tag_service is None:
             tag_action.setEnabled(False)
 
-        # 插件操作
+        # 第三组：插件统一收进「插件」子菜单（即使只有一个动作也不抢顶层）
         if self.plugin_manager:
             groups = self.plugin_manager.get_plugin_actions_grouped(item)
             if groups:
-                menu.addSeparator()
+                plugin_root = menu.addMenu("🧩 插件")
                 for group in groups:
                     actions = group["actions"]
                     if len(actions) == 1:
-                        # 单动作插件直接作为菜单项
                         a = actions[0]
-                        act = menu.addAction(f"{a.icon} {a.label}")
+                        act = plugin_root.addAction(f"{a.icon} {a.label}")
                         act.triggered.connect(
                             lambda checked=False, pid=group["plugin_id"], aid=a.action_id:
                                 self._run_plugin_action(pid, aid, item)
                         )
                     else:
-                        # 多动作插件使用子菜单
-                        sub = menu.addMenu(f"{actions[0].icon} {group['plugin_name']}")
+                        sub = plugin_root.addMenu(f"{actions[0].icon} {group['plugin_name']}")
                         for a in actions:
                             act = sub.addAction(a.label)
                             act.triggered.connect(
