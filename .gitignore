@@ -35,7 +35,12 @@ clipboard.db
 upload.sh
 .venv_appstore/
 .playwright-mcp/
+.claude/
+.serena/
 
 # Website (not open source)
 website/
 .pillow_fuse/
+
+# Local database exports
+sql/公共.sql
