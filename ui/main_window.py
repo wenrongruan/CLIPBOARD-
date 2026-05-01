@@ -35,6 +35,7 @@ from core import analytics
 from config import (
     IS_MACOS,
     PAGE_SIZE,
+    PRICING_URL,
     settings,
     update_settings,
     flush_settings,
@@ -397,7 +398,7 @@ class MainWindow(EdgeHiddenWindow):
             upgrade_btn.setMinimumHeight(34)
             upgrade_btn.setCursor(Qt.PointingHandCursor)
             upgrade_btn.clicked.connect(
-                lambda: QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+                lambda: QDesktopServices.openUrl(QUrl(PRICING_URL))
             )
             btn_row = QHBoxLayout()
             btn_row.addStretch()
@@ -634,7 +635,7 @@ class MainWindow(EdgeHiddenWindow):
         self._show_settings(initial_tab="team")
 
     def _on_sidebar_upgrade(self):
-        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+        QDesktopServices.openUrl(QUrl(PRICING_URL))
 
     def _on_view_changed(self, view_id: int):
         if view_id == 1:
@@ -1210,7 +1211,6 @@ class MainWindow(EdgeHiddenWindow):
         more_menu = menu.addMenu("⋯ 更多操作")
 
         share_action = more_menu.addAction("🔗 分享这些条目...")
-        # P4: 不再因权益不足而灰化；改为点击后弹场景化提示，让用户知道为什么、去哪升级
         share_action.triggered.connect(lambda: self._on_share_items([item]))
         if self.share_service is None and self.entitlement_service is None:
             share_action.setEnabled(False)
@@ -1411,7 +1411,6 @@ class MainWindow(EdgeHiddenWindow):
             QMessageBox.warning(self, "分享不可用", "未初始化 ShareService，无法创建分享链接。")
             return
 
-        # P4: 在打开分享对话框前先检查 entitlement.can_share_link；不允许时弹场景化提示
         if self.entitlement_service is not None:
             try:
                 can_share = bool(self.entitlement_service.current().can_share_link)
@@ -1431,7 +1430,7 @@ class MainWindow(EdgeHiddenWindow):
                 box.exec()
                 if box.clickedButton() is view_btn:
                     try:
-                        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+                        QDesktopServices.openUrl(QUrl(PRICING_URL))
                     except Exception:
                         pass
                 return

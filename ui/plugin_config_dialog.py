@@ -1,5 +1,6 @@
 """插件配置对话框 — 根据 plugin manifest 的 config_schema 自动生成表单"""
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
@@ -9,7 +10,6 @@ from i18n import t
 from .styles import MAIN_STYLE
 
 
-# P3.8: 把 manifest.permissions 里的字符串翻译成普通用户能看懂的解释
 _PERMISSION_LABELS = {
     "network": ("网络访问", "插件可以访问互联网（HTTP 请求等）"),
     "cloud": ("云端 API", "插件可以调用本应用的云端账号 API（同步、订阅等）"),
@@ -71,7 +71,7 @@ class PluginConfigDialog(QDialog):
             for p in self._permissions:
                 label, desc = _format_permission(p)
                 row = QLabel(f"· <b>{label}</b> — {desc}")
-                row.setTextFormat(1)  # Qt.RichText
+                row.setTextFormat(Qt.RichText)
                 row.setStyleSheet("color:#ddd;background:transparent;border:none;font-size:11px;")
                 row.setWordWrap(True)
                 perm_layout.addWidget(row)

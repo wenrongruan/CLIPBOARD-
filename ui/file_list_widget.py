@@ -15,7 +15,7 @@ import os
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QUrl, QThread
+from PySide6.QtCore import Qt, QTimer, QUrl, QThread, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableView,
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QFrame,
 )
 
-from config import settings
+from config import settings, PRICING_URL
 from core.cloud_api import CloudAPIClient
 from core.entitlement_service import EntitlementService, Plan, MAX_SINGLE_FILE_BYTES
 from core.file_models import CloudFile, FileSyncState
@@ -231,7 +231,6 @@ class FileListWidget(QWidget):
         if f:
             self.model.upsert(f)
         if not ok:
-            # P1.3: 失败提示降级到状态条，不再用 QMessageBox 打断主路径
             name = f.name if f else str(local_id)
             self._show_sync_status(f"{name} 传输失败：{err or '未知错误'}")
 
@@ -241,7 +240,6 @@ class FileListWidget(QWidget):
 
     def _show_sync_status(self, text: str) -> None:
         try:
-            from PySide6.QtCore import QTimer
             self.sync_status_label.setText(text)
             self.sync_status_label.setVisible(True)
             QTimer.singleShot(8000, lambda: self.sync_status_label.setVisible(False))
@@ -266,13 +264,22 @@ class FileListWidget(QWidget):
             pct = min(100, int(used * 100 / max(1, quota)))
             self.usage_bar.setValue(pct)
             if pct != self._last_usage_pct:
-                color = "#f87171" if pct >= 95 else ("#fbbf24" if pct >= 80 else "#0078d4")
+                if pct >= 95:
+                    color = "#f87171"
+                elif pct >= 80:
+                    color = "#fbbf24"
+                else:
+                    color = "#0078d4"
                 self.usage_bar.setStyleSheet(
                     f"QProgressBar{{background:#333;border:none;border-radius:3px;}}"
                     f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
                 )
-                # P4.5: 跨入"接近满"阈值时一次性提示，不在每次刷新都打扰
-                threshold = 95 if pct >= 95 else (85 if pct >= 85 else 0)
+                if pct >= 95:
+                    threshold = 95
+                elif pct >= 85:
+                    threshold = 85
+                else:
+                    threshold = 0
                 last_threshold = getattr(self, "_last_quota_threshold", 0)
                 if threshold and threshold > last_threshold:
                     if threshold >= 95:
@@ -281,9 +288,7 @@ class FileListWidget(QWidget):
                             "升级套餐可获得更大容量；或在表格中删除不再需要的文件。"
                         )
                     else:
-                        msg = (
-                            f"文件云同步已用 {pct}%。如需更大容量，可考虑升级套餐。"
-                        )
+                        msg = f"文件云同步已用 {pct}%。如需更大容量，可考虑升级套餐。"
                     self._show_sync_status(msg)
                 self._last_quota_threshold = threshold
                 self._last_usage_pct = pct
@@ -301,7 +306,7 @@ class FileListWidget(QWidget):
             self.gate_banner_text.setText(reason or "文件云同步需要付费订阅")
 
     def _open_pricing(self):
-        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+        QDesktopServices.openUrl(QUrl(PRICING_URL))
 
     # ---------- add / drag ----------
 

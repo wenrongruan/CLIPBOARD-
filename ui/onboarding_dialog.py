@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
 )
 
 from config import get_effective_hotkey, update_settings, flush_settings
@@ -41,17 +42,18 @@ class OnboardingDialog(QDialog):
         self.setWindowTitle("欢迎使用 SharedClipboard")
         self.setModal(False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        self.setMinimumWidth(420)
+        self.setMinimumSize(460, 300)
         self._setup_ui()
         self._render_step()
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 16)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         self.slogan = QLabel("复制过的东西，再也不用找第二遍。")
         self.slogan.setStyleSheet("font-size:15px;font-weight:600;")
+        self.slogan.setWordWrap(True)
         layout.addWidget(self.slogan)
 
         self.step_label = QLabel("")
@@ -60,13 +62,14 @@ class OnboardingDialog(QDialog):
 
         self.title_label = QLabel("")
         self.title_label.setStyleSheet("font-size:14px;font-weight:500;")
+        self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
 
         self.body_label = QLabel("")
         self.body_label.setWordWrap(True)
-        layout.addWidget(self.body_label)
-
-        layout.addStretch(1)
+        self.body_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.body_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        layout.addWidget(self.body_label, 1)
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
@@ -111,6 +114,8 @@ class OnboardingDialog(QDialog):
             self.next_btn.setText("完成")
             self.next_btn.setEnabled(True)
             self.skip_btn.setVisible(False)
+        # 文字长度可能比上一步多，强制按当前内容重算大小，避免下沿被裁掉
+        self.adjustSize()
 
     # ---- 外部推进入口 ----
 

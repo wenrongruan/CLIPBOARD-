@@ -93,7 +93,7 @@ class ShareLinkDialog(QDialog):
         info.setTextFormat(Qt.RichText)
         v.addWidget(info)
 
-        # P2.6: 让用户先看到典型场景，再选择有效期；避免误以为是团队协作入口
+        # 先告诉用户典型场景再选有效期；避免误以为这是团队协作入口
         scenario = QLabel(
             "适用场景：把这一组文本/图片发给同事、客户或自己其他设备一次性使用。\n"
             "链接到期后自动失效，可创建多个链接，互不影响。"

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
+from config import PRICING_URL
 from core.cloud_api import CloudAPIClient, CloudAPIError
 from PySide6.QtCore import Signal as QtSignal
 
@@ -362,7 +363,7 @@ class SubscriptionWidget(QWidget):
 
     def _open_pricing(self):
         """打开套餐页面"""
-        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+        QDesktopServices.openUrl(QUrl(PRICING_URL))
 
     def _open_account(self):
         """打开账户管理页面"""

@@ -41,6 +41,8 @@ class SyncMode(str, Enum):
 APP_NAME = "SharedClipboard"
 APP_VERSION = "3.3.0"
 
+PRICING_URL = "https://www.jlike.com/pricing.html"
+
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"

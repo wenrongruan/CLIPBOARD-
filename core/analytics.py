@@ -1,7 +1,7 @@
 """本地匿名事件计数。
 
 仅在本机存储到 `<config_dir>/analytics.json`，不做任何网络上报。
-用于验证 P0 主路径是否生效（首次记录、首次唤出、首次搜索、首次复制历史、首次收藏）。
+用于验证主路径是否生效：首次记录、首次唤出、首次搜索、首次复制历史、首次收藏。
 """
 
 from __future__ import annotations
@@ -9,17 +9,21 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
-# 事件常量
 FIRST_RECORD = "first_record"
 FIRST_WAKE = "first_wake"
 FIRST_SEARCH = "first_search"
 FIRST_COPY_HISTORY = "first_copy_history"
 FIRST_STAR = "first_star"
+
+_KNOWN_EVENTS: Set[str] = {
+    FIRST_RECORD, FIRST_WAKE, FIRST_SEARCH, FIRST_COPY_HISTORY, FIRST_STAR,
+}
 
 
 class _LocalAnalytics:
@@ -28,6 +32,9 @@ class _LocalAnalytics:
         self._path: Optional[Path] = None
         self._data: Dict[str, dict] = {"first": {}, "count": {}}
         self._loaded = False
+        # Why: mark_first 在剪贴板复制、搜索按键等热路径上调用；用一个无锁的内存
+        # 集合做快速早退，避免每次都进 lock + load + json dump。
+        self._marked: Set[str] = set()
 
     def _resolve_path(self) -> Optional[Path]:
         if self._path is not None:
@@ -43,13 +50,16 @@ class _LocalAnalytics:
         if self._loaded:
             return
         path = self._resolve_path()
-        if path and path.exists():
+        if path:
             try:
                 with path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
                     self._data["first"] = dict(data.get("first") or {})
                     self._data["count"] = dict(data.get("count") or {})
+                    self._marked = set(self._data["first"].keys())
+            except FileNotFoundError:
+                pass
             except Exception as exc:
                 logger.debug(f"analytics 加载失败,使用空状态: {exc}")
         self._loaded = True
@@ -68,20 +78,26 @@ class _LocalAnalytics:
             logger.debug(f"analytics 保存失败: {exc}")
 
     def mark_first(self, event: str) -> bool:
-        """记录首次发生时间戳，已记录则跳过。返回是否本次新写入。"""
+        """记录首次发生时间戳，已记录则无锁早退。返回是否本次新写入。"""
+        if event in self._marked:
+            return False
         try:
             with self._lock:
                 self._ensure_loaded()
                 if event in self._data["first"]:
+                    self._marked.add(event)
                     return False
-                import time
                 self._data["first"][event] = int(time.time())
+                self._marked.add(event)
                 self._save()
                 return True
         except Exception:
             return False
 
     def incr(self, event: str, delta: int = 1) -> None:
+        # 限制 count 字典只增长已知事件键，避免任意键调用导致内存无界。
+        if event not in _KNOWN_EVENTS:
+            return
         try:
             with self._lock:
                 self._ensure_loaded()

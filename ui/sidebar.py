@@ -62,7 +62,7 @@ class Sidebar(QWidget):
         self._setup_ui()
         self.refresh_spaces()
         self.refresh_tags(None)
-        self._refresh_upgrade_button()
+        self._refresh_entitlement_ui()
 
     # ------------------------------------------------------------------
     # UI 构造
@@ -165,7 +165,7 @@ class Sidebar(QWidget):
             self._suppress_space_signal = False
         # 空间数据更新后同步刷新可见性
         try:
-            self._refresh_upgrade_button()
+            self._refresh_entitlement_ui()
         except Exception:
             pass
 
@@ -249,7 +249,7 @@ class Sidebar(QWidget):
         self.create_space_requested.emit()
         self.refresh_spaces()
 
-    def _refresh_upgrade_button(self) -> None:
+    def _refresh_entitlement_ui(self) -> None:
         """根据登录状态、entitlement、是否存在非个人空间，统一刷新扩展入口可见性。
 
         P4 触发原则：升级提示只在触达限制时出现。侧栏不再常驻"了解云端增强"按钮——

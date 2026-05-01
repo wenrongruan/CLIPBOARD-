@@ -240,10 +240,7 @@ class ClipboardMonitor(QObject):
             getattr(s, "capture_source_title", False),
             self._source_app_seen_failures,
         )
-
-        # P1.4: 敏感来源排除（如密码管理器、银行客户端）
-        if _is_source_excluded(source_app_value, getattr(s, "excluded_source_apps", ())):
-            logger.debug(f"来源 App {source_app_value!r} 在排除名单中,跳过记录")
+        if self._is_excluded(source_app_value, s):
             return
 
         item = TextClipboardItem(
@@ -269,6 +266,13 @@ class ClipboardMonitor(QObject):
         except Exception as e:
             logger.error(f"保存文本失败: {e}")
             self.error_occurred.emit(f"保存失败: {e}")
+
+    def _is_excluded(self, source_app: str, s) -> bool:
+        excluded = getattr(s, "excluded_source_apps", ())
+        if not _is_source_excluded(source_app, excluded):
+            return False
+        logger.debug(f"来源 App {source_app!r} 在排除名单中,跳过记录")
+        return True
 
     def _fast_image_hash(self, image: QImage) -> str:
         """用缩小到 64x64 的原始像素数据快速计算 hash，避免 PNG 编码开销"""
@@ -311,10 +315,7 @@ class ClipboardMonitor(QObject):
             getattr(s, "capture_source_title", False),
             self._source_app_seen_failures,
         )
-
-        # P1.4: 敏感来源排除（与文本路径一致）
-        if _is_source_excluded(source_app_value, getattr(s, "excluded_source_apps", ())):
-            logger.debug(f"图片来源 App {source_app_value!r} 在排除名单中,跳过记录")
+        if self._is_excluded(source_app_value, s):
             return
 
         logger.info(f"检测到新图片: {width}x{height}，提交后台处理")

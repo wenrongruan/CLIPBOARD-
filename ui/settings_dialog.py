@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from config import (
     APP_VERSION,
     IS_APPSTORE_BUILD,
+    PRICING_URL,
     settings,
     update_settings,
     get_cloud_access_token,
@@ -573,7 +574,7 @@ class SettingsDialog(QDialog):
     def _open_pricing_page(self):
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
-        QDesktopServices.openUrl(QUrl("https://www.jlike.com/pricing.html"))
+        QDesktopServices.openUrl(QUrl(PRICING_URL))
 
     # ========== 关于 ==========
 
@@ -849,7 +850,7 @@ class SettingsDialog(QDialog):
         if self._plugin_manager:
             installed_ids = {p["id"] for p in self._plugin_manager.get_loaded_plugins()}
 
-        # P3.9: 过滤掉对当前 APP_VERSION 不兼容的插件，避免下载后仍报"需要 SharedClipboard >= X"
+        # 过滤对当前 APP_VERSION 不兼容的插件，避免下载后仍报"需要 SharedClipboard >= X"
         from config import APP_VERSION
 
         def _ver_tuple(v: str):
@@ -1277,7 +1278,7 @@ class SettingsDialog(QDialog):
         if self._plugin_manager and self._cloud_api:
             self._plugin_manager.set_cloud_client(self._cloud_api)
         self._show_cloud_logged_in()
-        # P1.5: 首次登录后用一次性弹窗解释同步范围；不再重复打扰
+        # 首次登录后用一次性弹窗解释同步范围；后续不再重复打扰
         try:
             from config import settings as _cfg, update_settings, flush_settings
             if not getattr(_cfg, "cloud_scope_explainer_shown", False):
