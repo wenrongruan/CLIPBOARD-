@@ -162,6 +162,16 @@ class FileListWidget(QWidget):
         self.gate_banner.setVisible(False)
         root.addWidget(self.gate_banner)
 
+        # 同步状态条（替代弹窗，避免打断主路径）
+        self.sync_status_label = QLabel("")
+        self.sync_status_label.setStyleSheet(
+            "color:#fbbf24;background:rgba(255,165,0,0.10);"
+            "border:1px solid rgba(251,191,36,0.4);border-radius:4px;padding:4px 8px;font-size:11px;"
+        )
+        self.sync_status_label.setWordWrap(True)
+        self.sync_status_label.setVisible(False)
+        root.addWidget(self.sync_status_label)
+
         # 表格
         self.table = QTableView()
         self.model = FileListModel(self)
@@ -221,13 +231,22 @@ class FileListWidget(QWidget):
         if f:
             self.model.upsert(f)
         if not ok:
-            QMessageBox.warning(
-                self, "同步失败",
-                f"'{(f.name if f else local_id)}' 传输失败：\n{err or '未知错误'}",
-            )
+            # P1.3: 失败提示降级到状态条，不再用 QMessageBox 打断主路径
+            name = f.name if f else str(local_id)
+            self._show_sync_status(f"{name} 传输失败：{err or '未知错误'}")
 
     def _on_sync_error(self, msg: str, status: int):
         logger.warning(f"文件同步错误: {msg} (status={status})")
+        self._show_sync_status(f"文件同步出错：{msg}")
+
+    def _show_sync_status(self, text: str) -> None:
+        try:
+            from PySide6.QtCore import QTimer
+            self.sync_status_label.setText(text)
+            self.sync_status_label.setVisible(True)
+            QTimer.singleShot(8000, lambda: self.sync_status_label.setVisible(False))
+        except Exception:
+            pass
 
     # ---------- entitlement / gate ----------
 

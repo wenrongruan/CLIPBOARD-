@@ -1,23 +1,51 @@
 """插件配置对话框 — 根据 plugin manifest 的 config_schema 自动生成表单"""
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFormLayout, QHBoxLayout, QLineEdit,
-    QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
 )
 
 from i18n import t
 from .styles import MAIN_STYLE
 
 
+# P3.8: 把 manifest.permissions 里的字符串翻译成普通用户能看懂的解释
+_PERMISSION_LABELS = {
+    "network": ("网络访问", "插件可以访问互联网（HTTP 请求等）"),
+    "cloud": ("云端 API", "插件可以调用本应用的云端账号 API（同步、订阅等）"),
+    "cloud.subscription": ("云端：套餐/用量", "可读取你当前的套餐与用量"),
+    "cloud.credits": ("云端：积分扣费", "插件可消耗你账户的云端积分（按使用计费）"),
+    "cloud.files": ("云端：文件读写", "可读取/上传你绑定到云端的文件"),
+    "clipboard.write": ("写剪贴板", "插件可以把内容写回剪贴板"),
+    "clipboard.read": ("读剪贴板历史", "插件可以读取本地剪贴板历史"),
+    "filesystem": ("本地文件读写", "插件可以读写本地文件"),
+}
+
+
+def _format_permission(perm: str) -> tuple:
+    """返回 (label, description)；未知 perm 直接显示原始字符串。"""
+    if perm in _PERMISSION_LABELS:
+        return _PERMISSION_LABELS[perm]
+    return perm, "插件未在内置说明中——使用前请确认其用途"
+
+
 class PluginConfigDialog(QDialog):
     """根据 config_schema 自动生成的插件配置对话框"""
 
-    def __init__(self, plugin_name: str, schema: dict, current_config: dict, parent=None):
+    def __init__(
+        self,
+        plugin_name: str,
+        schema: dict,
+        current_config: dict,
+        parent=None,
+        permissions=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle(t("plugin_config_title", name=plugin_name))
         self.setFixedWidth(420)
         self.setStyleSheet(MAIN_STYLE)
         self._schema = schema
+        self._permissions = list(permissions or [])
         self._widgets = {}
         self._setup_ui(current_config)
 
@@ -25,6 +53,29 @@ class PluginConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.setContentsMargins(20, 20, 20, 20)
+
+        # 权限清单（在表单上方；无声明时不渲染该区块）
+        if self._permissions:
+            perm_box = QFrame()
+            perm_box.setStyleSheet(
+                "QFrame{background:rgba(88,166,255,0.08);"
+                "border:1px solid rgba(88,166,255,0.4);border-radius:6px;padding:8px;}"
+            )
+            perm_layout = QVBoxLayout(perm_box)
+            perm_layout.setSpacing(4)
+            title = QLabel("此插件声明使用的权限")
+            title.setStyleSheet(
+                "color:#58a6ff;font-weight:600;background:transparent;border:none;"
+            )
+            perm_layout.addWidget(title)
+            for p in self._permissions:
+                label, desc = _format_permission(p)
+                row = QLabel(f"· <b>{label}</b> — {desc}")
+                row.setTextFormat(1)  # Qt.RichText
+                row.setStyleSheet("color:#ddd;background:transparent;border:none;font-size:11px;")
+                row.setWordWrap(True)
+                perm_layout.addWidget(row)
+            layout.addWidget(perm_box)
 
         form = QFormLayout()
         form.setSpacing(10)

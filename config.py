@@ -166,8 +166,15 @@ class AppSettings:
     # 来源 App 捕获：是否把窗口标题写入 source_title 字段（隐私考虑，默认关）
     capture_source_title: bool = False
 
+    # 不记录这些来源 App 的剪贴板内容（按 bundle_id / 进程名 / 显示名匹配，子串包含即排除）
+    # 示例: ("KeePass", "1Password", "lastpass", "com.bitwarden.desktop")
+    excluded_source_apps: Tuple[str, ...] = ()
+
     # 首次启动 3 步引导是否已完成或跳过
     onboarding_done: bool = False
+
+    # 登录后"同步范围说明"是否已展示过（仅展示一次，避免重复打扰）
+    cloud_scope_explainer_shown: bool = False
 
 
 # ============ 序列化 ============

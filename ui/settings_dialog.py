@@ -849,9 +849,29 @@ class SettingsDialog(QDialog):
         if self._plugin_manager:
             installed_ids = {p["id"] for p in self._plugin_manager.get_loaded_plugins()}
 
-        available = [p for p in plugins if p.get("id") not in installed_ids]
+        # P3.9: 过滤掉对当前 APP_VERSION 不兼容的插件，避免下载后仍报"需要 SharedClipboard >= X"
+        from config import APP_VERSION
 
-        if not available:
+        def _ver_tuple(v: str):
+            try:
+                return tuple(int(x) for x in (v or "").split("."))
+            except (ValueError, AttributeError):
+                return ()
+
+        app_v = _ver_tuple(APP_VERSION)
+        available: list = []
+        incompatible: list = []
+        for p in plugins:
+            if p.get("id") in installed_ids:
+                continue
+            min_ver = p.get("min_app_version") or ""
+            min_v = _ver_tuple(min_ver)
+            if min_v and app_v and app_v < min_v:
+                incompatible.append((p, min_ver))
+                continue
+            available.append(p)
+
+        if not available and not incompatible:
             label = QLabel(t("plugin_store_empty"))
             label.setStyleSheet("color: #888888; padding: 10px;")
             label.setAlignment(Qt.AlignCenter)
@@ -861,6 +881,15 @@ class SettingsDialog(QDialog):
         for info in available:
             row = self._create_store_plugin_row(info)
             self._store_list_layout.addWidget(row)
+
+        if incompatible:
+            hint = QLabel(
+                f"另有 {len(incompatible)} 个插件需要更高版本（当前 {APP_VERSION}），"
+                "请升级 SharedClipboard 后再查看。"
+            )
+            hint.setStyleSheet("color:#aaa;font-size:11px;padding:8px 4px;")
+            hint.setWordWrap(True)
+            self._store_list_layout.addWidget(hint)
 
     def _on_store_error(self, error_msg: str):
         self._store_refresh_btn.setEnabled(True)
@@ -967,8 +996,14 @@ class SettingsDialog(QDialog):
         schema = self._plugin_manager.get_config_schema(plugin_id)
         current_config = self._plugin_manager.get_plugin_config(plugin_id)
         plugin_name = self._plugin_manager.get_plugin_name(plugin_id)
+        try:
+            permissions = self._plugin_manager.get_plugin_permissions(plugin_id)
+        except Exception:
+            permissions = []
 
-        dialog = PluginConfigDialog(plugin_name, schema, current_config, self)
+        dialog = PluginConfigDialog(
+            plugin_name, schema, current_config, self, permissions=permissions
+        )
         if dialog.exec() == QDialog.Accepted:
             new_config = dialog.get_config()
             self._plugin_manager.save_plugin_config(plugin_id, new_config)
@@ -1140,9 +1175,11 @@ class SettingsDialog(QDialog):
         cloud_layout.setContentsMargins(20, 20, 20, 20)
 
         desc = QLabel(
-            "云端同步为可选增强功能，无需登录也能正常使用本软件的所有核心功能。\n"
-            "开启后，你的剪贴板记录将额外备份到云端（收藏 + 最新记录），\n"
-            "方便在不同设备间快速访问。"
+            "云端同步是可选增强：未登录时所有核心功能（历史、搜索、收藏、热键）依然可用。\n"
+            "登录后，你的剪贴板记录会备份到云端（收藏 + 最新记录），方便多设备间访问。\n"
+            "「文件云同步」与「剪贴板同步」是两件事：\n"
+            "  · 剪贴板同步：传文本和图片，免费档位即可使用。\n"
+            "  · 文件云同步：付费增强，按容量上传原始文件字节，可单独开关。"
         )
         desc.setStyleSheet("color: #aaaaaa; font-size: 12px;")
         desc.setWordWrap(True)
@@ -1240,6 +1277,25 @@ class SettingsDialog(QDialog):
         if self._plugin_manager and self._cloud_api:
             self._plugin_manager.set_cloud_client(self._cloud_api)
         self._show_cloud_logged_in()
+        # P1.5: 首次登录后用一次性弹窗解释同步范围；不再重复打扰
+        try:
+            from config import settings as _cfg, update_settings, flush_settings
+            if not getattr(_cfg, "cloud_scope_explainer_shown", False):
+                QMessageBox.information(
+                    self,
+                    "云端同步范围说明",
+                    "登录已完成。请知悉：\n\n"
+                    "· 默认同步：收藏条目 + 最新剪贴板记录（文本与图片缩略数据）。\n"
+                    "· 不同步：本机历史中未收藏的旧条目、未启用文件同步时的原始文件。\n"
+                    "· 设备：每个登录设备独立同步队列，可在「云端同步」页查看用量。\n"
+                    "· 隐私：可在 settings.json 的 excluded_source_apps 中加入密码"
+                    "管理器、银行客户端等敏感来源关键字以排除。\n\n"
+                    "随时可在「云端同步」页登出，登出后本地数据保留。",
+                )
+                update_settings(cloud_scope_explainer_shown=True)
+                flush_settings()
+        except Exception:
+            pass
 
     # ========== 保存 ==========
 

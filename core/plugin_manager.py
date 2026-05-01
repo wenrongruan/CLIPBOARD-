@@ -373,6 +373,14 @@ class PluginManager(QObject):
             return manifest.get("name", plugin_id)
         return plugin_id
 
+    def get_plugin_permissions(self, plugin_id: str) -> list:
+        """返回插件 manifest 声明的 permissions 列表（无声明则空 list）。"""
+        manifest = self._manifests.get(plugin_id)
+        if not manifest:
+            return []
+        perms = manifest.get("permissions") or []
+        return list(perms)
+
     def get_plugin_actions_grouped(self, item: ClipboardItem) -> List[dict]:
         """返回按插件分组的动作列表（用于构建菜单）
 

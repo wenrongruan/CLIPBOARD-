@@ -23,6 +23,23 @@ from utils.image_utils import create_thumbnail, image_to_bytes
 logger = logging.getLogger(__name__)
 
 
+def _is_source_excluded(source_app: str, excluded: tuple) -> bool:
+    """source_app 命中 excluded 列表（大小写不敏感子串匹配）则返回 True。
+
+    excluded 来自 settings.excluded_source_apps；用户填的任意串只要是 source_app 的
+    子串就视为命中，方便用密码管理器、银行客户端等敏感来源关闭记录。
+    """
+    if not source_app or not excluded:
+        return False
+    sa = source_app.lower()
+    for pat in excluded:
+        if not pat:
+            continue
+        if pat.lower() in sa:
+            return True
+    return False
+
+
 def _capture_source(capture_title: bool, seen_failures: set) -> tuple:
     """捕获当前前台应用，返回 (source_app, source_title)。
 
@@ -224,6 +241,11 @@ class ClipboardMonitor(QObject):
             self._source_app_seen_failures,
         )
 
+        # P1.4: 敏感来源排除（如密码管理器、银行客户端）
+        if _is_source_excluded(source_app_value, getattr(s, "excluded_source_apps", ())):
+            logger.debug(f"来源 App {source_app_value!r} 在排除名单中,跳过记录")
+            return
+
         item = TextClipboardItem(
             text_content=text,
             content_hash=content_hash,
@@ -289,6 +311,11 @@ class ClipboardMonitor(QObject):
             getattr(s, "capture_source_title", False),
             self._source_app_seen_failures,
         )
+
+        # P1.4: 敏感来源排除（与文本路径一致）
+        if _is_source_excluded(source_app_value, getattr(s, "excluded_source_apps", ())):
+            logger.debug(f"图片来源 App {source_app_value!r} 在排除名单中,跳过记录")
+            return
 
         logger.info(f"检测到新图片: {width}x{height}，提交后台处理")
         self._image_executor.submit(
