@@ -838,6 +838,34 @@ class ClipboardRepository:
 
         self.db.execute_with_retry(operation)
 
+    def update_cloud_sync_metadata(
+        self,
+        item_id: int,
+        *,
+        cloud_id: Optional[int] = None,
+        is_starred: Optional[bool] = None,
+    ) -> None:
+        """合并云端同步元数据到本地条目。
+
+        用于“本地已存在相同 content_hash，但云端返回了 cloud_id / 收藏状态”的场景。
+        """
+        fields = []
+        params = []
+        if cloud_id is not None:
+            fields.append("cloud_id = ?")
+            params.append(cloud_id)
+        if is_starred is not None:
+            fields.append("is_starred = ?")
+            params.append(1 if is_starred else 0)
+        if not fields:
+            return
+
+        def operation(conn):
+            sql = f"UPDATE clipboard_items SET {', '.join(fields)} WHERE id = ?"
+            self._execute_write(conn, sql, (*params, item_id))
+
+        self.db.execute_with_retry(operation)
+
     def clear_cloud_id(self, item_id: int):
         """清除云端标记（云端副本已删除）"""
         def operation(conn):

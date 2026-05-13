@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -25,6 +26,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.cloud_api import CloudAPIClient, CloudAPIError  # noqa: E402
+from core.database import DatabaseManager  # noqa: E402
+from core.models import TextClipboardItem  # noqa: E402
+from core.repository import ClipboardRepository  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +408,53 @@ class TestCloudSyncServiceCursorPerSpace(unittest.TestCase):
         # 兼容老 key 也要写
         self.assertIn("cloud_last_sync_id", keys_written)
         svc.stop()
+
+
+class TestCloudSyncServiceMetadataMerge(unittest.TestCase):
+    def test_pull_merges_remote_starred_into_existing_local_item(self):
+        from core.cloud_sync_service import _SyncWorker
+
+        with TemporaryDirectory() as tmpdir:
+            db = DatabaseManager(str(Path(tmpdir) / "merge.db"))
+            repo = ClipboardRepository(db)
+            item_id = repo.add_item(
+                TextClipboardItem(
+                    text_content="same-content",
+                    content_hash="same-hash",
+                    preview="same-content",
+                    device_id="local-dev",
+                    device_name="Local",
+                    created_at=1000,
+                    is_starred=False,
+                )
+            )
+
+            cloud_api = MagicMock()
+            cloud_api.sync.return_value = {
+                "items": [
+                    {
+                        "id": 9001,
+                        "content_type": "text",
+                        "text_content": "same-content",
+                        "content_hash": "same-hash",
+                        "preview": "same-content",
+                        "device_id": "remote-dev",
+                        "device_name": "Remote",
+                        "created_at": 2000,
+                        "is_starred": True,
+                    }
+                ],
+                "has_more": False,
+            }
+
+            worker = _SyncWorker(cloud_api, repo)
+            worker.do_pull(None, 0)
+
+            merged = repo.get_item_by_id(item_id)
+            self.assertIsNotNone(merged)
+            self.assertTrue(merged.is_starred)
+            self.assertEqual(merged.cloud_id, 9001)
+            db.close()
 
 
 if __name__ == "__main__":

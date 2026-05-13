@@ -153,6 +153,15 @@ class TestCloudSync:
         assert item1.cloud_id == 101
         assert item2.cloud_id == 102
 
+    def test_update_cloud_sync_metadata_merges_starred_and_cloud_id(self, repo):
+        item_id = repo.add_item(_make_item("merge_meta", starred=False))
+
+        repo.update_cloud_sync_metadata(item_id, cloud_id=777, is_starred=True)
+
+        item = repo.get_item_by_id(item_id)
+        assert item.cloud_id == 777
+        assert item.is_starred is True
+
     def test_clear_cloud_id(self, repo):
         item_id = repo.add_item(_make_item("clear_test"))
         repo.set_cloud_id(item_id, 200)

@@ -103,8 +103,16 @@ class _SyncWorker(QObject):
                     new_items.append(item)
                     if server_id and item_id:
                         cloud_id_pairs.append((item_id, server_id))
-                elif not existing.is_cloud_synced and server_id:
-                    cloud_id_pairs.append((existing.id, server_id))
+                elif existing.id:
+                    remote_starred = bool(item.is_starred)
+                    needs_cloud_id = bool(server_id and existing.cloud_id != server_id)
+                    needs_star_merge = bool(existing.is_starred != remote_starred)
+                    if needs_cloud_id or needs_star_merge:
+                        self.repository.update_cloud_sync_metadata(
+                            existing.id,
+                            cloud_id=server_id if needs_cloud_id else None,
+                            is_starred=remote_starred if needs_star_merge else None,
+                        )
 
                 if server_id > max_server_id:
                     max_server_id = server_id
@@ -696,21 +704,24 @@ class CloudSyncService(QObject):
 
     def stop(self):
         """停止云端同步服务"""
-        if self._state == CloudSyncState.STOPPED:
-            return
+        was_running = self._state != CloudSyncState.STOPPED
         self._transition(CloudSyncState.STOPPED)
         self._pull_timer.stop()
         self._push_timer.stop()
-        # 退出时落盘游标（改走 app_meta，单条 key-value 比全量 settings 便宜）
-        self._persist_cursor()
-        # 先请求中断 + 关闭 httpx 客户端，强行解除阻塞中的网络 I/O，否则 wait 会被耗尽
-        self._worker_thread.requestInterruption()
-        try:
-            self.cloud_api.close()
-        except Exception as e:
-            logger.debug(f"关闭 cloud_api 客户端失败（忽略）: {e}")
-        self._worker_thread.quit()
-        self._worker_thread.wait(3000)
+        if was_running:
+            # 退出时落盘游标（改走 app_meta，单条 key-value 比全量 settings 便宜）
+            self._persist_cursor()
+
+        if self._worker_thread.isRunning():
+            # 先请求中断 + 关闭 httpx 客户端，强行解除阻塞中的网络 I/O，否则 wait 会被耗尽
+            self._worker_thread.requestInterruption()
+            try:
+                self.cloud_api.close()
+            except Exception as e:
+                logger.debug(f"关闭 cloud_api 客户端失败（忽略）: {e}")
+            self._worker_thread.quit()
+            self._worker_thread.wait(3000)
+
         logger.info("云端同步服务已停止")
 
     def force_sync(self):
