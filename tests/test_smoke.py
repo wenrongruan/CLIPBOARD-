@@ -98,3 +98,41 @@ def test_main_window_construct(qapp, tmp_config_env):
         window.deleteLater()
     finally:
         db.close()
+
+
+def test_main_window_close_requests_quit_on_macos(qapp, tmp_config_env, monkeypatch):
+    """macOS close should request app quit instead of silently hiding the window."""
+    from core.database import DatabaseManager
+    from core.repository import ClipboardRepository
+    from core.clipboard_monitor import ClipboardMonitor
+    from core.sync_service import SyncService
+    from core.plugin_manager import PluginManager
+    import ui.main_window as main_window_mod
+
+    db_path = tmp_config_env / "smoke-macos-close.db"
+    db = DatabaseManager(str(db_path))
+    repo = ClipboardRepository(db)
+    monitor = ClipboardMonitor(repo)
+    sync = SyncService(repo)
+    pm = PluginManager()
+
+    monkeypatch.setattr(main_window_mod, "IS_MACOS", True)
+
+    try:
+        window = main_window_mod.MainWindow(
+            repository=repo,
+            clipboard_monitor=monitor,
+            sync_service=sync,
+            plugin_manager=pm,
+            cloud_api=None,
+            cloud_sync_service=None,
+        )
+        quit_events = []
+        window.quit_requested.connect(lambda: quit_events.append(True))
+
+        window.close()
+
+        assert quit_events == [True]
+        window.deleteLater()
+    finally:
+        db.close()

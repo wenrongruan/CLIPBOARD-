@@ -132,6 +132,8 @@ class MainWindow(EdgeHiddenWindow):
         self._copy_executor = ThreadPoolExecutor(max_workers=1)
         self._cloud_executor = ThreadPoolExecutor(max_workers=1)
         self._load_error_notified = False
+        self._cloud_sync_item_added_connected = False
+        self._cloud_sync_ui_connected = False
 
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
@@ -229,12 +231,9 @@ class MainWindow(EdgeHiddenWindow):
             self.minimize_btn.setVisible(False)
 
         self.quit_btn = QPushButton("✕")
-        self.quit_btn.setToolTip(t("minimize") if IS_MACOS else t("quit_app"))
+        self.quit_btn.setToolTip(t("quit_app"))
         self.quit_btn.setFixedSize(28, 28)
-        if IS_MACOS:
-            self.quit_btn.clicked.connect(self.hide_window)
-        else:
-            self.quit_btn.clicked.connect(self._request_quit)
+        self.quit_btn.clicked.connect(self._request_quit)
         header_layout.addWidget(self.quit_btn)
 
         layout.addLayout(header_layout)
@@ -519,6 +518,51 @@ class MainWindow(EdgeHiddenWindow):
         # 若用户当前就在文件页，切回去以显示新 widget
         if self._stack.currentIndex() == 1:
             self._stack.setCurrentIndex(1)
+
+    def _advance_sync_after_cloud(self, items: List[ClipboardItem]):
+        if not items:
+            return
+        max_id = max((item.id for item in items if item.id), default=0)
+        if max_id:
+            self.sync_service.advance_sync_id(max_id)
+
+    def _bootstrap_cloud_sync_after_login(self):
+        if self.cloud_api is None or not self.cloud_api.is_authenticated:
+            return
+        try:
+            if self.cloud_sync_service is None:
+                from core.cloud_sync_service import CloudSyncService
+
+                self.cloud_sync_service = CloudSyncService(
+                    self.repository,
+                    self.cloud_api,
+                    self.entitlement_service,
+                )
+
+            if not self._cloud_sync_item_added_connected:
+                self.clipboard_monitor.item_added.connect(self.cloud_sync_service.enqueue_upload)
+                self._cloud_sync_item_added_connected = True
+
+            if not self._cloud_sync_ui_connected:
+                self.cloud_sync_service.new_items_available.connect(self._on_new_items)
+                self.cloud_sync_service.new_items_available.connect(self._advance_sync_after_cloud)
+                self._cloud_sync_ui_connected = True
+
+            QTimer.singleShot(0, self.cloud_sync_service.start)
+        except Exception as e:
+            logger.warning(f"登录后补建云端同步失败: {e}", exc_info=True)
+
+    def _teardown_cloud_sync_after_logout(self):
+        if self.cloud_sync_service is None:
+            return
+        try:
+            self.cloud_sync_service.stop()
+        except Exception as e:
+            logger.warning(f"退出登录后停止云端同步失败: {e}", exc_info=True)
+        finally:
+            self.cloud_sync_service = None
+            self._cloud_sync_item_added_connected = False
+            self._cloud_sync_ui_connected = False
 
     def _toggle_starred_filter(self):
         self._starred_only = not self._starred_only
@@ -1016,9 +1060,15 @@ class MainWindow(EdgeHiddenWindow):
             self.cloud_api = dialog_cloud_api
             if self.plugin_manager:
                 self.plugin_manager.set_cloud_client(self.cloud_api)
+            self._bootstrap_cloud_sync_after_login()
             # 未登录启动的场景：登录成功后要立刻拉起付费闸和文件同步栈，
             # 否则"我的文件"会一直停在升级引导占位上
             self._bootstrap_files_stack_after_login()
+        elif dialog_cloud_api and not dialog_cloud_api.is_authenticated:
+            self._teardown_cloud_sync_after_logout()
+            self.cloud_api = None
+            if self.plugin_manager:
+                self.plugin_manager.set_cloud_client(None)
         if result == QDialog.Accepted:
             dlg_settings = dialog.get_settings()
             need_restart = False
@@ -1483,9 +1533,9 @@ class MainWindow(EdgeHiddenWindow):
         self.quit_requested.emit()
 
     def closeEvent(self, event):
-        """macOS 下拦截系统关闭事件, 仅隐藏窗口, 菜单栏"退出"才真正退出进程。"""
+        """Handle system close requests consistently with the quit button."""
         if IS_MACOS:
-            event.ignore()
-            self.hide_window()
+            self._request_quit()
+            event.accept()
             return
         super().closeEvent(event)
