@@ -1,0 +1,302 @@
+"""ClipboardListController — 列表加载、分页、搜索、侧栏/视图切换。"""
+from __future__ import annotations
+
+import logging
+from typing import List, Optional
+
+from PySide6.QtCore import QObject, Qt, QSize, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QListWidgetItem, QMessageBox
+
+from core import analytics
+from core.models import ClipboardItem
+from config import PAGE_SIZE, PRICING_URL
+from i18n import t
+
+from ..clipboard_item import ClipboardItemWidget
+
+logger = logging.getLogger(__name__)
+
+
+class ClipboardListController(QObject):
+    """负责列表渲染、分页、搜索、侧栏路由、视图切换。"""
+
+    # 单项点击转发给 ItemActionController(由 shell 串接)
+    item_clicked = Signal(object)
+    # 单项基本操作(由 widget 信号转发,shell 串到 ItemActionController)
+    item_delete_requested = Signal(object)
+    item_star_requested = Signal(object)
+    item_save_requested = Signal(object)
+    cloud_delete_requested = Signal(object)
+    image_url_copy_requested = Signal(object)
+
+    def __init__(self, parent, ctx):
+        super().__init__(parent)
+        self._parent = parent
+        self.ctx = ctx
+        # 状态
+        self._current_page = 0
+        self._total_pages = 1
+        self._page_size = PAGE_SIZE
+        self._search_query = ""
+        self._starred_only = False
+        self._items: List[ClipboardItem] = []
+        self._current_space_id: Optional[str] = None
+        self._current_tag_id: Optional[str] = None
+        self._view_mode = "list"
+        self._load_error_notified = False
+
+        # 搜索防抖定时器(_setup_ui 时 parent 还没有创建 search_input,这里只起 timer)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.timeout.connect(self.do_search)
+
+    # ---------- 内部便捷访问 ----------
+
+    @property
+    def repository(self):
+        return self.ctx.repository if self.ctx is not None else self._parent.repository
+
+    # ========== 加载 / 渲染 ==========
+
+    def load_items(self):
+        try:
+            if self._search_query:
+                items, total = self.repository.search_by_keyword(
+                    self._search_query, self._current_page, self._page_size,
+                    starred_only=self._starred_only,
+                    space_id=self._current_space_id,
+                )
+            elif self._current_tag_id:
+                items = self.repository.get_items_by_tag(
+                    self._current_tag_id,
+                    page=self._current_page + 1,
+                    page_size=self._page_size,
+                )
+                total = len(items)
+            else:
+                items, total = self.repository.get_items(
+                    self._current_page, self._page_size,
+                    starred_only=self._starred_only
+                )
+                if self._current_space_id is not None:
+                    target = self._current_space_id
+                    items = [i for i in items if (i.space_id or None) == target]
+                    total = len(items)
+
+            self._items = items
+            self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
+            self.update_list()
+            self.update_pagination()
+            self._load_error_notified = False
+        except Exception as e:
+            logger.error(f"加载剪贴板条目失败: {e}", exc_info=True)
+            self._items = []
+            self._total_pages = 1
+            try:
+                self.update_list()
+                self.update_pagination()
+                self._parent.list_widget.clear()
+                placeholder = QListWidgetItem("加载失败，请查看日志或重启应用。")
+                placeholder.setFlags(Qt.NoItemFlags)
+                self._parent.list_widget.addItem(placeholder)
+            except Exception:
+                logger.error("更新失败占位 UI 时出错", exc_info=True)
+            if not self._load_error_notified:
+                self._load_error_notified = True
+                QMessageBox.warning(
+                    self._parent,
+                    t("error") if callable(t) else "错误",
+                    f"加载剪贴板条目失败：{e}\n\n请查看日志，必要时重启应用。",
+                )
+
+    def make_list_item(self, item: ClipboardItem):
+        """创建 ClipboardItemWidget 和对应的 QListWidgetItem，连接信号。"""
+        widget = ClipboardItemWidget(item)
+        widget.clicked.connect(self.item_clicked)
+        widget.delete_clicked.connect(self.item_delete_requested)
+        widget.star_clicked.connect(self.item_star_requested)
+        widget.save_clicked.connect(self.item_save_requested)
+        widget.cloud_delete_clicked.connect(self.cloud_delete_requested)
+        widget.image_url_clicked.connect(self.image_url_copy_requested)
+
+        list_item = QListWidgetItem()
+        hint = widget.sizeHint()
+        min_h = 92 if item.is_image else 76
+        list_item.setSizeHint(QSize(hint.width(), max(hint.height(), min_h)))
+        return list_item, widget
+
+    def update_list(self):
+        list_widget = self._parent.list_widget
+        list_widget.clear()
+        for item in self._items:
+            list_item, widget = self.make_list_item(item)
+            list_widget.addItem(list_item)
+            list_widget.setItemWidget(list_item, widget)
+        if getattr(self._parent, "timeline_view", None) is not None:
+            self._parent.timeline_view.set_items(self._items)
+
+    def prepend_item(self, item: ClipboardItem):
+        """在列表顶部插入单个新条目，避免全量重建。"""
+        list_widget = self._parent.list_widget
+        if item.id is not None:
+            for idx, existing in enumerate(self._items):
+                if existing.id == item.id:
+                    list_widget.takeItem(idx)
+                    self._items.pop(idx)
+                    break
+
+        list_item, widget = self.make_list_item(item)
+        list_widget.insertItem(0, list_item)
+        list_widget.setItemWidget(list_item, widget)
+        self._items.insert(0, item)
+
+        if list_widget.count() > self._page_size:
+            list_widget.takeItem(list_widget.count() - 1)
+            if len(self._items) > self._page_size:
+                self._items.pop()
+
+    def on_item_added(self, item: ClipboardItem):
+        if self._current_page == 0 and not self._search_query and not self._starred_only:
+            self.prepend_item(item)
+        elif self._current_page == 0 and not self._search_query:
+            self.load_items()
+        try:
+            analytics.mark_first(analytics.FIRST_RECORD)
+        except Exception:
+            pass
+        onboarding = getattr(self._parent, "_onboarding_dialog", None)
+        if onboarding is not None:
+            try:
+                onboarding.advance_on_copy()
+            except Exception:
+                pass
+
+    def on_new_items(self, items: List[ClipboardItem]):
+        # 来自其他设备的新记录
+        if self._current_page == 0 and not self._search_query:
+            self.load_items()
+
+    # ========== 搜索 ==========
+
+    def on_search_changed(self, text: str):
+        self._search_timer.stop()
+        self._search_timer.start(300)
+        if text.strip():
+            try:
+                analytics.mark_first(analytics.FIRST_SEARCH)
+            except Exception:
+                pass
+
+    def do_search(self):
+        self._search_query = self._parent.search_input.text().strip()
+        self._current_page = 0
+        self.load_items()
+
+    def show_search_help(self):
+        QMessageBox.information(
+            self._parent,
+            "搜索语法",
+            "支持以下结构化搜索：\n\n"
+            "关键词：直接输入即可（多个关键词 AND 连接）\n"
+            "from:chrome — 按来源 App 过滤\n"
+            "tag:work — 按标签过滤\n"
+            "space:<id> — 按空间过滤\n"
+            "after:2026-04-01 / before:2026-05-01 — 日期范围\n"
+            "size:>1MB / size:<=500KB — 内容大小\n"
+            "is:starred / is:text / is:image — 类型过滤\n"
+            '"引号短语" — 精确短语匹配\n'
+            "/正则/ — 正则表达式\n"
+            "-key:value — 取反（如 -from:chrome）\n",
+        )
+
+    # ========== 分页 ==========
+
+    def update_pagination(self):
+        self._parent.page_label.setText(f"{self._current_page + 1} / {self._total_pages}")
+        self._parent.prev_btn.setEnabled(self._current_page > 0)
+        self._parent.next_btn.setEnabled(self._current_page < self._total_pages - 1)
+
+    def prev_page(self):
+        if self._current_page > 0:
+            self._current_page -= 1
+            self.load_items()
+
+    def next_page(self):
+        if self._current_page < self._total_pages - 1:
+            self._current_page += 1
+            self.load_items()
+
+    def toggle_starred_filter(self):
+        self._starred_only = not self._starred_only
+        self._parent.star_filter_btn.setText("★" if self._starred_only else "☆")
+        self._current_page = 0
+        self.load_items()
+
+    # ========== 视图 / 侧栏 ==========
+
+    def on_view_changed(self, view_id: int):
+        if view_id == 1:
+            self._view_mode = "timeline"
+            timeline_view = getattr(self._parent, "timeline_view", None)
+            if timeline_view is not None:
+                self._parent._view_stack.setCurrentWidget(timeline_view)
+                timeline_view.set_items(self._items)
+        else:
+            self._view_mode = "list"
+            self._parent._view_stack.setCurrentWidget(self._parent.list_widget)
+
+    def on_timeline_item_clicked(self, item_id: int):
+        for it in self._items:
+            if it.id == item_id:
+                self.item_clicked.emit(it)
+                return
+
+    def on_sidebar_space_changed(self, space_id):
+        self._current_space_id = space_id
+        space_service = self.ctx.space_service if self.ctx is not None else self._parent.space_service
+        if space_service is not None:
+            try:
+                space_service.set_current_space(space_id)
+            except Exception as exc:
+                logger.debug(f"set_current_space 失败: {exc}")
+        self._current_page = 0
+        self.load_items()
+
+    def on_sidebar_tag_changed(self, tag_id):
+        self._current_tag_id = tag_id
+        self._current_page = 0
+        self.load_items()
+
+    def on_sidebar_create_space(self):
+        sidebar = getattr(self._parent, "sidebar", None)
+        if sidebar is not None:
+            sidebar.refresh_spaces()
+
+    def on_sidebar_manage_team(self):
+        # 打开设置对话框，默认切到"团队" tab
+        self._parent._show_settings(initial_tab="team")
+
+    def on_sidebar_upgrade(self):
+        QDesktopServices.openUrl(QUrl(PRICING_URL))
+
+    # ========== Tab 切换 ==========
+
+    def on_tab_changed(self, index: int):
+        self._parent._stack.setCurrentIndex(index)
+        file_list_widget = getattr(self._parent, "file_list_widget", None)
+        if index == 1 and file_list_widget is not None:
+            file_list_widget.reload()
+            ent = self.ctx.entitlement_service if self.ctx is not None else self._parent.entitlement_service
+            if ent:
+                ent.refresh_async()
+
+    # ========== 提供给其它控制器/shell 的只读访问 ==========
+
+    @property
+    def items(self) -> List[ClipboardItem]:
+        return self._items
+
+    @property
+    def current_space_id(self) -> Optional[str]:
+        return self._current_space_id

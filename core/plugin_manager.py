@@ -146,7 +146,7 @@ class PluginManager(QObject):
     action_finished = Signal(object, object)  # (PluginResult, 原始 ClipboardItem)
     action_error = Signal(str)                # 错误消息
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, extension_points=None):
         super().__init__(parent)
         self._plugins: Dict[str, PluginBase] = {}
         self._manifests: Dict[str, dict] = {}
@@ -155,6 +155,8 @@ class PluginManager(QObject):
         self._active_worker: Optional[PluginWorker] = None
         self._timeout_timer: Optional[QTimer] = None
         self._cloud_client = None  # 共享的云端客户端实例
+        # Phase 7: 可选的扩展点注册表，由 AppContext 注入；插件加载/卸载时同步。
+        self._extension_points = extension_points
 
     # ========== 生命周期 ==========
 
@@ -291,6 +293,14 @@ class PluginManager(QObject):
             plugin.on_load()
             self._plugins[plugin_id] = plugin
             self._plugin_status[plugin_id] = {"status": "loaded", "message": ""}
+            # Phase 7: 同步到扩展点注册表（如已注入）。
+            if self._extension_points is not None:
+                try:
+                    self._extension_points.register_context_menu(
+                        plugin_id, plugin.get_name(), plugin.get_actions(),
+                    )
+                except Exception:
+                    logger.exception(f"Failed to register context menu for {plugin_id}")
             logger.info(f"Plugin loaded: {plugin_id} v{manifest.get('version', '?')}")
         except Exception as e:
             logger.exception(f"Failed to instantiate plugin {plugin_id}")
@@ -306,6 +316,12 @@ class PluginManager(QObject):
                 plugin.on_unload()
             except Exception:
                 logger.exception(f"Error unloading plugin {plugin_id}")
+            # Phase 7: 从扩展点注册表移除。
+            if self._extension_points is not None:
+                try:
+                    self._extension_points.unregister_plugin(plugin_id)
+                except Exception:
+                    logger.exception(f"Failed to unregister extension points for {plugin_id}")
             # 关闭 logger handler 防止文件句柄泄漏
             plugin_logger = logging.getLogger(f"plugin.{plugin_id}")
             for handler in plugin_logger.handlers[:]:

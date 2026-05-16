@@ -25,6 +25,7 @@ from config import (
     get_effective_hotkey,
 )
 from i18n import t, set_language
+from core.app_context import AppContext
 from core.db_factory import create_database_manager
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
@@ -187,13 +188,17 @@ class ClipboardApp:
         self._maybe_warn_mysql_fallback()
 
     def _init_components(self):
-        """初始化核心组件"""
+        """初始化核心组件（Phase 1: 全部走 AppContext）"""
         logger.debug(f"[startup] _init_components 开始 t=+{time.time()-_STARTUP_T0:.2f}s")
         _t = time.time()
-        # 使用数据库工厂创建合适的数据库管理器
-        self.db_manager = create_database_manager()
-        self.repository = ClipboardRepository(self.db_manager)
-        logger.debug(f"[startup] db_manager+repository 用时 {time.time()-_t:.3f}s")
+        # Phase 1: 通过 AppContext 装配所有 service
+        self.ctx = AppContext.bootstrap()
+        # 兼容旧字段（下方代码仍以 self.xxx 形式访问）
+        self.db_manager = self.ctx.db
+        self.repository = self.ctx.repository
+        logger.debug(f"[startup] AppContext.bootstrap 用时 {time.time()-_t:.3f}s")
+        # aboutToQuit 兜底：保证非正常退出路径也能清理 db / monitor / plugin
+        self.app.aboutToQuit.connect(self._shutdown_context)
 
     def _create_tray_icon(self):
         """创建系统托盘图标"""
@@ -220,115 +225,48 @@ class ClipboardApp:
         self.tray_icon.show()
 
     def _create_main_window(self):
-        """创建主窗口"""
+        """创建主窗口（Phase 1: 所有 service 从 AppContext 获取）"""
         logger.debug(f"[startup] _create_main_window 开始 t=+{time.time()-_STARTUP_T0:.2f}s")
-        self.clipboard_monitor = ClipboardMonitor(self.repository)
+        ctx = self.ctx
 
-        # 本地/MySQL 同步服务（始终启动）
-        self.sync_service = SyncService(self.repository)
+        # 暴露旧字段路径，保证 main.py 内部其他方法兼容
+        self.clipboard_monitor = ctx.clipboard_monitor
+        self.sync_service = ctx.sync_service
+        self.cloud_api = ctx.cloud_api
+        self.cloud_sync_service = ctx.cloud_sync_service
+        self.file_sync_service = ctx.file_sync_service
+        self.file_repository = ctx.file_repository
+        self.entitlement_service = ctx.entitlement_service
+        self._cloud_sync_error = ctx._cloud_sync_error
 
-        # 云端同步服务（叠加层，有 token 时自动启动）
-        self.cloud_api = None
-        self.cloud_sync_service = None
-        self.file_sync_service = None
-        self.file_repository = None
-        self.entitlement_service = None
-        self._cloud_sync_error = None
-        _t = time.time()
-        _has_token = get_cloud_access_token()
-        logger.debug(f"[startup] get_cloud_access_token 用时 {time.time()-_t:.3f}s, has_token={bool(_has_token)}")
-        if _has_token:
+        # 云端同步开启后，剪贴板新增条目要进上传队列；云端启动失败时给用户托盘提示
+        if ctx.cloud_sync_service is not None:
+            self.clipboard_monitor.item_added.connect(self._on_new_item_for_cloud)
+        elif ctx._cloud_sync_error and get_cloud_access_token():
             try:
-                from core.cloud_sync_service import CloudSyncService
-                from core.cloud_api import get_cloud_client
-
-                self.cloud_api = get_cloud_client()
-                self.cloud_sync_service = CloudSyncService(self.repository, self.cloud_api)
-
-                # 监听剪贴板新增条目，自动加入云端上传队列
-                self.clipboard_monitor.item_added.connect(self._on_new_item_for_cloud)
-
-                # 付费闸 + 文件云同步（复用 app_meta 持久化，无额外依赖）
-                try:
-                    from core.entitlement_service import get_entitlement_service
-                    from core.file_repository import CloudFileRepository
-                    from core.file_sync_service import FileCloudSyncService
-
-                    self.entitlement_service = get_entitlement_service(
-                        cloud_api=self.cloud_api, repository=self.repository,
+                if hasattr(self, "tray_icon") and self.tray_icon is not None:
+                    self.tray_icon.showMessage(
+                        t("app_name"),
+                        "云端同步启动失败，已降级到本地存储。请检查网络或查看日志。",
+                        QSystemTrayIcon.MessageIcon.Warning,
+                        8000,
                     )
-                    self.entitlement_service.refresh_async()
+            except Exception as notify_err:
+                logger.warning(f"托盘通知发送失败: {notify_err}")
 
-                    self.file_repository = CloudFileRepository(self.db_manager)
-                    if settings().files_sync_enabled:
-                        self.file_sync_service = FileCloudSyncService(
-                            self.file_repository,
-                            self.cloud_api,
-                            self.entitlement_service,
-                            self.repository,
-                        )
-                except Exception as ent_err:
-                    logger.warning(f"文件云同步初始化失败: {ent_err}", exc_info=True)
-                    self.file_repository = None
-                    self.file_sync_service = None
-
-                logger.info("云端同步已启用（叠加模式）")
-            except Exception as e:
-                logger.error(f"云端同步启动失败，已降级到本地存储: {e}", exc_info=True)
-                self.cloud_api = None
-                self.cloud_sync_service = None
-                self._cloud_sync_error = str(e)
-                # 通过托盘气泡提示用户：已登录但云端同步未生效
-                try:
-                    if hasattr(self, "tray_icon") and self.tray_icon is not None:
-                        self.tray_icon.showMessage(
-                            t("app_name"),
-                            "云端同步启动失败，已降级到本地存储。请检查网络或查看日志。",
-                            QSystemTrayIcon.MessageIcon.Warning,
-                            8000,
-                        )
-                except Exception as notify_err:
-                    logger.warning(f"托盘通知发送失败: {notify_err}")
-
-        # 初始化插件管理器
+        # 插件加载（AppContext 只构造 PluginManager，加载交给 main 在 UI 时刻执行）
         _t = time.time()
-        self.plugin_manager = PluginManager()
+        self.plugin_manager = ctx.plugin_manager
         self.plugin_manager.load_plugins()
         logger.debug(f"[startup] PluginManager.load_plugins 用时 {time.time()-_t:.3f}s")
 
-        # v3.4: 空间 / 标签 / 分享服务
-        self.space_service = None
-        self.tag_service = None
-        self.share_service = None
-        try:
-            from core.space_service import SpaceService
-            from core.tag_service import TagService
-            from core.share_service import ShareService
-            self.space_service = SpaceService(self.repository)
-            self.tag_service = TagService(self.repository)
-            # ShareService 用 factory 懒取 cloud_api（登录状态动态）
-            self.share_service = ShareService(
-                self.repository,
-                cloud_api_factory=lambda: self.cloud_api,
-            )
-        except Exception as svc_err:
-            logger.warning(f"v3.4 服务初始化失败（侧栏/分享功能将降级）: {svc_err}", exc_info=True)
+        # v3.4 服务
+        self.space_service = ctx.space_service
+        self.tag_service = ctx.tag_service
+        self.share_service = ctx.share_service
 
         _t = time.time()
-        self.main_window = MainWindow(
-            self.repository,
-            self.clipboard_monitor,
-            self.sync_service,
-            plugin_manager=self.plugin_manager,
-            cloud_api=self.cloud_api,
-            cloud_sync_service=self.cloud_sync_service,
-            file_sync_service=self.file_sync_service,
-            file_repository=self.file_repository,
-            entitlement_service=self.entitlement_service,
-            space_service=self.space_service,
-            tag_service=self.tag_service,
-            share_service=self.share_service,
-        )
+        self.main_window = MainWindow(ctx=ctx)
         logger.debug(f"[startup] MainWindow(__init__) 用时 {time.time()-_t:.3f}s, 累计 t=+{time.time()-_STARTUP_T0:.2f}s")
 
         # 连接退出信号
@@ -362,6 +300,20 @@ class ClipboardApp:
                 except Exception as e:
                     logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
             QTimer.singleShot(20000, _start_file_sync)
+
+    def _shutdown_context(self):
+        """aboutToQuit 兜底：让 AppContext 清理基础资源。
+
+        _quit() 已经按精细顺序停掉了 monitor / plugin / db，这里只在 AppContext
+        还活着时做一次 idempotent 收尾，避免非正常退出路径（Cmd+Q、SIGTERM 等）
+        漏掉 ctx.shutdown()。重复调用是安全的：shutdown() 内部 try/except 包裹了
+        每一步，AppContext._instance 在第一次清理后被置 None，再次 current() 会 raise。
+        """
+        try:
+            if AppContext._instance is not None:
+                AppContext._instance.shutdown()
+        except Exception:
+            logger.debug("AppContext shutdown 兜底失败", exc_info=True)
 
     def _atexit_persist_cloud_cursor(self):
         """进程退出兜底：持久化云端同步游标。"""

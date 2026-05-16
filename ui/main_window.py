@@ -1,55 +1,35 @@
-import os
+"""MainWindow — 壳 + UI 构造 + 信号路由 + closeEvent 清理。
+
+业务逻辑下沉到 ui/controllers/ 下的四个控制器:
+- ClipboardListController:列表加载/分页/搜索/侧栏/视图
+- ItemActionController:单项操作 (复制/删除/收藏/保存/链接/分享/标签)
+- PluginActionController:右键菜单 + 插件 dispatch
+- CloudLifecycleController:登录/登出 引发的 stack 切换 + 云同步启停
+"""
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import List
 
-from PySide6.QtCore import Qt, Signal, QTimer, QSize
+from PySide6.QtCore import Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
     QPushButton,
-    QListWidget,
-    QListWidgetItem,
-    QLabel,
-    QMenu,
-    QDialog,
-    QInputDialog,
-    QMessageBox,
-    QFileDialog,
-    QProgressDialog,
     QStackedWidget,
     QButtonGroup,
-    QToolButton,
 )
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
 
-from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem, ContentType
-from core.repository import ClipboardRepository
-from core.clipboard_monitor import ClipboardMonitor
-from core.sync_service import SyncService
-from core.plugin_api import PluginResult, PluginResultAction
-from core import analytics
+from core.models import ClipboardItem
 from config import (
     IS_MACOS,
-    PAGE_SIZE,
-    PRICING_URL,
     settings,
-    update_settings,
-    flush_settings,
     get_cloud_access_token,
-    get_effective_hotkey,
-    get_effective_database_path,
-    get_mysql_config,
-    apply_profile,
 )
-from i18n import t, set_language, get_language
+from i18n import t
 from .edge_window import EdgeHiddenWindow
-from .clipboard_item import ClipboardItemWidget
 from .styles import MAIN_STYLE
-from .settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
 
@@ -68,22 +48,12 @@ def _restore_cloud_api_from_config():
 
 class MainWindow(EdgeHiddenWindow):
     quit_requested = Signal()  # 退出信号
-    # 内部信号：worker 线程加载完整图片后回到主线程执行剪贴板写入
-    _image_load_done = Signal(object)
-    # 内部信号：保存图片任务完成后回到主线程弹提示 (success: bool, path: str, error: str)
-    _save_image_done = Signal(bool, str, str)
-    # 内部信号：插件需要的完整图片加载完成 (plugin_id, action_id, full_item_or_none)
-    _plugin_item_loaded = Signal(str, str, object)
-    # 内部信号：云端图片链接获取完成 (url, 空串表示失败)
-    _image_url_done = Signal(str)
-    # 内部信号：云端删除完成 (success: bool, item_id: int, error: str)
-    _cloud_delete_done = Signal(bool, int, str)
 
     def __init__(
         self,
-        repository: ClipboardRepository,
-        clipboard_monitor: ClipboardMonitor,
-        sync_service: SyncService,
+        repository=None,
+        clipboard_monitor=None,
+        sync_service=None,
         plugin_manager=None,
         cloud_api=None,
         cloud_sync_service=None,
@@ -94,59 +64,64 @@ class MainWindow(EdgeHiddenWindow):
         tag_service=None,
         share_service=None,
         parent=None,
+        ctx=None,
     ):
+        # 兼容两种调用方式:
+        # 1) 旧:MainWindow(repository=..., clipboard_monitor=..., ...)
+        # 2) 新:MainWindow(ctx=ctx) —— ctx 优先
         super().__init__(parent)
-        self.repository = repository
-        self.clipboard_monitor = clipboard_monitor
-        self.sync_service = sync_service
-        self.plugin_manager = plugin_manager
-        self.cloud_api = cloud_api
-        self.cloud_sync_service = cloud_sync_service
-        self.file_sync_service = file_sync_service
-        self.file_repository = file_repository
-        self.entitlement_service = entitlement_service
-        # v3.4: 空间 / 标签 / 分享服务（可选注入；未注入时侧栏与分享菜单降级为只读/灰）
-        self.space_service = space_service
-        self.tag_service = tag_service
-        self.share_service = share_service
-        # 当前过滤条件（由 Sidebar 更新）
-        self._current_space_id: Optional[str] = None
-        self._current_tag_id: Optional[str] = None
-        # 当前视图模式："list" 或 "timeline"
-        self._view_mode = "list"
+        self.ctx = ctx
+        _services = ("repository", "clipboard_monitor", "sync_service",
+                     "plugin_manager", "cloud_api", "cloud_sync_service",
+                     "file_sync_service", "file_repository", "entitlement_service",
+                     "space_service", "tag_service", "share_service")
+        _locals = locals()
+        for _name in _services:
+            setattr(self, _name,
+                    getattr(ctx, _name, None) if ctx is not None else _locals[_name])
 
-        # 如果没有传入 cloud_api，但有已保存的 token，则创建客户端
+        # 如果没有传入 cloud_api,但有已保存的 token,则创建客户端
         if not self.cloud_api:
             self.cloud_api = _restore_cloud_api_from_config()
 
-        # 将 cloud_api 注入到 PluginManager，使插件可以复用登录态
+        # 将 cloud_api 注入到 PluginManager,使插件可以复用登录态
         if self.plugin_manager and self.cloud_api:
             self.plugin_manager.set_cloud_client(self.cloud_api)
 
-        self._current_page = 0
-        self._total_pages = 1
-        self._page_size = PAGE_SIZE
-        self._search_query = ""
-        self._starred_only = False
-        self._items: List[ClipboardItem] = []
+        # 共享线程池(controllers 通过 self._parent 访问)
         self._copy_executor = ThreadPoolExecutor(max_workers=1)
         self._cloud_executor = ThreadPoolExecutor(max_workers=1)
-        self._load_error_notified = False
+        # 云同步连接标记(CloudLifecycleController 管理)
         self._cloud_sync_item_added_connected = False
         self._cloud_sync_ui_connected = False
+
+        # 首启引导槽位
+        self._onboarding_dialog = None
+
+        # 先创建控制器再走 UI,_setup_ui 里的 connect 可以直接绑到 controller 方法
+        from .controllers.clipboard_list_controller import ClipboardListController
+        from .controllers.item_action_controller import ItemActionController
+        from .controllers.plugin_action_controller import PluginActionController
+        from .controllers.cloud_lifecycle_controller import CloudLifecycleController
+
+        self.list_controller = ClipboardListController(self, self.ctx)
+        self.item_controller = ItemActionController(self, self.ctx)
+        self.plugin_controller = PluginActionController(self, self.ctx)
+        self.cloud_controller = CloudLifecycleController(self, self.ctx)
 
         self.setStyleSheet(MAIN_STYLE)
         self._setup_ui()
         self._connect_signals()
-        self._load_items()
+        self.list_controller.load_items()
 
-        # 首次启动 3 步引导（非阻塞，跳过即关闭）
-        self._onboarding_dialog = None
+        # 首次启动 3 步引导(非阻塞,跳过即关闭)
         if not getattr(settings, "onboarding_done", False):
             QTimer.singleShot(600, self._maybe_show_onboarding)
 
+    # ========== UI 构造 ==========
+
     def _setup_ui(self):
-        # v3.4: 外层改为 QHBoxLayout，左侧是 Sidebar，右侧是主内容
+        # 外层 QHBoxLayout:左侧 Sidebar,右侧主内容
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -159,35 +134,41 @@ class MainWindow(EdgeHiddenWindow):
                 tag_service=self.tag_service,
                 entitlement_service=self.entitlement_service,
             )
-            self.sidebar.space_changed.connect(self._on_sidebar_space_changed)
-            self.sidebar.tag_filter_changed.connect(self._on_sidebar_tag_changed)
-            self.sidebar.create_space_requested.connect(self._on_sidebar_create_space)
-            self.sidebar.manage_team_requested.connect(self._on_sidebar_manage_team)
-            self.sidebar.upgrade_requested.connect(self._on_sidebar_upgrade)
+            self.sidebar.space_changed.connect(self.list_controller.on_sidebar_space_changed)
+            self.sidebar.tag_filter_changed.connect(self.list_controller.on_sidebar_tag_changed)
+            self.sidebar.create_space_requested.connect(self.list_controller.on_sidebar_create_space)
+            self.sidebar.manage_team_requested.connect(self.list_controller.on_sidebar_manage_team)
+            self.sidebar.upgrade_requested.connect(self.list_controller.on_sidebar_upgrade)
             root.addWidget(self.sidebar)
         except Exception as exc:
-            logger.warning(f"Sidebar 初始化失败，将继续以无侧栏模式运行: {exc}", exc_info=True)
+            logger.warning(f"Sidebar 初始化失败,将继续以无侧栏模式运行: {exc}", exc_info=True)
             self.sidebar = None
 
-        # --- 右侧主内容容器 ---
+        # --- 右侧主内容 ---
         main_container = QWidget()
         layout = QVBoxLayout(main_container)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
         root.addWidget(main_container, 1)
 
-        # 顶部：搜索和设置
+        # 顶部:搜索和设置
         header_layout = QHBoxLayout()
         header_layout.setSpacing(8)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(t("search_placeholder"))
-        self.search_input.textChanged.connect(self._on_search_changed)
+        self.search_input.textChanged.connect(self.list_controller.on_search_changed)
         header_layout.addWidget(self.search_input, 1)
 
-        # 搜索语法帮助按钮
-        self.search_help_btn = QPushButton("ⓘ")
-        self.search_help_btn.setToolTip(
+        def _mk(text, tip, size, slot):
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.setFixedSize(size, size)
+            btn.clicked.connect(slot)
+            header_layout.addWidget(btn)
+            return btn
+
+        self.search_help_btn = _mk("ⓘ",
             "支持结构化搜索：\n"
             "  from:chrome  — 按来源 app 过滤\n"
             "  tag:work    — 按标签过滤\n"
@@ -195,809 +176,125 @@ class MainWindow(EdgeHiddenWindow):
             "  size:>1MB\n"
             "  is:starred  is:text  is:image\n"
             "  \"引号短语\"  /正则/\n"
-            "  -from:foo   — 否定"
-        )
-        self.search_help_btn.setFixedSize(24, 24)
-        self.search_help_btn.clicked.connect(self._show_search_help)
-        header_layout.addWidget(self.search_help_btn)
-
-        self.star_filter_btn = QPushButton("☆")
-        self.star_filter_btn.setToolTip(t("show_starred_only"))
-        self.star_filter_btn.setFixedSize(28, 28)
-        self.star_filter_btn.clicked.connect(self._toggle_starred_filter)
-        header_layout.addWidget(self.star_filter_btn)
-
-        # Why: 📌/📍 在 macOS 下会被渲染成彩色 emoji, 视觉尺寸明显大于
-        # ☆/⚙/✕ 等几何符号, 让整排按钮大小不统一。换成 ⇩/⇧
-        # (下/上箭头) 保持单色线条风格与其它符号一致。
-        self.pin_btn = QPushButton("⇩")
-        self.pin_btn.setToolTip(t("pin_window"))
-        self.pin_btn.setFixedSize(28, 28)
-        self.pin_btn.clicked.connect(self._toggle_pin)
-        header_layout.addWidget(self.pin_btn)
-
-        self.settings_btn = QPushButton("⚙")
-        self.settings_btn.setToolTip(t("settings"))
-        self.settings_btn.setFixedSize(28, 28)
-        self.settings_btn.clicked.connect(self._show_settings)
-        header_layout.addWidget(self.settings_btn)
-
-        self.minimize_btn = QPushButton("—")
-        self.minimize_btn.setToolTip(t("minimize"))
-        self.minimize_btn.setFixedSize(28, 28)
-        self.minimize_btn.clicked.connect(self._minimize_window)
-        header_layout.addWidget(self.minimize_btn)
+            "  -from:foo   — 否定",
+            24, self.list_controller.show_search_help)
+        self.star_filter_btn = _mk("☆", t("show_starred_only"), 28, self.list_controller.toggle_starred_filter)
+        self.pin_btn = _mk("⇩", t("pin_window"), 28, self._toggle_pin)
+        self.settings_btn = _mk("⚙", t("settings"), 28, self._show_settings)
+        self.minimize_btn = _mk("—", t("minimize"), 28, self._minimize_window)
         if IS_MACOS:
             self.minimize_btn.setVisible(False)
-
-        self.quit_btn = QPushButton("✕")
-        self.quit_btn.setToolTip(t("quit_app"))
-        self.quit_btn.setFixedSize(28, 28)
-        self.quit_btn.clicked.connect(self._request_quit)
-        header_layout.addWidget(self.quit_btn)
+        self.quit_btn = _mk("✕", t("quit_app"), 28, self._request_quit)
 
         layout.addLayout(header_layout)
 
-        # Tab 切换：剪贴板 / 我的文件
+        # Tab 切换:剪贴板 / 我的文件
         tab_row = QHBoxLayout()
         tab_row.setSpacing(12)
-        self.history_tab_btn = QPushButton("剪贴板")
-        self.history_tab_btn.setObjectName("tabBtn")
-        self.history_tab_btn.setCheckable(True)
-        self.history_tab_btn.setChecked(True)
-        self.files_tab_btn = QPushButton("我的文件")
-        self.files_tab_btn.setObjectName("tabBtn")
-        self.files_tab_btn.setCheckable(True)
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
-        self._tab_group.addButton(self.history_tab_btn, 0)
-        self._tab_group.addButton(self.files_tab_btn, 1)
-        self._tab_group.idClicked.connect(self._on_tab_changed)
-        tab_row.addWidget(self.history_tab_btn)
-        tab_row.addWidget(self.files_tab_btn)
+        for idx, (label, attr, checked) in enumerate([
+            ("剪贴板", "history_tab_btn", True),
+            ("我的文件", "files_tab_btn", False),
+        ]):
+            btn = QPushButton(label)
+            btn.setObjectName("tabBtn")
+            btn.setCheckable(True)
+            btn.setChecked(checked)
+            setattr(self, attr, btn)
+            self._tab_group.addButton(btn, idx)
+            tab_row.addWidget(btn)
+        self._tab_group.idClicked.connect(self.list_controller.on_tab_changed)
         tab_row.addStretch()
         layout.addLayout(tab_row)
 
-        # 堆叠容器：页 0 = 剪贴板列表，页 1 = 文件管理
+        # 堆叠容器:页 0 = 剪贴板列表,页 1 = 文件管理
         self._stack = QStackedWidget()
         layout.addWidget(self._stack, 1)
 
-        # --- 剪贴板页 ---
-        clipboard_page = QWidget()
-        clip_layout = QVBoxLayout(clipboard_page)
-        clip_layout.setContentsMargins(0, 0, 0, 0)
-        clip_layout.setSpacing(6)
+        # --- 剪贴板页 / 文件页(具体控件构建在 helper 里完成) ---
+        from .main_window_helpers import build_clipboard_page, attach_file_page
+        self._stack.addWidget(build_clipboard_page(self))
+        attach_file_page(self)
 
-        # v3.4: 视图切换（列表 / 时间线）
-        view_row = QHBoxLayout()
-        view_row.setSpacing(4)
-        self.view_list_btn = QToolButton()
-        self.view_list_btn.setText("列表")
-        self.view_list_btn.setCheckable(True)
-        self.view_list_btn.setChecked(True)
-        self.view_timeline_btn = QToolButton()
-        self.view_timeline_btn.setText("时间线")
-        self.view_timeline_btn.setCheckable(True)
-        self._view_group = QButtonGroup(self)
-        self._view_group.setExclusive(True)
-        self._view_group.addButton(self.view_list_btn, 0)
-        self._view_group.addButton(self.view_timeline_btn, 1)
-        self._view_group.idClicked.connect(self._on_view_changed)
-        view_row.addWidget(self.view_list_btn)
-        view_row.addWidget(self.view_timeline_btn)
-        view_row.addStretch()
-        clip_layout.addLayout(view_row)
-
-        # 列表视图 + 时间线视图的堆叠
-        self._view_stack = QStackedWidget()
-        clip_layout.addWidget(self._view_stack, 1)
-
-        self.list_widget = QListWidget()
-        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list_widget.setSpacing(1)
-        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.list_widget.customContextMenuRequested.connect(self._show_context_menu)
-        self._view_stack.addWidget(self.list_widget)
-
-        # 时间线视图懒加载（首次切换时才填充数据）
-        self.timeline_view = None
-        try:
-            from .timeline_view import TimelineView
-            self.timeline_view = TimelineView()
-            self.timeline_view.item_clicked.connect(self._on_timeline_item_clicked)
-            self._view_stack.addWidget(self.timeline_view)
-        except Exception as exc:
-            logger.debug(f"TimelineView 初始化失败: {exc}")
-
-        # 复制反馈标签
-        self.copy_feedback_label = QLabel()
-        self.copy_feedback_label.setAlignment(Qt.AlignCenter)
-        self.copy_feedback_label.hide()
-        clip_layout.addWidget(self.copy_feedback_label)
-
-        # 底部：分页
-        pagination_layout = QHBoxLayout()
-        pagination_layout.setSpacing(8)
-
-        self.prev_btn = QPushButton(t("prev_page"))
-        self.prev_btn.setObjectName("pageBtn")
-        self.prev_btn.clicked.connect(self._prev_page)
-        pagination_layout.addWidget(self.prev_btn)
-
-        self.page_label = QLabel("1 / 1")
-        self.page_label.setObjectName("pageLabel")
-        self.page_label.setAlignment(Qt.AlignCenter)
-        pagination_layout.addWidget(self.page_label, 1)
-
-        self.next_btn = QPushButton(t("next_page"))
-        self.next_btn.setObjectName("pageBtn")
-        self.next_btn.clicked.connect(self._next_page)
-        pagination_layout.addWidget(self.next_btn)
-
-        clip_layout.addLayout(pagination_layout)
-
-        self._stack.addWidget(clipboard_page)
-
-        # --- 文件页 ---
-        self.file_list_widget = None
-        self._file_page_placeholder = None
-        if self.file_sync_service and self.file_repository and self.entitlement_service:
-            try:
-                from .file_list_widget import FileListWidget
-                self.file_list_widget = FileListWidget(
-                    self.file_repository,
-                    self.file_sync_service,
-                    self.entitlement_service,
-                    self.cloud_api,
-                )
-                self._stack.addWidget(self.file_list_widget)
-            except Exception as e:
-                logger.warning(f"初始化文件页失败: {e}", exc_info=True)
-
-        if self.file_list_widget is None:
-            # 无登录 / 依赖缺失时占位：展示升级引导 + 文件同步与剪贴板同步的差异说明
-            from PySide6.QtCore import QUrl
-            from PySide6.QtGui import QDesktopServices
-
-            placeholder = QWidget()
-            pl = QVBoxLayout(placeholder)
-            pl.setContentsMargins(24, 24, 24, 24)
-            pl.setSpacing(14)
-            pl.addStretch()
-
-            title = QLabel("文件云同步（付费功能）")
-            title.setAlignment(Qt.AlignCenter)
-            title.setStyleSheet("color:#e8e8e8;font-size:15px;font-weight:600;")
-            pl.addWidget(title)
-
-            tip = QLabel("登录云端账户并升级到 Pro/Premium 后，在此管理常用文件。")
-            tip.setWordWrap(True)
-            tip.setAlignment(Qt.AlignCenter)
-            tip.setStyleSheet("color:#aaa;")
-            pl.addWidget(tip)
-
-            diff = QLabel(
-                "📋 <b>剪贴板同步</b>（免费版已包含）：自动备份文字和图片记录，"
-                "图片会压缩为 JPG、长边 ≤ 2K 节省流量。<br><br>"
-                "📁 <b>文件云同步</b>（本功能）：保存原始文件（文档、压缩包、音视频、"
-                "工程文件等），最大单文件 1 GB、保留原始字节和扩展名，跨设备按需下载。"
-            )
-            diff.setWordWrap(True)
-            diff.setTextFormat(Qt.RichText)
-            diff.setAlignment(Qt.AlignLeft)
-            diff.setStyleSheet(
-                "color:#cbd5e1;background:#2a2a2a;border:1px solid #3c3c3c;"
-                "border-radius:6px;padding:10px 14px;"
-            )
-            pl.addWidget(diff)
-
-            upgrade_btn = QPushButton("升级套餐")
-            upgrade_btn.setObjectName("okButton")
-            upgrade_btn.setMinimumHeight(34)
-            upgrade_btn.setCursor(Qt.PointingHandCursor)
-            upgrade_btn.clicked.connect(
-                lambda: QDesktopServices.openUrl(QUrl(PRICING_URL))
-            )
-            btn_row = QHBoxLayout()
-            btn_row.addStretch()
-            btn_row.addWidget(upgrade_btn)
-            btn_row.addStretch()
-            pl.addLayout(btn_row)
-
-            pl.addStretch()
-            self._stack.addWidget(placeholder)
-            self._file_page_placeholder = placeholder
-
-        # 搜索防抖定时器
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.timeout.connect(self._do_search)
-
-        # 复制反馈定时器（复用同一个避免快速复制时提前隐藏）
+        # 复制反馈定时器(复用同一个,避免快速复制时提前隐藏)
         self._feedback_timer = QTimer(self)
         self._feedback_timer.setSingleShot(True)
         self._feedback_timer.timeout.connect(self.copy_feedback_label.hide)
 
+    # ========== 信号路由 ==========
+
     def _connect_signals(self):
-        # 跨线程：图片加载完成 → 主线程写入剪贴板
-        self._image_load_done.connect(self._handle_image_loaded)
-        # 跨线程：保存图片完成 → 主线程弹提示
-        self._save_image_done.connect(self._handle_save_image_done)
-        # 跨线程：插件所需完整图片加载完成 → 主线程派发给 plugin_manager
-        self._plugin_item_loaded.connect(self._handle_plugin_item_loaded)
-        # 跨线程：云端图片链接获取完成 → 主线程写入剪贴板并提示
-        self._image_url_done.connect(self._handle_image_url_done)
-        # 跨线程：云端删除完成 → 主线程清理 cloud_id 并刷新列表
-        self._cloud_delete_done.connect(self._handle_cloud_delete_done)
+        # 剪贴板监控:新条目到 list_controller
+        self.clipboard_monitor.item_added.connect(self.list_controller.on_item_added)
 
-        # 剪贴板监控信号
-        self.clipboard_monitor.item_added.connect(self._on_item_added)
+        # 同步服务:其它设备来的新条目
+        self.sync_service.new_items_available.connect(self.list_controller.on_new_items)
 
-        # 同步服务信号
-        self.sync_service.new_items_available.connect(self._on_new_items)
+        # list_controller 单项点击/操作 → item_controller
+        self.list_controller.item_clicked.connect(self.item_controller.on_item_clicked)
+        self.list_controller.item_delete_requested.connect(self.item_controller.on_item_delete)
+        self.list_controller.item_star_requested.connect(self.item_controller.on_item_star)
+        self.list_controller.item_save_requested.connect(self.item_controller.on_item_save)
+        self.list_controller.cloud_delete_requested.connect(self.item_controller.on_cloud_delete)
+        self.list_controller.image_url_copy_requested.connect(self.item_controller.on_image_url_copy)
 
         # 插件信号
         if self.plugin_manager:
-            self.plugin_manager.action_progress.connect(self._on_plugin_progress)
-            self.plugin_manager.action_finished.connect(self._on_plugin_finished)
-            self.plugin_manager.action_error.connect(self._on_plugin_error)
+            self.plugin_manager.action_progress.connect(self.plugin_controller.on_plugin_progress)
+            self.plugin_manager.action_finished.connect(self.plugin_controller.on_plugin_finished)
+            self.plugin_manager.action_error.connect(self.plugin_controller.on_plugin_error)
 
-    def _on_tab_changed(self, index: int):
-        self._stack.setCurrentIndex(index)
-        # 切到文件页时刷新付费/配额状态
-        if index == 1 and self.file_list_widget is not None:
-            self.file_list_widget.reload()
-            if self.entitlement_service:
-                self.entitlement_service.refresh_async()
+    # ========== 向后兼容 shims:main.py 等外部调用点继续可用 ==========
 
-    def _bootstrap_files_stack_after_login(self):
-        """未登录启动后首次登录成功：补建 entitlement + 文件仓 + 文件同步，
-        并把"我的文件"的升级占位替换成真实的 FileListWidget。"""
-        if self.cloud_api is None or not self.cloud_api.is_authenticated:
-            return
+    def _on_new_items(self, items: List[ClipboardItem]):
+        """向后兼容:main.py 把 cloud_sync_service.new_items_available 直连此处。"""
+        self.list_controller.on_new_items(items)
+
+    # ========== 退出 / 最小化 / Pin / 设置 ==========
+
+    def _toggle_pin(self):
+        is_pinned = self.toggle_pin()
+        if not is_pinned and self._is_floating:
+            self._snap_to_nearest_edge()
+        self.pin_btn.setText("⇧" if is_pinned else "⇩")
+        self.pin_btn.setToolTip(t("unpin_window") if is_pinned else t("pin_window"))
+
+    def _minimize_window(self):
+        """最小化窗口(完全隐藏)。"""
+        self.hide_window()
+
+    def _request_quit(self):
+        """请求退出应用。"""
+        self.quit_requested.emit()
+
+    def show_window(self):
+        super().show_window()
         try:
-            if self.entitlement_service is None:
-                from core.entitlement_service import get_entitlement_service
-                self.entitlement_service = get_entitlement_service(
-                    cloud_api=self.cloud_api, repository=self.repository,
-                )
-            else:
-                self.entitlement_service.set_cloud_api(self.cloud_api)
-            self.entitlement_service.refresh_async()
-
-            if self.file_repository is None:
-                from core.file_repository import CloudFileRepository
-                self.file_repository = CloudFileRepository(self.repository.db)
-
-            if self.file_sync_service is None and settings().files_sync_enabled:
-                from core.file_sync_service import FileCloudSyncService
-                self.file_sync_service = FileCloudSyncService(
-                    self.file_repository,
-                    self.cloud_api,
-                    self.entitlement_service,
-                    self.repository,
-                )
-                try:
-                    self.file_sync_service.start()
-                except Exception as e:
-                    logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
-        except Exception as e:
-            logger.warning(f"登录后补建文件同步栈失败: {e}", exc_info=True)
-            return
-
-        if self.file_list_widget is not None:
-            # 已经是真实 widget，仅刷新
-            self.file_list_widget.reload()
-            return
-
-        if not (self.file_sync_service and self.file_repository and self.entitlement_service):
-            return
-
-        try:
-            from .file_list_widget import FileListWidget
-            widget = FileListWidget(
-                self.file_repository,
-                self.file_sync_service,
-                self.entitlement_service,
-                self.cloud_api,
-            )
-        except Exception as e:
-            logger.warning(f"初始化文件页失败: {e}", exc_info=True)
-            return
-
-        # 用真实 widget 替换占位
-        if self._file_page_placeholder is not None:
-            idx = self._stack.indexOf(self._file_page_placeholder)
-            if idx >= 0:
-                self._stack.removeWidget(self._file_page_placeholder)
-            self._file_page_placeholder.deleteLater()
-            self._file_page_placeholder = None
-        self.file_list_widget = widget
-        self._stack.addWidget(widget)
-        # 若用户当前就在文件页，切回去以显示新 widget
-        if self._stack.currentIndex() == 1:
-            self._stack.setCurrentIndex(1)
-
-    def _advance_sync_after_cloud(self, items: List[ClipboardItem]):
-        if not items:
-            return
-        max_id = max((item.id for item in items if item.id), default=0)
-        if max_id:
-            self.sync_service.advance_sync_id(max_id)
-
-    def _bootstrap_cloud_sync_after_login(self):
-        if self.cloud_api is None or not self.cloud_api.is_authenticated:
-            return
-        try:
-            if self.cloud_sync_service is None:
-                from core.cloud_sync_service import CloudSyncService
-
-                self.cloud_sync_service = CloudSyncService(
-                    self.repository,
-                    self.cloud_api,
-                    self.entitlement_service,
-                )
-
-            if not self._cloud_sync_item_added_connected:
-                self.clipboard_monitor.item_added.connect(self.cloud_sync_service.enqueue_upload)
-                self._cloud_sync_item_added_connected = True
-
-            if not self._cloud_sync_ui_connected:
-                self.cloud_sync_service.new_items_available.connect(self._on_new_items)
-                self.cloud_sync_service.new_items_available.connect(self._advance_sync_after_cloud)
-                self._cloud_sync_ui_connected = True
-
-            QTimer.singleShot(0, self.cloud_sync_service.start)
-        except Exception as e:
-            logger.warning(f"登录后补建云端同步失败: {e}", exc_info=True)
-
-    def _teardown_cloud_sync_after_logout(self):
-        if self.cloud_sync_service is None:
-            return
-        try:
-            self.cloud_sync_service.stop()
-        except Exception as e:
-            logger.warning(f"退出登录后停止云端同步失败: {e}", exc_info=True)
-        finally:
-            self.cloud_sync_service = None
-            self._cloud_sync_item_added_connected = False
-            self._cloud_sync_ui_connected = False
-
-    def _toggle_starred_filter(self):
-        self._starred_only = not self._starred_only
-        self.star_filter_btn.setText("★" if self._starred_only else "☆")
-        self._current_page = 0
-        self._load_items()
-
-    def _load_items(self):
-        try:
-            if self._search_query:
-                items, total = self.repository.search_by_keyword(
-                    self._search_query, self._current_page, self._page_size,
-                    starred_only=self._starred_only,
-                    space_id=self._current_space_id,
-                )
-            elif self._current_tag_id:
-                # tag 过滤走独立 API（不带分页 total，近似处理）
-                items = self.repository.get_items_by_tag(
-                    self._current_tag_id,
-                    page=self._current_page + 1,
-                    page_size=self._page_size,
-                )
-                total = len(items)
-            else:
-                items, total = self.repository.get_items(
-                    self._current_page, self._page_size,
-                    starred_only=self._starred_only
-                )
-                # space_id 过滤：由于老 get_items 不支持，这里在内存上做简单过滤
-                # （个人空间：space_id 为 None/空；团队空间：只留匹配 id 的）
-                if self._current_space_id is not None:
-                    target = self._current_space_id
-                    items = [i for i in items if (i.space_id or None) == target]
-                    total = len(items)
-
-            self._items = items
-            self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)
-            self._update_list()
-            self._update_pagination()
-            self._load_error_notified = False
-        except Exception as e:
-            logger.error(f"加载剪贴板条目失败: {e}", exc_info=True)
-            self._items = []
-            self._total_pages = 1
-            try:
-                self._update_list()
-                self._update_pagination()
-                self.list_widget.clear()
-                placeholder = QListWidgetItem("加载失败，请查看日志或重启应用。")
-                placeholder.setFlags(Qt.NoItemFlags)
-                self.list_widget.addItem(placeholder)
-            except Exception:
-                logger.error("更新失败占位 UI 时出错", exc_info=True)
-            if not self._load_error_notified:
-                self._load_error_notified = True
-                QMessageBox.warning(
-                    self,
-                    t("error") if callable(t) else "错误",
-                    f"加载剪贴板条目失败：{e}\n\n请查看日志，必要时重启应用。",
-                )
-
-    def _make_list_item(self, item: ClipboardItem):
-        """创建 ClipboardItemWidget 和对应的 QListWidgetItem，连接信号"""
-        widget = ClipboardItemWidget(item)
-        widget.clicked.connect(self._on_item_clicked)
-        widget.delete_clicked.connect(self._on_item_delete)
-        widget.star_clicked.connect(self._on_item_star)
-        widget.save_clicked.connect(self._on_item_save)
-        widget.cloud_delete_clicked.connect(self._on_cloud_delete)
-        widget.image_url_clicked.connect(self._on_image_url_copy)
-
-        list_item = QListWidgetItem()
-        hint = widget.sizeHint()
-        min_h = 92 if item.is_image else 76
-        list_item.setSizeHint(QSize(hint.width(), max(hint.height(), min_h)))
-        return list_item, widget
-
-    def _update_list(self):
-        self.list_widget.clear()
-
-        for item in self._items:
-            list_item, widget = self._make_list_item(item)
-            self.list_widget.addItem(list_item)
-            self.list_widget.setItemWidget(list_item, widget)
-
-        # 时间线视图也同步刷新（仅在已创建时）
-        if self.timeline_view is not None:
-            self.timeline_view.set_items(self._items)
-
-    # ========== v3.4: 侧栏 + 视图切换回调 ==========
-
-    def _on_sidebar_space_changed(self, space_id):
-        self._current_space_id = space_id
-        if self.space_service is not None:
-            try:
-                self.space_service.set_current_space(space_id)
-            except Exception as exc:
-                logger.debug(f"set_current_space 失败: {exc}")
-        self._current_page = 0
-        self._load_items()
-
-    def _on_sidebar_tag_changed(self, tag_id):
-        self._current_tag_id = tag_id
-        self._current_page = 0
-        self._load_items()
-
-    def _on_sidebar_create_space(self):
-        # Sidebar 内部已处理创建，这里仅需刷新状态
-        if self.sidebar is not None:
-            self.sidebar.refresh_spaces()
-
-    def _on_sidebar_manage_team(self):
-        # 打开设置对话框，默认切到"团队" tab
-        self._show_settings(initial_tab="team")
-
-    def _on_sidebar_upgrade(self):
-        QDesktopServices.openUrl(QUrl(PRICING_URL))
-
-    def _on_view_changed(self, view_id: int):
-        if view_id == 1:
-            self._view_mode = "timeline"
-            if self.timeline_view is not None:
-                self._view_stack.setCurrentWidget(self.timeline_view)
-                self.timeline_view.set_items(self._items)
-        else:
-            self._view_mode = "list"
-            self._view_stack.setCurrentWidget(self.list_widget)
-
-    def _on_timeline_item_clicked(self, item_id: int):
-        # 从当前 _items 中找到匹配项，走原有的 click 处理
-        for it in self._items:
-            if it.id == item_id:
-                self._on_item_clicked(it)
-                return
-
-    def _show_search_help(self):
-        QMessageBox.information(
-            self,
-            "搜索语法",
-            "支持以下结构化搜索：\n\n"
-            "关键词：直接输入即可（多个关键词 AND 连接）\n"
-            "from:chrome — 按来源 App 过滤\n"
-            "tag:work — 按标签过滤\n"
-            "space:<id> — 按空间过滤\n"
-            "after:2026-04-01 / before:2026-05-01 — 日期范围\n"
-            "size:>1MB / size:<=500KB — 内容大小\n"
-            "is:starred / is:text / is:image — 类型过滤\n"
-            '"引号短语" — 精确短语匹配\n'
-            "/正则/ — 正则表达式\n"
-            "-key:value — 取反（如 -from:chrome）\n",
-        )
-
-    def _update_pagination(self):
-        self.page_label.setText(f"{self._current_page + 1} / {self._total_pages}")
-        self.prev_btn.setEnabled(self._current_page > 0)
-        self.next_btn.setEnabled(self._current_page < self._total_pages - 1)
-
-    def _prev_page(self):
-        if self._current_page > 0:
-            self._current_page -= 1
-            self._load_items()
-
-    def _next_page(self):
-        if self._current_page < self._total_pages - 1:
-            self._current_page += 1
-            self._load_items()
-
-    def _on_search_changed(self, text: str):
-        self._search_timer.stop()
-        self._search_timer.start(300)  # 300ms 防抖
-        if text.strip():
-            try:
-                analytics.mark_first(analytics.FIRST_SEARCH)
-            except Exception:
-                pass
-
-    def _do_search(self):
-        self._search_query = self.search_input.text().strip()
-        self._current_page = 0
-        self._load_items()
-
-    def _show_copy_feedback(self, success: bool):
-        """显示复制结果反馈"""
-        if success:
-            self.copy_feedback_label.setText(t("copied_to_clipboard"))
-            self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
-        else:
-            self.copy_feedback_label.setText(t("copy_failed"))
-            self.copy_feedback_label.setObjectName("copyFeedbackError")
-        self.copy_feedback_label.style().polish(self.copy_feedback_label)
-        self.copy_feedback_label.show()
-        self._feedback_timer.start(2000)
-
-    def _on_item_clicked(self, item: ClipboardItem):
-        try:
-            analytics.mark_first(analytics.FIRST_COPY_HISTORY)
-        except Exception:
-            pass
-        # 图片需要从数据库获取完整数据 — 异步加载避免阻塞主线程
-        if item.is_image:
-            self.copy_feedback_label.setText("正在加载图片...")
-            self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
-            self.copy_feedback_label.style().polish(self.copy_feedback_label)
-            self.copy_feedback_label.show()
-
-            item_id = item.id
-            repo = self.repository
-            signal = self._image_load_done
-
-            def _load():
-                # worker 线程没有 Qt 事件循环，必须用信号切回主线程
-                try:
-                    full = repo.get_item_by_id(item_id)
-                except Exception as e:
-                    logger.error(f"加载图片失败: {e}")
-                    full = None
-                signal.emit(full)
-
-            self._copy_executor.submit(_load)
-            return
-
-        success = self.clipboard_monitor.copy_to_clipboard(item)
-        self._show_copy_feedback(success)
-
-    def _handle_image_loaded(self, full_item):
-        """主线程槽：图片加载完成后写入剪贴板"""
-        success = False
-        if full_item and getattr(full_item, "image_data", None):
-            try:
-                success = self.clipboard_monitor.copy_to_clipboard(full_item)
-            except Exception as e:
-                logger.error(f"写入剪贴板失败: {e}")
-        elif full_item:
-            logger.warning(f"图片 id={full_item.id} 无完整数据，可能云端尚未下载")
-        self._show_copy_feedback(success)
-
-    def _on_item_delete(self, item: ClipboardItem):
-        reply = QMessageBox.question(
-            self,
-            t("confirm_delete"),
-            t("delete_confirm_msg"),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
-            self.repository.delete_item(item.id)
-            self._load_items()
-
-    def _on_cloud_delete(self, item: ClipboardItem):
-        """删除条目的云端副本"""
-        if not item.cloud_id or not self.cloud_api:
-            return
-        reply = QMessageBox.question(
-            self,
-            "删除云端副本",
-            "确定删除该条目的云端副本？\n本地记录不受影响。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        cloud_id = item.cloud_id
-        item_id = item.id
-        api = self.cloud_api
-        signal = self._cloud_delete_done
-
-        def _do_delete():
-            # worker 线程没有 Qt 事件循环，必须用信号切回主线程
-            try:
-                api.delete_item(cloud_id)
-                signal.emit(True, item_id, "")
-            except Exception as e:
-                signal.emit(False, item_id, str(e))
-
-        self._cloud_executor.submit(_do_delete)
-
-    def _handle_cloud_delete_done(self, success: bool, item_id: int, error: str):
-        """主线程槽：云端删除完成后清理本地 cloud_id 并刷新"""
-        if success:
-            self.repository.clear_cloud_id(item_id)
-            self._load_items()
-        else:
-            logger.warning(f"删除云端副本失败: {error}")
-
-    def _on_item_star(self, item: ClipboardItem):
-        try:
-            analytics.mark_first(analytics.FIRST_STAR)
-        except Exception:
-            pass
-        self.repository.toggle_star(item.id)
-        new_starred = not item.is_starred
-
-        if item.cloud_id and self.cloud_api:
-            # 已在云端 → 同步收藏状态到服务端（服务端据此管理配额优先级）
-            cloud_id = item.cloud_id
-            api = self.cloud_api
-            self._cloud_executor.submit(lambda: api.toggle_star(cloud_id))
-        elif new_starred and not item.cloud_id and self.cloud_sync_service:
-            # 新收藏但不在云端 → 推送到云端（含完整图片数据）
-            full_item = self.repository.get_item_by_id(item.id)
-            if full_item:
-                full_item.is_starred = True
-                self.cloud_sync_service.enqueue_upload(full_item)
-
-        self._load_items()
-
-    def _on_item_save(self, item: ClipboardItem):
-        """保存图片到本地文件（主线程仅取路径，IO 在工作线程）"""
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            t("save_image"),
-            "",
-            "PNG (*.png);;JPEG (*.jpg);;All Files (*)",
-        )
-        if not path:
-            return
-
-        item_id = item.id
-        repo = self.repository
-        signal = self._save_image_done
-
-        def _do_save():
-            try:
-                full = repo.get_item_by_id(item_id)
-            except Exception as e:
-                logger.error(f"加载图片以保存失败: {e}", exc_info=True)
-                signal.emit(False, path, str(e))
-                return
-            # 必须是 ImageClipboardItem 且有图片数据才能保存
-            if not isinstance(full, ImageClipboardItem) or not full.image_data:
-                signal.emit(False, path, "image_load_failed")
-                return
-            try:
-                with open(path, "wb") as f:
-                    f.write(full.image_data)
-                signal.emit(True, path, "")
-            except Exception as e:
-                logger.error(f"写入图片文件失败: {e}", exc_info=True)
-                signal.emit(False, path, str(e))
-
-        self._copy_executor.submit(_do_save)
-
-    def _handle_save_image_done(self, success: bool, path: str, error: str):
-        """主线程槽：保存图片结果提示"""
-        if success:
-            QMessageBox.information(
-                self,
-                t("success") if callable(t) else "成功",
-                f"已保存到：{path}",
-            )
-        else:
-            if error == "image_load_failed":
-                QMessageBox.warning(self, t("error"), t("image_load_failed"))
-            else:
-                QMessageBox.critical(self, t("error"), t("save_failed", error=error))
-
-    def _on_image_url_copy(self, item: ClipboardItem):
-        """获取云端图片链接并复制到剪贴板"""
-        if not item.cloud_id or not self.cloud_api:
-            return
-
-        self.copy_feedback_label.setText("正在获取图片链接...")
-        self.copy_feedback_label.setObjectName("copyFeedbackSuccess")
-        self.copy_feedback_label.style().polish(self.copy_feedback_label)
-        self.copy_feedback_label.show()
-
-        cloud_id = item.cloud_id
-        api = self.cloud_api
-        signal = self._image_url_done
-
-        def _fetch_url():
-            # worker 线程没有 Qt 事件循环，必须用信号切回主线程
-            try:
-                url = api.get_image_url(cloud_id) or ""
-            except Exception as e:
-                logger.warning(f"获取图片链接失败: {e}")
-                url = ""
-            signal.emit(url)
-
-        self._cloud_executor.submit(_fetch_url)
-
-    def _handle_image_url_done(self, url: str):
-        """主线程槽：写入剪贴板并展示反馈"""
-        if url:
-            from PySide6.QtWidgets import QApplication
-            QApplication.clipboard().setText(url)
-            self._show_copy_feedback(True)
-        else:
-            self.copy_feedback_label.setText("获取图片链接失败")
-            self.copy_feedback_label.setObjectName("copyFeedbackError")
-            self.copy_feedback_label.style().polish(self.copy_feedback_label)
-            self._feedback_timer.start(2000)
-
-    def _prepend_item(self, item: ClipboardItem):
-        """在列表顶部插入单个新条目，避免全量重建。
-
-        若同 id 条目已在列表中（重复复制触发置顶场景），先移除旧行再插入顶部。
-        """
-        if item.id is not None:
-            for idx, existing in enumerate(self._items):
-                if existing.id == item.id:
-                    self.list_widget.takeItem(idx)
-                    self._items.pop(idx)
-                    break
-
-        list_item, widget = self._make_list_item(item)
-
-        self.list_widget.insertItem(0, list_item)
-        self.list_widget.setItemWidget(list_item, widget)
-        self._items.insert(0, item)
-
-        # 超出每页大小时移除末尾
-        if self.list_widget.count() > self._page_size:
-            self.list_widget.takeItem(self.list_widget.count() - 1)
-            if len(self._items) > self._page_size:
-                self._items.pop()
-
-    def _on_item_added(self, item: ClipboardItem):
-        if self._current_page == 0 and not self._search_query and not self._starred_only:
-            self._prepend_item(item)
-        elif self._current_page == 0 and not self._search_query:
-            self._load_items()
-        try:
-            analytics.mark_first(analytics.FIRST_RECORD)
+            from core import analytics
+            analytics.mark_first(analytics.FIRST_WAKE)
         except Exception:
             pass
         if self._onboarding_dialog is not None:
             try:
-                self._onboarding_dialog.advance_on_copy()
+                self._onboarding_dialog.advance_on_wake()
+                self._onboarding_dialog.raise_()
             except Exception:
                 pass
 
+    def _show_settings(self, initial_tab: str = ""):
+        from .main_window_helpers import show_settings_dialog
+        show_settings_dialog(self, initial_tab=initial_tab)
+
+    def _do_migration(self):
+        """在工作线程中执行数据库迁移,避免阻塞 UI。"""
+        from .main_window_helpers import run_database_migration
+        run_database_migration(self)
+
+    # ========== 首启引导 ==========
+
     def _maybe_show_onboarding(self) -> None:
-        """惰性创建首启引导，避免阻塞启动。"""
+        """惰性创建首启引导,避免阻塞启动。"""
         if self._onboarding_dialog is not None:
             return
         if getattr(settings, "onboarding_done", False):
@@ -1014,528 +311,24 @@ class MainWindow(EdgeHiddenWindow):
     def _on_onboarding_done(self) -> None:
         self._onboarding_dialog = None
 
-    def show_window(self):
-        super().show_window()
-        try:
-            analytics.mark_first(analytics.FIRST_WAKE)
-        except Exception:
-            pass
-        if self._onboarding_dialog is not None:
-            try:
-                self._onboarding_dialog.advance_on_wake()
-                self._onboarding_dialog.raise_()
-            except Exception:
-                pass
-
-    def _on_new_items(self, items: List[ClipboardItem]):
-        # 来自其他设备的新记录
-        if self._current_page == 0 and not self._search_query:
-            self._load_items()
-
-    def _toggle_pin(self):
-        is_pinned = self.toggle_pin()
-        # 取消固定时若处于悬浮模式，吸附回最近边缘
-        if not is_pinned and self._is_floating:
-            self._snap_to_nearest_edge()
-        self.pin_btn.setText("⇧" if is_pinned else "⇩")
-        self.pin_btn.setToolTip(t("unpin_window") if is_pinned else t("pin_window"))
-
-    def _minimize_window(self):
-        """最小化窗口（完全隐藏）"""
-        self.hide_window()
-
-    def _show_settings(self, initial_tab: str = ""):
-        dialog = SettingsDialog(
-            self,
-            plugin_manager=self.plugin_manager,
-            cloud_api=self.cloud_api,
-            space_service=self.space_service,
-            entitlement_service=self.entitlement_service,
-            initial_tab=initial_tab,
-        )
-        result = dialog.exec()
-        # 无论确认还是取消，都同步登录状态（用户可能在对话框中登录了云端）
-        dialog_cloud_api = dialog.get_cloud_api()
-        if dialog_cloud_api and dialog_cloud_api.is_authenticated:
-            self.cloud_api = dialog_cloud_api
-            if self.plugin_manager:
-                self.plugin_manager.set_cloud_client(self.cloud_api)
-            self._bootstrap_cloud_sync_after_login()
-            # 未登录启动的场景：登录成功后要立刻拉起付费闸和文件同步栈，
-            # 否则"我的文件"会一直停在升级引导占位上
-            self._bootstrap_files_stack_after_login()
-        elif dialog_cloud_api and not dialog_cloud_api.is_authenticated:
-            self._teardown_cloud_sync_after_logout()
-            self.cloud_api = None
-            if self.plugin_manager:
-                self.plugin_manager.set_cloud_client(None)
-        if result == QDialog.Accepted:
-            dlg_settings = dialog.get_settings()
-            need_restart = False
-            current_snapshot = settings()
-
-            # 汇总本次对话框要改的字段到 batch, 一次 update_settings 落盘
-            batch: dict = {}
-
-            new_language = dlg_settings["language"]
-            if new_language != current_snapshot.language:
-                batch["language"] = new_language
-                set_language(new_language)
-                need_restart = True
-
-            new_edge = dlg_settings["dock_edge"]
-            if new_edge != current_snapshot.dock_edge:
-                self.set_dock_edge(new_edge)
-
-            new_hotkey = dlg_settings["hotkey"]
-            if new_hotkey != get_effective_hotkey():
-                batch["hotkey"] = new_hotkey
-                need_restart = True
-
-            new_poll_interval = dlg_settings["poll_interval_ms"]
-            poll_changed = new_poll_interval != current_snapshot.poll_interval_ms
-
-            for key in ("save_text", "save_images", "max_text_length",
-                        "max_image_size_kb", "max_items", "retention_days",
-                        "poll_interval_ms"):
-                batch[key] = dlg_settings[key]
-
-            if batch:
-                update_settings(**batch)
-
-            if poll_changed:
-                self.clipboard_monitor.update_poll_interval(new_poll_interval)
-
-            # Profile / 数据库变更检测
-            new_profile = dlg_settings.get("active_profile", "")
-            new_db_type = dlg_settings["db_type"]
-            db_changed = False
-
-            if new_profile != current_snapshot.active_profile:
-                db_changed = True
-            elif new_db_type != current_snapshot.db_type:
-                db_changed = True
-            elif new_db_type == "sqlite":
-                # 空字符串表示使用默认路径，归一化后再比较
-                new_path = dlg_settings["database_path"] or get_effective_database_path()
-                if new_path != get_effective_database_path():
-                    db_changed = True
-            elif new_db_type == "mysql":
-                mysql_config = get_mysql_config()
-                # 密码空表示"未在本次会话修改"（get_settings 返回的明文密码若为空，
-                # _on_accept 不会覆盖 keyring 中已存在的密码），仅当用户实际填入
-                # 了新密码且与 keyring 中不同才算变更。
-                pw_changed = bool(dlg_settings["mysql_password"]) and dlg_settings["mysql_password"] != mysql_config["password"]
-                if (dlg_settings["mysql_host"] != mysql_config["host"] or
-                    dlg_settings["mysql_port"] != mysql_config["port"] or
-                    dlg_settings["mysql_user"] != mysql_config["user"] or
-                    pw_changed or
-                    dlg_settings["mysql_database"] != mysql_config["database"]):
-                    db_changed = True
-
-            if db_changed:
-                # 询问是否迁移数据
-                migrate = QMessageBox.question(
-                    self,
-                    t("migrate_data"),
-                    t("migrate_data_confirm"),
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                ) == QMessageBox.Yes
-
-                # 应用 profile 并保存配置
-                apply_profile(new_profile)
-
-                if migrate:
-                    self._do_migration()
-
-                need_restart = True
-
-            # Why: update_settings 默认延迟 2s 落盘，若用户立即关闭/被 kill
-            # 会丢失本次改动（密码走 keyring 不受影响，表现为其它字段被吞）。
-            flush_settings()
-
-            if need_restart:
-                QMessageBox.information(
-                    self,
-                    t("need_restart"),
-                    t("restart_msg"),
-                )
-
-    def _do_migration(self):
-        """在工作线程中执行数据库迁移，避免阻塞 UI"""
-        from core.migration import DatabaseMigrator
-        from core.db_factory import create_database_manager
-        from core.repository import ClipboardRepository
-        from PySide6.QtCore import QThread, Signal as QSignal
-
-        # 目标库按当前已切换的 Config(apply_profile 已落盘)创建
-        try:
-            target_db = create_database_manager()
-            target_repo = ClipboardRepository(target_db)
-        except Exception as e:
-            QMessageBox.critical(
-                self, t("error"), t("migration_failed", error=str(e))
-            )
-            return
-
-        class MigrationWorker(QThread):
-            progress = QSignal(int, int)
-            finished_ok = QSignal(int)
-            finished_err = QSignal(str)
-
-            def __init__(self, migrator):
-                super().__init__()
-                self._migrator = migrator
-
-            def run(self):
-                try:
-                    count = self._migrator.migrate(
-                        progress_callback=lambda cur, tot: self.progress.emit(cur, tot)
-                    )
-                    self.finished_ok.emit(count)
-                except Exception as e:
-                    self.finished_err.emit(str(e))
-
-        migrator = DatabaseMigrator(self.repository, target_repo)
-
-        progress_dlg = QProgressDialog(t("migrating"), None, 0, 100, self)
-        progress_dlg.setWindowTitle(t("migrate_data"))
-        progress_dlg.setMinimumDuration(0)
-        progress_dlg.setStyleSheet(MAIN_STYLE)
-
-        worker = MigrationWorker(migrator)
-
-        def on_progress(current, total):
-            if total > 0:
-                progress_dlg.setValue(int(current * 100 / total))
-
-        def on_success(count):
-            progress_dlg.close()
-            QMessageBox.information(
-                self, t("success"), t("migration_complete", count=count)
-            )
-
-        def on_error(err):
-            progress_dlg.close()
-            QMessageBox.critical(
-                self, t("error"), t("migration_failed", error=err)
-            )
-
-        worker.progress.connect(on_progress)
-        worker.finished_ok.connect(on_success)
-        worker.finished_err.connect(on_error)
-        # 防止 worker 被 GC 回收
-        self._migration_worker = worker
-        worker.start()
-
-    # ========== 右键菜单 ==========
-
-    def _show_context_menu(self, pos):
-        """显示右键上下文菜单"""
-        list_item = self.list_widget.itemAt(pos)
-        if not list_item:
-            return
-        row = self.list_widget.row(list_item)
-        if row < 0 or row >= len(self._items):
-            return
-
-        item = self._items[row]
-        menu = QMenu(self)
-
-        # 内置操作
-        copy_action = menu.addAction(f"📋 {t('ctx_copy')}")
-        copy_action.triggered.connect(lambda: self._on_item_clicked(item))
-
-        if item.is_starred:
-            star_action = menu.addAction(f"★ {t('ctx_unstar')}")
-        else:
-            star_action = menu.addAction(f"☆ {t('ctx_star')}")
-        star_action.triggered.connect(lambda: self._on_item_star(item))
-
-        delete_action = menu.addAction(f"🗑 {t('ctx_delete')}")
-        delete_action.triggered.connect(lambda: self._on_item_delete(item))
-
-        # 第二组：扩展能力收纳到「更多操作」子菜单，避免压过主操作
-        menu.addSeparator()
-        more_menu = menu.addMenu("⋯ 更多操作")
-
-        share_action = more_menu.addAction("🔗 分享这些条目...")
-        share_action.triggered.connect(lambda: self._on_share_items([item]))
-        if self.share_service is None and self.entitlement_service is None:
-            share_action.setEnabled(False)
-
-        tag_action = more_menu.addAction("🏷 添加标签...")
-        tag_action.triggered.connect(lambda: self._on_add_tags(item))
-        if self.tag_service is None:
-            tag_action.setEnabled(False)
-
-        # 第三组：插件统一收进「插件」子菜单（即使只有一个动作也不抢顶层）
-        if self.plugin_manager:
-            groups = self.plugin_manager.get_plugin_actions_grouped(item)
-            if groups:
-                plugin_root = menu.addMenu("🧩 插件")
-                for group in groups:
-                    actions = group["actions"]
-                    if len(actions) == 1:
-                        a = actions[0]
-                        act = plugin_root.addAction(f"{a.icon} {a.label}")
-                        act.triggered.connect(
-                            lambda checked=False, pid=group["plugin_id"], aid=a.action_id:
-                                self._run_plugin_action(pid, aid, item)
-                        )
-                    else:
-                        sub = plugin_root.addMenu(f"{actions[0].icon} {group['plugin_name']}")
-                        for a in actions:
-                            act = sub.addAction(a.label)
-                            act.triggered.connect(
-                                lambda checked=False, pid=group["plugin_id"], aid=a.action_id:
-                                    self._run_plugin_action(pid, aid, item)
-                            )
-
-        menu.exec(self.list_widget.mapToGlobal(pos))
-
-    # ========== 插件执行 ==========
-
-    def _run_plugin_action(self, plugin_id: str, action_id: str, item: ClipboardItem):
-        """执行插件动作。
-        Why: 图片完整数据需要从 SQLite 加载（可能数 MB BLOB），不能在主线程
-        同步阻塞 UI；通过 worker + signal 把 DB IO 切到后台线程。
-        """
-        if isinstance(item, ImageClipboardItem):
-            self._show_plugin_feedback(
-                t("plugin_executing", name="...", percent=0),
-                "pluginProgress",
-                show_cancel=False,
-            )
-            item_id = item.id
-            repo = self.repository
-            signal = self._plugin_item_loaded
-
-            def _load():
-                try:
-                    full = repo.get_item_by_id(item_id)
-                except RuntimeError as e:
-                    # Qt 对象已被销毁（窗口关闭竞态），直接放弃后续 emit
-                    if "has been deleted" in str(e):
-                        return
-                    logger.error(f"加载插件所需图片失败: {e}", exc_info=True)
-                    full = None
-                    signal.emit(plugin_id, action_id, full)
-                    return
-                except Exception as e:
-                    logger.error(f"加载插件所需图片失败: {e}", exc_info=True)
-                    full = None
-                signal.emit(plugin_id, action_id, full)
-
-            self._copy_executor.submit(_load)
-            return
-
-        self._dispatch_plugin_action(plugin_id, action_id, item)
-
-    def _handle_plugin_item_loaded(
-        self, plugin_id: str, action_id: str, full_item
-    ):
-        """主线程槽：插件所需的完整图片加载完成后派发"""
-        if not isinstance(full_item, ImageClipboardItem) or not full_item.image_data:
-            self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
-            return
-        self._dispatch_plugin_action(plugin_id, action_id, full_item)
-
-    def _dispatch_plugin_action(
-        self, plugin_id: str, action_id: str, item: ClipboardItem
-    ):
-        if not self.plugin_manager.run_action(plugin_id, action_id, item):
-            return  # 被拒绝（已有任务在执行）
-
-        plugin_name = self.plugin_manager.get_plugin_name(plugin_id)
-        self._show_plugin_feedback(
-            t("plugin_executing", name=plugin_name, percent=0),
-            "pluginProgress",
-            show_cancel=True,
-        )
-
-    def _on_plugin_progress(self, percent: int, message: str):
-        text = message if message else f"{percent}%"
-        self._show_plugin_feedback(text, "pluginProgress", show_cancel=True)
-
-    def _on_plugin_finished(self, result: PluginResult, original_item: ClipboardItem):
-        if not result.success:
-            if result.cancelled:
-                self.copy_feedback_label.hide()
-                return
-            self._show_plugin_feedback(
-                f"❌ {result.error_message or t('plugin_exec_failed')}", "copyFeedbackError"
-            )
-            return
-
-        # 根据 action 处理结果
-        if result.action == PluginResultAction.NONE:
-            self.copy_feedback_label.hide()
-            return
-
-        if result.action == PluginResultAction.COPY:
-            # 复制到剪贴板：根据插件结果的 content_type 分派到具体子类
-            if result.content_type == ContentType.TEXT:
-                temp_item: ClipboardItem = TextClipboardItem(
-                    text_content=result.text_content or "",
-                )
-            else:
-                temp_item = ImageClipboardItem(
-                    image_data=result.image_data,
-                    image_thumbnail=None,
-                )
-            self.clipboard_monitor.copy_to_clipboard(temp_item)
-            self._show_plugin_feedback(t("copied_to_clipboard"), "copyFeedbackSuccess")
-
-        elif result.action == PluginResultAction.SAVE:
-            # 保存为新条目：按插件结果 content_type 分派到具体子类
-            from utils.hash_utils import compute_content_hash
-            hash_content = result.text_content or result.image_data
-            if not hash_content:
-                self._show_plugin_feedback("❌ 插件返回空内容", "copyFeedbackError")
-                return
-            common_kwargs = dict(
-                content_hash=compute_content_hash(hash_content),
-                preview=(result.text_content or "")[:100],
-                device_id=settings().device_id,
-                device_name=settings().device_name,
-            )
-            if result.content_type == ContentType.TEXT:
-                new_item: ClipboardItem = TextClipboardItem(
-                    **common_kwargs,
-                    text_content=result.text_content or "",
-                )
-            else:
-                new_item = ImageClipboardItem(
-                    **common_kwargs,
-                    image_data=result.image_data,
-                    image_thumbnail=None,
-                )
-            self.repository.add_item(new_item)
-            self._load_items()
-            self._show_plugin_feedback(t("plugin_saved_entry"), "copyFeedbackSuccess")
-
-        elif result.action == PluginResultAction.REPLACE:
-            # 替换原条目
-            if original_item and original_item.id:
-                success = self.repository.update_item_content(
-                    original_item.id,
-                    text_content=result.text_content,
-                    image_data=result.image_data,
-                    content_type=result.content_type.value if result.content_type else None,
-                )
-                if success:
-                    self._load_items()
-                    self._show_plugin_feedback(t("plugin_replaced_entry"), "copyFeedbackSuccess")
-                else:
-                    self._show_plugin_feedback("❌ " + t("plugin_error"), "copyFeedbackError")
-
-    def _on_plugin_error(self, message: str):
-        self._show_plugin_feedback(f"❌ {message}", "copyFeedbackError")
-
-    def _show_plugin_feedback(self, text: str, object_name: str, show_cancel: bool = False):
-        """显示插件反馈信息"""
-        if show_cancel:
-            self.copy_feedback_label.setText(f"{text}  [✕]")
-            self.copy_feedback_label.mousePressEvent = lambda e: self._cancel_plugin()
-        else:
-            self.copy_feedback_label.setText(text)
-            self.copy_feedback_label.mousePressEvent = lambda e: None
-            self._feedback_timer.start(3000)
-        self.copy_feedback_label.setObjectName(object_name)
-        self.copy_feedback_label.style().polish(self.copy_feedback_label)
-        self.copy_feedback_label.show()
-
-    def _cancel_plugin(self):
-        if self.plugin_manager:
-            self.plugin_manager.cancel_action()
-        self.copy_feedback_label.hide()
-
-    # ========== v3.4: 分享 + 打标签 ==========
-
-    def _on_share_items(self, items: List[ClipboardItem]):
-        if not items:
-            return
-        if self.share_service is None:
-            QMessageBox.warning(self, "分享不可用", "未初始化 ShareService，无法创建分享链接。")
-            return
-
-        if self.entitlement_service is not None:
-            try:
-                can_share = bool(self.entitlement_service.current().can_share_link)
-            except Exception:
-                can_share = True  # 取不到权益时让后端自己拦
-            if not can_share:
-                box = QMessageBox(self)
-                box.setIcon(QMessageBox.Information)
-                box.setWindowTitle("分享链接需要升级套餐")
-                box.setText(
-                    "分享链接是付费增强能力——把这一组文本/图片发给同事、客户"
-                    "或自己其他设备一次性使用，链接到期自动失效。\n\n"
-                    "你当前的套餐暂不支持创建分享链接。"
-                )
-                view_btn = box.addButton("查看套餐", QMessageBox.AcceptRole)
-                box.addButton("取消", QMessageBox.RejectRole)
-                box.exec()
-                if box.clickedButton() is view_btn:
-                    try:
-                        QDesktopServices.openUrl(QUrl(PRICING_URL))
-                    except Exception:
-                        pass
-                return
-
-        try:
-            from .share_dialog import ShareLinkDialog
-        except Exception as exc:
-            QMessageBox.critical(self, "错误", f"无法加载分享对话框：{exc}")
-            return
-        dlg = ShareLinkDialog(
-            items=items,
-            share_service=self.share_service,
-            space_id=self._current_space_id or "",
-            parent=self,
-        )
-        dlg.exec()
-
-    def _on_add_tags(self, item: ClipboardItem):
-        if self.tag_service is None:
-            QMessageBox.warning(self, "标签不可用", "未初始化 TagService。")
-            return
-        text, ok = QInputDialog.getText(
-            self, "添加标签", "输入标签名（多个用逗号分隔）：",
-        )
-        if not ok or not text:
-            return
-        names = [n.strip() for n in text.split(",") if n.strip()]
-        if not names:
-            return
-        space_id = item.space_id or self._current_space_id or ""
-        try:
-            tag_ids = self.tag_service.apply_tag_names(
-                item_id=item.id,
-                space_id=space_id,
-                tag_names=names,
-            )
-        except Exception as exc:
-            logger.warning(f"添加标签失败: {exc}", exc_info=True)
-            QMessageBox.warning(self, "添加失败", f"添加标签失败：{exc}")
-            return
-        # 让侧栏刷新标签列表
-        if self.sidebar is not None:
-            self.sidebar.refresh_tags(space_id if space_id else None)
-        self._show_copy_feedback(True)
-        if hasattr(self, "copy_feedback_label"):
-            self.copy_feedback_label.setText(f"已添加 {len(tag_ids)} 个标签")
-
-    def _request_quit(self):
-        """请求退出应用"""
-        self.quit_requested.emit()
+    # ========== 关闭 ==========
 
     def closeEvent(self, event):
-        """Handle system close requests consistently with the quit button."""
+        """系统关闭请求统一走退出按钮逻辑,同时清理 controller 引用避免 Qt 循环。"""
         if IS_MACOS:
             self._request_quit()
             event.accept()
             return
+        for ctrl in (
+            getattr(self, "list_controller", None),
+            getattr(self, "item_controller", None),
+            getattr(self, "plugin_controller", None),
+            getattr(self, "cloud_controller", None),
+        ):
+            if ctrl is not None:
+                try:
+                    ctrl.setParent(None)
+                    ctrl.deleteLater()
+                except Exception:
+                    pass
         super().closeEvent(event)
