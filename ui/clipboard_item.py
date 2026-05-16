@@ -26,9 +26,39 @@ class ClipboardItemWidget(QWidget):
         super().__init__(parent)
         self.item = item
         self.setObjectName("itemWidget")
+        self._text_preview_label: QLabel | None = None
         # 样式已合并到 MAIN_STYLE，由父级 MainWindow 统一设置
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
+
+    def hasHeightForWidth(self) -> bool:
+        return self._text_preview_label is not None
+
+    def heightForWidth(self, w: int) -> int:
+        label = self._text_preview_label
+        if label is None:
+            return super().sizeHint().height()
+        # 确保 stylesheet 字体已生效,否则 heightForWidth 用默认字体得到偏小高度
+        self.ensurePolished()
+        label.ensurePolished()
+        m = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        # 右侧固定按钮列 28px + spacing + 左右 margin
+        avail = w - m.left() - m.right() - 28 - spacing
+        if avail <= 0:
+            return super().sizeHint().height()
+        label_h = label.heightForWidth(avail)
+        if label_h <= 0:
+            label_h = label.sizeHint().height()
+        # meta 行约 18px + content_layout 内 spacing 6
+        content_h = label_h + 6 + 18
+        # Why: 按钮列按 22px/个 + 2px spacing 垂直堆叠, 若比文字高则需取较大值,
+        # 否则删除键(最后一个按钮)会被截掉一半。
+        btn_count = 2  # star + delete
+        if self.item.is_cloud_synced:
+            btn_count += 1
+        buttons_h = btn_count * 22 + (btn_count - 1) * 2
+        return m.top() + m.bottom() + max(content_h, buttons_h)
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
@@ -100,8 +130,8 @@ class ClipboardItemWidget(QWidget):
             preview_label.setTextFormat(Qt.PlainText)
             preview_label.setWordWrap(True)
             preview_label.setMinimumWidth(0)
-            preview_label.setMaximumHeight(54)
             preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self._text_preview_label = preview_label
             content_layout.addWidget(preview_label)
 
             content_layout.addStretch()
@@ -123,12 +153,21 @@ class ClipboardItemWidget(QWidget):
         button_container.setFixedWidth(28)
         button_layout = QVBoxLayout(button_container)
         button_layout.setContentsMargins(0, 0, 0, 0)
-        button_layout.setSpacing(4)
+        button_layout.setSpacing(2)
+        button_layout.setAlignment(Qt.AlignTop)
+
+        def _style_btn(btn: QPushButton):
+            # Why: macOS 原生按钮 chrome 会在小尺寸下绘制成色块,且垂直堆叠多按钮时
+            # 没有固定高度会被 layout 压扁。强制 flat + 固定尺寸保证清晰。
+            btn.setFlat(True)
+            btn.setFixedSize(24, 22)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         star_btn = QPushButton("★" if self.item.is_starred else "☆")
         star_btn.setObjectName("starButton")
         star_btn.setToolTip("收藏" if not self.item.is_starred else "取消收藏")
         star_btn.clicked.connect(lambda: self.star_clicked.emit(self.item))
+        _style_btn(star_btn)
         button_layout.addWidget(star_btn)
 
         if self.item.is_cloud_synced:
@@ -136,6 +175,7 @@ class ClipboardItemWidget(QWidget):
             cloud_btn.setObjectName("cloudButton")
             cloud_btn.setToolTip("已同步到云端\n点击删除云端副本")
             cloud_btn.clicked.connect(lambda: self.cloud_delete_clicked.emit(self.item))
+            _style_btn(cloud_btn)
             button_layout.addWidget(cloud_btn)
 
         if self.item.is_image:
@@ -144,18 +184,21 @@ class ClipboardItemWidget(QWidget):
                 url_btn.setObjectName("urlButton")
                 url_btn.setToolTip("复制图片链接")
                 url_btn.clicked.connect(lambda: self.image_url_clicked.emit(self.item))
+                _style_btn(url_btn)
                 button_layout.addWidget(url_btn)
 
             save_btn = QPushButton("💾")
             save_btn.setObjectName("saveButton")
             save_btn.setToolTip("保存图片")
             save_btn.clicked.connect(lambda: self.save_clicked.emit(self.item))
+            _style_btn(save_btn)
             button_layout.addWidget(save_btn)
 
         delete_btn = QPushButton("×")
         delete_btn.setObjectName("deleteButton")
         delete_btn.setToolTip("删除")
         delete_btn.clicked.connect(lambda: self.delete_clicked.emit(self.item))
+        _style_btn(delete_btn)
         button_layout.addWidget(delete_btn)
 
         button_layout.addStretch()

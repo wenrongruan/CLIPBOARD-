@@ -412,6 +412,14 @@ class ClipboardApp:
         if not hotkey:
             return
 
+        # macOS: 无辅助功能权限时启动 pynput 仍会装 CGEventTap,
+        # 后续按键经 NSEvent eventWithCGEvent: 触发 TSM,在新版 macOS 后台线程上
+        # dispatch_assert_queue 断言失败 SIGTRAP 闪退。所以先检查权限,无权限直接跳过。
+        if IS_MACOS and not self._has_accessibility_permission():
+            logger.warning("未授予辅助功能/输入监控权限,跳过全局热键监听以避免闪退")
+            self._prompt_input_monitoring_permission()
+            return
+
         try:
             # 创建热键监听器
             self.hotkey_listener = keyboard.GlobalHotKeys({
@@ -426,6 +434,16 @@ class ClipboardApp:
             logger.error(f"注册全局热键失败: {e}")
             if IS_MACOS:
                 self._prompt_input_monitoring_permission()
+
+    @staticmethod
+    def _has_accessibility_permission() -> bool:
+        """macOS: 通过 AXIsProcessTrusted 判断是否拿到辅助功能权限。"""
+        try:
+            from ApplicationServices import AXIsProcessTrusted
+            return bool(AXIsProcessTrusted())
+        except Exception:
+            # pyobjc 未装或符号缺失,保守认为没权限
+            return False
 
     def _check_hotkey_listener_alive(self):
         """macOS: 3 秒后检查热键监听是否真正在运行"""

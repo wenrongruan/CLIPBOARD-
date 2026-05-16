@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional
 
-from PySide6.QtCore import QObject, Qt, QSize, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QSize, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QListWidgetItem, QMessageBox
 
@@ -50,6 +50,14 @@ class ClipboardListController(QObject):
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.timeout.connect(self.do_search)
+
+        # list 宽度变化时重算行高(防抖)
+        self._resize_debounce = QTimer(self)
+        self._resize_debounce.setSingleShot(True)
+        self._resize_debounce.setInterval(80)
+        self._resize_debounce.timeout.connect(self.refresh_row_sizes)
+        self._resize_filter_installed = False
+        self._last_viewport_w = 0
 
     # ---------- 内部便捷访问 ----------
 
@@ -122,12 +130,70 @@ class ClipboardListController(QObject):
 
         list_item = QListWidgetItem()
         hint = widget.sizeHint()
+        if widget.hasHeightForWidth():
+            target_w = self._target_row_width(hint.width())
+            # +8: QListWidget::item 的 margin(3+3) + border(1+1) 占据的纵向空间
+            hint_h = widget.heightForWidth(target_w) + 8
+        else:
+            hint_h = hint.height()
         min_h = 92 if item.is_image else 76
-        list_item.setSizeHint(QSize(hint.width(), max(hint.height(), min_h)))
+        # 宽度仍用 widget 的 sizeHint().width(),让 QListView 自行扩展到 viewport;
+        # 若强行写 viewport 宽,纵向滚动条出现后 viewport 变窄,行会比 viewport 宽,
+        # 导致右侧按钮被滚动条遮挡。
+        list_item.setSizeHint(QSize(hint.width(), max(hint_h, min_h)))
         return list_item, widget
+
+    def _target_row_width(self, fallback: int) -> int:
+        """list viewport 的可用宽度,优先用真实值,启动期回退到 fallback。"""
+        try:
+            vw = self._parent.list_widget.viewport().width()
+        except Exception:
+            vw = 0
+        return vw if vw > 50 else max(fallback, 400)
+
+    def refresh_row_sizes(self):
+        """list 宽度变化时按真实宽度重算各行高度,避免文字裁切。"""
+        lw = getattr(self._parent, "list_widget", None)
+        if lw is None:
+            return
+        target_w = self._target_row_width(lw.viewport().width() or 600)
+        for i in range(lw.count()):
+            li = lw.item(i)
+            if li is None:
+                continue
+            w = lw.itemWidget(li)
+            if isinstance(w, ClipboardItemWidget) and w.hasHeightForWidth():
+                h = w.heightForWidth(target_w) + 8
+                min_h = 92 if w.item.is_image else 76
+                cur_w = li.sizeHint().width()
+                li.setSizeHint(QSize(cur_w, max(h, min_h)))
+
+    def _install_resize_filter(self):
+        if self._resize_filter_installed:
+            return
+        lw = getattr(self._parent, "list_widget", None)
+        if lw is None:
+            return
+        try:
+            lw.viewport().installEventFilter(self)
+            self._resize_filter_installed = True
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize:
+            try:
+                w = obj.width()
+                if w != self._last_viewport_w:
+                    self._last_viewport_w = w
+                    self._resize_debounce.start()
+            except Exception:
+                pass
+        return super().eventFilter(obj, event)
 
     def update_list(self):
         list_widget = self._parent.list_widget
+        self._install_resize_filter()
         list_widget.clear()
         for item in self._items:
             list_item, widget = self.make_list_item(item)
