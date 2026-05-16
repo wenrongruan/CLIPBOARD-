@@ -157,7 +157,7 @@ def build_file_page_placeholder() -> QWidget:
     title.setStyleSheet("color:#e8e8e8;font-size:15px;font-weight:600;")
     pl.addWidget(title)
 
-    tip = QLabel("登录云端账户并升级到 Pro/Premium 后,在此管理常用文件。")
+    tip = QLabel("登录云端账户并升级到付费套餐后,在此管理常用文件。")
     tip.setWordWrap(True)
     tip.setAlignment(Qt.AlignCenter)
     tip.setStyleSheet("color:#aaa;")
