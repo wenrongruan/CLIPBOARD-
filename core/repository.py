@@ -202,3 +202,6 @@ class ClipboardRepository:
 
     def get_unstarred_with_cloud_id(self, limit: int = 200) -> List[ClipboardItem]:
         return self._sync.get_unstarred_with_cloud_id(limit)
+
+    def get_cloud_ids_for_ids(self, item_ids: List[int]) -> dict:
+        return self._sync.get_cloud_ids_for_ids(item_ids)

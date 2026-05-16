@@ -65,7 +65,13 @@ class QuerySpec:
             if _needs_quoting(kw):
                 parts.append('"' + escaped + '"')
             else:
-                parts.append(escaped)
+                # 自动追加 * 启用 FTS5 前缀匹配，让 "cl" 能命中 "claude"。
+                # 用户若自带 *，避免重复；纯非 ASCII（CJK）token 也加 * 无妨，
+                # FTS5 会按 tokenizer 行为处理。
+                if escaped and not escaped.endswith("*"):
+                    parts.append(escaped + "*")
+                else:
+                    parts.append(escaped)
         return " ".join(parts)
 
 

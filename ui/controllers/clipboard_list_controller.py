@@ -70,10 +70,17 @@ class ClipboardListController(QObject):
     def load_items(self):
         try:
             if self._search_query:
+                # search() 的 space_id 语义：None=仅个人空间(space_id IS NULL)，
+                # ""=不过滤。而本 controller 里 _current_space_id=None 表示
+                # "未选择特定空间，显示全部"（与 get_items 路径一致），所以这里
+                # 要把 None 翻译成 "" 才能让搜索覆盖所有空间。
+                search_space_id = (
+                    "" if self._current_space_id is None else self._current_space_id
+                )
                 items, total = self.repository.search_by_keyword(
                     self._search_query, self._current_page, self._page_size,
                     starred_only=self._starred_only,
-                    space_id=self._current_space_id,
+                    space_id=search_space_id,
                 )
             elif self._current_tag_id:
                 items = self.repository.get_items_by_tag(
@@ -237,6 +244,55 @@ class ClipboardListController(QObject):
                 onboarding.advance_on_copy()
             except Exception:
                 pass
+
+    def refresh_cloud_state(self):
+        """上传完成后，把当前列表里 cloud_id=None 但 DB 已经写入 cloud_id 的条目
+        刷新成"已同步"外观（出现 ☁ 按钮，图片条目出现 🔗）。
+
+        Why: ClipboardItemWidget 在构造时一次性根据 is_cloud_synced 决定按钮列；
+        云同步 worker 写 DB 后不会回写内存 item，也未触发任何 UI 刷新，导致
+        云图标永远不出现，除非整页重载。
+        """
+        if not self._items:
+            return
+        pending_ids = [it.id for it in self._items if it.id and it.cloud_id is None]
+        if not pending_ids:
+            return
+        try:
+            mapping = self.repository.get_cloud_ids_for_ids(pending_ids)
+        except Exception as e:
+            logger.debug(f"刷新云端标记失败: {e}")
+            return
+
+        list_widget = self._parent.list_widget
+        changed_idx = []
+        for idx, item in enumerate(self._items):
+            if item.id is None or item.cloud_id is not None:
+                continue
+            new_cid = mapping.get(item.id)
+            if new_cid:
+                item.cloud_id = new_cid
+                changed_idx.append(idx)
+        if not changed_idx:
+            return
+
+        for idx in changed_idx:
+            li = list_widget.item(idx)
+            if li is None:
+                continue
+            new_widget = ClipboardItemWidget(self._items[idx])
+            new_widget.clicked.connect(self.item_clicked)
+            new_widget.delete_clicked.connect(self.item_delete_requested)
+            new_widget.star_clicked.connect(self.item_star_requested)
+            new_widget.save_clicked.connect(self.item_save_requested)
+            new_widget.cloud_delete_clicked.connect(self.cloud_delete_requested)
+            new_widget.image_url_clicked.connect(self.image_url_copy_requested)
+            list_widget.setItemWidget(li, new_widget)
+            if new_widget.hasHeightForWidth():
+                target_w = self._target_row_width(li.sizeHint().width())
+                h = new_widget.heightForWidth(target_w) + 8
+                min_h = 92 if self._items[idx].is_image else 76
+                li.setSizeHint(QSize(li.sizeHint().width(), max(h, min_h)))
 
     def on_new_items(self, items: List[ClipboardItem]):
         # 来自其他设备的新记录

@@ -128,6 +128,23 @@ class SyncStateDAO:
             return [ClipboardItem.from_db_row(row) for row in rows]
         return self.db.execute_read(operation)
 
+    def get_cloud_ids_for_ids(self, item_ids: List[int]) -> dict:
+        """批量查询给定 item_id 对应的 cloud_id，返回 {item_id: cloud_id 或 None}。
+
+        仅含 item_ids 中实际存在的行；不存在的 id 不出现在结果里。
+        用于 UI 在上传完成后刷新当前列表的云端标记。
+        """
+        if not item_ids:
+            return {}
+
+        def operation(conn):
+            placeholders = ",".join("?" for _ in item_ids)
+            sql = f"SELECT id, cloud_id FROM clipboard_items WHERE id IN ({placeholders})"
+            rows = self.db.fetch_all(conn, sql, tuple(item_ids))
+            return {row["id"]: row["cloud_id"] for row in rows}
+
+        return self.db.execute_read(operation)
+
     def get_unstarred_with_cloud_id(self, limit: int = 200) -> List[ClipboardItem]:
         """获取未收藏但有云端副本的条目，按最旧排序（用于配额清理时优先删最旧）"""
         def operation(conn) -> List[ClipboardItem]:

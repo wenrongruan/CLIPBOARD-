@@ -132,6 +132,9 @@ class CloudLifecycleController(QObject):
                     parent.list_controller.on_new_items
                 )
                 parent.cloud_sync_service.new_items_available.connect(self.advance_sync_after_cloud)
+                parent.cloud_sync_service.upload_completed.connect(
+                    lambda _count: parent.list_controller.refresh_cloud_state()
+                )
                 parent._cloud_sync_ui_connected = True
 
             QTimer.singleShot(0, parent.cloud_sync_service.start)
