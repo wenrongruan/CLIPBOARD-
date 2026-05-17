@@ -25,6 +25,7 @@
 - `settings.json`、`clipboard.db` 和 `logs/` 都在系统配置目录下的 `SharedClipboard/` 子目录中。
 - 文件云同步（付费功能）由 `core/file_sync_service.py` + `core/file_repository.py` + `core/file_storage.py` 实现，付费闸在 `core/entitlement_service.py`。
 - 官网与后端 API 源码在 `website/` 子目录（部署到 `www.jlike.com`）。`website/CLAUDE.md` 有详细说明；客户端里的 `pricing.html` / `account.html` / `privacy.html` 外链都指向同一仓库的前端。
+- 团队邀请的字段约定（v3.5）：客户端 `invite_space_member` body 是 `{email, role}`，后端 `space_invitations` 表永远落库；响应有 `status=added` / `status=invite_pending` 两种，都带 `invitation_url`。客户端 UI 展示并复制此链接，不再发邮件。
 
 ## 文档维护优先级
 

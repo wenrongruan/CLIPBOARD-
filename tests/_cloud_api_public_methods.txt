@@ -1,3 +1,4 @@
+accept_invitation
 ai_cancel_task
 ai_generate
 ai_poll_task
@@ -24,7 +25,9 @@ get_subscription
 get_tokens
 invite_space_member
 leave_space
+list_incoming_invitations
 list_share_links
+list_space_invitations
 list_space_members
 list_spaces
 login
@@ -34,6 +37,7 @@ register
 register_device
 remove_space_member
 revoke_share_link
+revoke_space_invitation
 set_tokens
 sync
 toggle_star

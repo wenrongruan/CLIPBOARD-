@@ -283,6 +283,18 @@ class CloudAPIClient:
     def leave_space(self, space_id: str) -> None:
         return self.spaces.leave_space(space_id)
 
+    def list_space_invitations(self, space_id: str) -> list:
+        return self.spaces.list_space_invitations(space_id)
+
+    def revoke_space_invitation(self, space_id: str, token: str) -> None:
+        return self.spaces.revoke_space_invitation(space_id, token)
+
+    def list_incoming_invitations(self) -> list:
+        return self.spaces.list_incoming_invitations()
+
+    def accept_invitation(self, token: str) -> dict:
+        return self.spaces.accept_invitation(token)
+
     def list_share_links(self) -> list:
         return self.spaces.list_share_links()
 

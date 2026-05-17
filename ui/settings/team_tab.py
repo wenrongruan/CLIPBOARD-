@@ -3,6 +3,7 @@
 import logging
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
     QMessageBox, QPushButton, QVBoxLayout, QWidget,
@@ -22,17 +23,21 @@ class TeamTab(QWidget):
         parent=None,
         space_service=None,
         entitlement_service=None,
+        cloud_api=None,
         **_legacy_kwargs,
     ):
         super().__init__(parent)
         self.ctx = ctx
         self._space_service = space_service
         self._entitlement_service = entitlement_service
+        self._cloud_api = cloud_api
         if ctx is not None:
             if self._space_service is None:
                 self._space_service = getattr(ctx, "space_service", None)
             if self._entitlement_service is None:
                 self._entitlement_service = getattr(ctx, "entitlement_service", None)
+            if self._cloud_api is None:
+                self._cloud_api = getattr(ctx, "cloud_api", None)
         self._team_space_list = None
         self._team_member_list = None
         self._team_enabled = self._build_ui()
@@ -142,26 +147,67 @@ class TeamTab(QWidget):
         self._refresh_team_spaces()
 
     def _on_team_invite_member(self):
-        if self._space_service is None:
+        if self._team_space_list is None:
             return
-        item = self._team_space_list.currentItem() if self._team_space_list else None
+        item = self._team_space_list.currentItem()
         if item is None:
             QMessageBox.information(self, "提示", "请先选择一个团队空间。")
             return
+        if self._cloud_api is None:
+            QMessageBox.warning(self, "邀请失败", "未登录或云端服务不可用，请先登录。")
+            return
         space_id = item.data(Qt.UserRole)
-        user_id, ok = QInputDialog.getText(
-            self, "邀请成员", "请输入成员 user_id（或邮箱）：",
+        email, ok = QInputDialog.getText(self, "邀请成员", "邀请成员邮箱：")
+        if not ok or not email.strip():
+            return
+        role, ok = QInputDialog.getItem(
+            self, "邀请角色", "成员权限：", ["editor", "viewer"], 0, False,
         )
-        if not ok or not user_id.strip():
+        if not ok:
             return
         try:
-            self._space_service.add_member(
-                space_id=space_id, user_id=user_id.strip(), role="editor",
+            resp = self._cloud_api.invite_space_member(
+                space_id=space_id, email=email.strip(), role=role,
             )
         except Exception as exc:
             QMessageBox.warning(self, "邀请失败", str(exc))
             return
+
+        status = (resp or {}).get("status") or ""
+        invite_url = (resp or {}).get("invitation_url") or ""
+        if status == "invite_pending":
+            self._show_invite_link(
+                f"{email} 尚未注册，请把邀请链接复制并转发给对方：",
+                invite_url,
+            )
+        elif status == "added":
+            if invite_url:
+                self._show_invite_link(
+                    f"已把 {email} 加入空间。可把链接发给对方让 ta 通过链接进入：",
+                    invite_url,
+                )
+            else:
+                QMessageBox.information(self, "邀请成功", f"已邀请 {email} 加入空间。")
+        else:
+            QMessageBox.information(self, "邀请", resp.get("message") or "请求已提交。")
         self._on_team_space_selected()
+
+    def _show_invite_link(self, prompt: str, url: str):
+        if not url:
+            QMessageBox.information(self, "邀请", prompt)
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("邀请链接")
+        box.setText(prompt)
+        box.setInformativeText(url)
+        copy_btn = box.addButton("复制链接", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if box.clickedButton() is copy_btn:
+            try:
+                QGuiApplication.clipboard().setText(url)
+            except Exception as exc:
+                logger.debug(f"复制邀请链接失败: {exc}")
 
     def _open_pricing_page(self):
         from PySide6.QtCore import QUrl

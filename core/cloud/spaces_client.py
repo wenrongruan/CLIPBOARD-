@@ -69,7 +69,11 @@ class SpacesClient:
 
     @requires_plugin_permission("network")
     def invite_space_member(self, space_id: str, email: str, role: str) -> dict:
-        """邀请成员。role 常见：'owner' / 'editor' / 'viewer'，具体以服务端为准。"""
+        """邀请成员。返回结构：
+        - {status:'added', member:{...}, invitation_url?:str}
+        - {status:'invite_pending', invitation_url:str, token:str, email:str}
+        - {status:'already_member', ...}
+        """
         payload = {"email": email, "role": role}
         response = self._facade._request(
             "POST", f"/api/v1/spaces/{space_id}/members", json=payload,
@@ -85,6 +89,45 @@ class SpacesClient:
     def leave_space(self, space_id: str) -> None:
         """当前用户主动退出 space。owner 需先转让或删除。"""
         self._facade._request("POST", f"/api/v1/spaces/{space_id}/leave")
+
+    # ========== Invitations（邀请，v3.5） ==========
+
+    @requires_plugin_permission("network")
+    def list_space_invitations(self, space_id: str) -> list:
+        """列出某 space 的 pending 邀请（owner/editor 可见）。"""
+        response = self._facade._request(
+            "GET", f"/api/v1/spaces/{space_id}/invitations",
+        )
+        data = response.json()
+        if isinstance(data, dict):
+            return data.get("invitations", data.get("items", []))
+        return data if isinstance(data, list) else []
+
+    @requires_plugin_permission("network")
+    def revoke_space_invitation(self, space_id: str, token: str) -> None:
+        """撤销 pending 邀请。"""
+        self._facade._request(
+            "DELETE", f"/api/v1/spaces/{space_id}/invitations/{token}",
+        )
+
+    @requires_plugin_permission("network")
+    def list_incoming_invitations(self) -> list:
+        """列出发给当前登录用户邮箱的 pending 邀请。"""
+        response = self._facade._request(
+            "GET", "/api/v1/invitations/incoming",
+        )
+        data = response.json()
+        if isinstance(data, dict):
+            return data.get("invitations", data.get("items", []))
+        return data if isinstance(data, list) else []
+
+    @requires_plugin_permission("network")
+    def accept_invitation(self, token: str) -> dict:
+        """接受邀请。要求 Email 与邀请收件 Email 一致。"""
+        response = self._facade._request(
+            "POST", f"/api/v1/invitations/{token}/accept",
+        )
+        return response.json()
 
     # ========== Share Link（分享链接）接口 ==========
 
