@@ -78,7 +78,13 @@ python main.py
 pytest -q
 ```
 
-当前仓库测试结果：`61 passed`
+当前仓库测试结果：`296 passed`
+
+## 发布收口文档
+
+- `PRODUCT_V1.md`：v1.0 产品边界与默认/可选能力分层。
+- `RELEASE_CHECKLIST.md`：发布前自动化测试、手测、降级和打包检查。
+- `RISK_REGISTER.md`：P0/P1/P2 发布风险台账。
 
 ## 说明
 - 主窗口采用边缘停靠和托盘模式运行。
