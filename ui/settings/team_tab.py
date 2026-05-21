@@ -49,6 +49,13 @@ class TeamTab(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(12, 12, 12, 12)
 
+        desc = QLabel(
+            "团队空间是可选协作增强；未启用或不可用时，本地剪贴板历史、搜索、收藏和热键仍可正常使用。"
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color:#aaa;font-size:12px;padding:0 0 6px 0;")
+        layout.addWidget(desc)
+
         ent = None
         if self._entitlement_service is not None:
             try:

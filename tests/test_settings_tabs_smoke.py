@@ -64,7 +64,7 @@ def ctx(tmp_path, monkeypatch):
 
 def test_settings_dialog_constructs(qapp, ctx):
     from ui.settings import SettingsDialog
-    dlg = SettingsDialog(ctx=ctx)
+    dlg = SettingsDialog(ctx=ctx, auto_load_store=False)
     assert dlg is not None
     dlg.close()
 
@@ -85,7 +85,11 @@ def test_each_tab_constructs(qapp, ctx):
     from ui.settings.plugins_tab import PluginsTab
     from ui.settings.team_tab import TeamTab
 
-    for cls in (GeneralTab, DatabaseTab, FilterTab, PluginsTab, CloudTab, TeamTab, AboutTab):
+    for cls in (GeneralTab, DatabaseTab, FilterTab, CloudTab, TeamTab, AboutTab):
         w = cls(ctx=ctx)
         assert w is not None
         w.close()
+
+    w = PluginsTab(ctx=ctx, auto_load_store=False)
+    assert w is not None
+    w.close()

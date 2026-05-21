@@ -113,7 +113,14 @@ class _PluginInstallThread(QThread):
 class PluginsTab(QWidget):
     """对应旧 SettingsDialog._setup_plugin_tab。"""
 
-    def __init__(self, ctx=None, parent=None, plugin_manager=None, **_legacy_kwargs):
+    def __init__(
+        self,
+        ctx=None,
+        parent=None,
+        plugin_manager=None,
+        auto_load_store: bool = True,
+        **_legacy_kwargs,
+    ):
         super().__init__(parent)
         self.ctx = ctx
         # ctx 优先，没有时回退到旧的显式参数
@@ -123,8 +130,10 @@ class PluginsTab(QWidget):
         self._store_thread = None
         self._install_threads = {}
         self._build_ui()
+        if self._plugin_manager is not None and hasattr(self._plugin_manager, "plugins_changed"):
+            self._plugin_manager.plugins_changed.connect(self._refresh_plugin_list)
         self._refresh_plugin_list()
-        if not IS_APPSTORE_BUILD:
+        if auto_load_store and not IS_APPSTORE_BUILD:
             self._load_store_plugins()
 
     def _build_ui(self):
@@ -138,6 +147,13 @@ class PluginsTab(QWidget):
         content_layout = QVBoxLayout(scroll_content)
         content_layout.setSpacing(6)
         content_layout.setContentsMargins(0, 0, 0, 0)
+
+        desc = QLabel(
+            "插件是可选自动化增强；插件加载、商店或执行失败不会影响本地剪贴板历史、搜索和热键。"
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #aaaaaa; font-size: 12px; padding: 0 0 8px 0;")
+        content_layout.addWidget(desc)
 
         # 已安装插件
         installed_title = QLabel(t("installed_plugins"))

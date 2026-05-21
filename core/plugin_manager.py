@@ -146,6 +146,8 @@ class PluginManager(QObject):
     action_finished = Signal(object, object)  # (PluginResult, 原始 ClipboardItem)
     action_error = Signal(str)                # 错误消息
 
+    plugins_changed = Signal()
+
     def __init__(self, parent=None, extension_points=None):
         super().__init__(parent)
         self._plugins: Dict[str, PluginBase] = {}
@@ -169,6 +171,8 @@ class PluginManager(QObject):
             for entry in sorted(plugin_dir.iterdir()):
                 if entry.is_dir() and (entry / "manifest.json").exists():
                     self._load_single_plugin(entry)
+
+        self.plugins_changed.emit()
 
     def _load_single_plugin(self, plugin_path: Path):
         """加载单个插件"""
@@ -664,6 +668,7 @@ class PluginManager(QObject):
             try:
                 resolved.relative_to(known_dir.resolve())
                 shutil.rmtree(path)
+                self.plugins_changed.emit()
                 return True
             except ValueError:
                 continue

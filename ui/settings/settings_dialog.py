@@ -35,6 +35,7 @@ class SettingsDialog(QDialog):
         entitlement_service=None,
         initial_tab: str = "",
         ctx=None,
+        auto_load_store: bool = True,
     ):
         super().__init__(parent)
         # ctx 优先；任何显式 kwarg 为 None 时尝试从 ctx 兜底
@@ -54,6 +55,7 @@ class SettingsDialog(QDialog):
         self._space_service = space_service
         self._entitlement_service = entitlement_service
         self._initial_tab = initial_tab or ""
+        self._auto_load_store = auto_load_store
 
         self.setWindowTitle(t("settings"))
         self.setFixedSize(580, 560)
@@ -85,7 +87,10 @@ class SettingsDialog(QDialog):
         self._tab_name_to_index["filter"] = tab_widget.addTab(self.filter_tab, t("filter_storage"))
 
         self.plugins_tab = PluginsTab(
-            ctx=self.ctx, parent=self, plugin_manager=self._plugin_manager,
+            ctx=self.ctx,
+            parent=self,
+            plugin_manager=self._plugin_manager,
+            auto_load_store=self._auto_load_store,
         )
         self._tab_name_to_index["plugins"] = tab_widget.addTab(self.plugins_tab, t("plugins"))
 
