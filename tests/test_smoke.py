@@ -63,8 +63,169 @@ def test_plugin_manager_load_empty(qapp, tmp_path, monkeypatch):
     )
 
     pm = pm_mod.PluginManager()
+    changed_events = []
+    pm.plugins_changed.connect(lambda: changed_events.append(True))
     pm.load_plugins()
     assert pm._plugins == {}
+    assert changed_events == [True]
+
+
+def test_deferred_plugin_loader_calls_load_plugins():
+    import main
+
+    class FakePluginManager:
+        def __init__(self):
+            self.loaded = False
+
+        def load_plugins(self):
+            self.loaded = True
+
+    app = main.ClipboardApp.__new__(main.ClipboardApp)
+    app.plugin_manager = FakePluginManager()
+
+    app._load_plugins_deferred()
+
+    assert app.plugin_manager.loaded is True
+
+
+def test_deferred_plugin_loader_reports_failure():
+    import main
+
+    class BrokenPluginManager:
+        def load_plugins(self):
+            raise RuntimeError("boom")
+
+    app = main.ClipboardApp.__new__(main.ClipboardApp)
+    app.plugin_manager = BrokenPluginManager()
+    warnings = []
+    app._on_runtime_health_warning = lambda component, message: warnings.append(
+        (component, message)
+    )
+
+    app._load_plugins_deferred()
+
+    assert warnings == [("plugin_manager", "插件加载失败，基础剪贴板功能仍可使用。")]
+
+
+def test_deferred_cloud_sync_start_reports_failure(monkeypatch):
+    import main
+
+    class BrokenCloudSync:
+        def start(self):
+            raise RuntimeError("cloud boom")
+
+    app = main.ClipboardApp.__new__(main.ClipboardApp)
+    app.cloud_sync_service = BrokenCloudSync()
+    warnings = []
+    app._on_runtime_health_warning = lambda component, message: warnings.append(
+        (component, message)
+    )
+
+    app._start_cloud_sync_deferred()
+
+    assert warnings == [("cloud_sync", "云端同步启动失败，已降级到本地剪贴板历史。")]
+
+
+def test_deferred_file_sync_start_reports_failure():
+    import main
+
+    class BrokenFileSync:
+        def start(self):
+            raise RuntimeError("file boom")
+
+    app = main.ClipboardApp.__new__(main.ClipboardApp)
+    app.file_sync_service = BrokenFileSync()
+    warnings = []
+    app._on_runtime_health_warning = lambda component, message: warnings.append(
+        (component, message)
+    )
+
+    app._start_file_sync_deferred()
+
+    assert warnings == [("file_sync", "文件云同步启动失败，剪贴板文本和图片历史仍可继续使用。")]
+
+
+def test_deferred_sync_start_registers_atexit_once(monkeypatch):
+    import main
+
+    class FakeSync:
+        def __init__(self):
+            self.started = 0
+
+        def start(self):
+            self.started += 1
+
+    registered = []
+    monkeypatch.setattr(main.atexit, "register", lambda callback: registered.append(callback))
+
+    app = main.ClipboardApp.__new__(main.ClipboardApp)
+    app.cloud_sync_service = FakeSync()
+    app.file_sync_service = FakeSync()
+
+    app._start_cloud_sync_deferred()
+    app._start_cloud_sync_deferred()
+    app._start_file_sync_deferred()
+    app._start_file_sync_deferred()
+
+    assert app.cloud_sync_service.started == 2
+    assert app.file_sync_service.started == 2
+    assert registered == [app._atexit_persist_cloud_cursor, app._atexit_persist_file_cursor]
+
+
+def test_deferred_file_sync_builds_services_on_demand(monkeypatch):
+    import main
+    import core.entitlement_service as ent_mod
+    import core.file_sync_service as file_sync_mod
+
+    class FakeEntitlement:
+        def __init__(self):
+            self.refreshed = 0
+            self.cloud_api = None
+
+        def refresh_async(self):
+            self.refreshed += 1
+
+        def set_cloud_api(self, cloud_api):
+            self.cloud_api = cloud_api
+
+    class FakeFileSync:
+        def __init__(self, file_repo, cloud_api, entitlement, repository):
+            self.file_repo = file_repo
+            self.cloud_api = cloud_api
+            self.entitlement = entitlement
+            self.repository = repository
+            self.started = 0
+
+        def start(self):
+            self.started += 1
+
+    entitlement = FakeEntitlement()
+    monkeypatch.setattr(
+        ent_mod,
+        "get_entitlement_service",
+        lambda cloud_api=None, repository=None: entitlement,
+    )
+    monkeypatch.setattr(file_sync_mod, "FileCloudSyncService", FakeFileSync)
+    registered = []
+    monkeypatch.setattr(main.atexit, "register", lambda callback: registered.append(callback))
+
+    app = main.ClipboardApp.__new__(main.ClipboardApp)
+    app.cloud_api = object()
+    app.repository = object()
+    app.file_repository = object()
+    app.file_sync_service = None
+    app.entitlement_service = None
+    app.ctx = type("Ctx", (), {})()
+    app.main_window = type("Window", (), {})()
+
+    app._start_file_sync_deferred()
+
+    assert isinstance(app.file_sync_service, FakeFileSync)
+    assert app.file_sync_service.started == 1
+    assert entitlement.refreshed == 1
+    assert app.ctx.file_sync_service is app.file_sync_service
+    assert app.main_window.file_sync_service is app.file_sync_service
+    assert registered == [app._atexit_persist_file_cursor]
 
 
 def test_main_window_construct(qapp, tmp_config_env):

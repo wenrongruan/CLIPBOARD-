@@ -5,8 +5,10 @@ import time
 import logging
 import platform
 import threading
+from contextlib import nullcontext
 
 _STARTUP_T0 = time.time()
+_STARTUP_PERF_T0 = time.perf_counter()
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,6 +33,7 @@ from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
 from core.sync_service import SyncService
 from core.plugin_manager import PluginManager
+from core.startup_metrics import StartupMetrics
 from ui.main_window import MainWindow
 
 # 全局热键支持
@@ -42,6 +45,7 @@ except ImportError:
 
 # 日志配置：默认 WARNING，设置 SC_DEBUG=1 可切到 DEBUG 并同时落盘到 logs/debug.log
 _SC_DEBUG = os.environ.get("SC_DEBUG", "").strip() not in ("", "0", "false", "False")
+_SC_STARTUP_METRICS = os.environ.get("SC_STARTUP_METRICS", "").strip() not in ("", "0", "false", "False")
 _log_level = logging.DEBUG if _SC_DEBUG else logging.WARNING
 _log_handlers = [logging.StreamHandler()]
 if _SC_DEBUG:
@@ -148,7 +152,9 @@ def create_fallback_icon() -> QIcon:
 
 class ClipboardApp:
     def __init__(self):
-        self.app = QApplication(sys.argv)
+        self.startup_metrics = StartupMetrics(started_at=_STARTUP_PERF_T0)
+        with self.startup_metrics.phase("qt_app_init"):
+            self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)  # 托盘模式
         # Why: update_settings 延迟 2s 合并落盘，Qt 正常退出路径（Cmd+Q、
         # SIGTERM 下的 aboutToQuit）若不兜底会丢失未 flush 的改动。
@@ -168,24 +174,26 @@ class ClipboardApp:
             self.app.setQuitOnLastWindowClosed(False)
 
         # 初始化组件
-        self._init_components()
+        with self.startup_metrics.phase("init_components"):
+            self._init_components()
 
         # 创建系统托盘
-        self._create_tray_icon()
+        with self.startup_metrics.phase("create_tray_icon"):
+            self._create_tray_icon()
 
         # 创建主窗口
-        self._create_main_window()
+        with self.startup_metrics.phase("create_main_window"):
+            self._create_main_window()
 
         # 初始化全局热键
-        self._init_hotkey()
+        with self.startup_metrics.phase("init_hotkey"):
+            self._init_hotkey()
 
-        # Why: 若 keyring 不可用导致凭据只能以 base64/DPAPI 回退形式保存，
-        # 安全等级低于系统钥匙串。主窗口构造过程中已触发过 token 读取，
-        # 此时 _active_backend 已确定，弹一次托盘气泡提醒用户。
-        self._maybe_warn_degraded_store()
-
-        # 若 MySQL 连接失败已降级到 SQLite，提示用户同步未生效。
-        self._maybe_warn_mysql_fallback()
+        with self.startup_metrics.phase("startup_health_flush"):
+            self._collect_degraded_store_health()
+            self._collect_mysql_fallback_health()
+            self._flush_startup_health_notifications()
+        self.startup_metrics.mark("event_loop_ready")
 
     def _init_components(self):
         """初始化核心组件（Phase 1: 全部走 AppContext）"""
@@ -243,22 +251,14 @@ class ClipboardApp:
         if ctx.cloud_sync_service is not None:
             self.clipboard_monitor.item_added.connect(self._on_new_item_for_cloud)
         elif ctx._cloud_sync_error and get_cloud_access_token():
-            try:
-                if hasattr(self, "tray_icon") and self.tray_icon is not None:
-                    self.tray_icon.showMessage(
-                        t("app_name"),
-                        "云端同步启动失败，已降级到本地存储。请检查网络或查看日志。",
-                        QSystemTrayIcon.MessageIcon.Warning,
-                        8000,
-                    )
-            except Exception as notify_err:
-                logger.warning(f"托盘通知发送失败: {notify_err}")
+            self._record_health_issue(
+                "cloud_sync",
+                "warning",
+                "云端同步启动失败，已降级到本地存储。请检查网络或查看日志。",
+            )
 
         # 插件加载（AppContext 只构造 PluginManager，加载交给 main 在 UI 时刻执行）
-        _t = time.time()
         self.plugin_manager = ctx.plugin_manager
-        self.plugin_manager.load_plugins()
-        logger.debug(f"[startup] PluginManager.load_plugins 用时 {time.time()-_t:.3f}s")
 
         # v3.4 服务
         self.space_service = ctx.space_service
@@ -273,8 +273,15 @@ class ClipboardApp:
         self.main_window.quit_requested.connect(self._quit)
 
         # 启动服务
+        self.clipboard_monitor.monitor_unhealthy.connect(
+            lambda msg: self._on_runtime_health_warning("clipboard_monitor", msg)
+        )
+        self.clipboard_monitor.monitor_stopped.connect(
+            lambda msg: self._on_runtime_health_warning("clipboard_monitor", msg)
+        )
         self.clipboard_monitor.start()
         self.sync_service.start()
+        QTimer.singleShot(1500, self._load_plugins_deferred)
         if self.cloud_sync_service:
             # 云端拉取的新条目也通知 UI 刷新
             self.cloud_sync_service.new_items_available.connect(
@@ -287,19 +294,105 @@ class ClipboardApp:
             # Why: 主窗口刚 show 时，UI 渲染、插件加载、剪贴板监听写库会抢主线程
             # 和 SQLite 锁；首次 pull/push 及其主线程 DB 扫描会让快速操作卡顿。
             # 延后 20 秒再启动云端同步，给 UI 留出稳定窗口。
-            QTimer.singleShot(20000, self.cloud_sync_service.start)
-            # Why: 正常 _quit 流程会调 stop() 落盘；atexit 是针对 SIGTERM/
-            # 未捕获异常等非正常退出的兜底，确保游标不丢失。
-            atexit.register(self._atexit_persist_cloud_cursor)
+            QTimer.singleShot(20000, self._start_cloud_sync_deferred)
+        if self.cloud_api and settings().files_sync_enabled:
+            QTimer.singleShot(20000, self._start_file_sync_deferred)
 
-        if self.file_sync_service:
-            def _start_file_sync():
-                try:
-                    self.file_sync_service.start()
-                    atexit.register(self._atexit_persist_file_cursor)
-                except Exception as e:
-                    logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
-            QTimer.singleShot(20000, _start_file_sync)
+    def _load_plugins_deferred(self):
+        """Load optional plugins after the core clipboard services are running."""
+        if not getattr(self, "plugin_manager", None):
+            return
+        try:
+            _t = time.time()
+            with self._startup_phase("plugin_load_deferred"):
+                self.plugin_manager.load_plugins()
+            logger.debug(
+                f"[startup] PluginManager.load_plugins deferred 用时 {time.time()-_t:.3f}s"
+            )
+        except Exception as e:
+            logger.warning(f"插件加载失败: {e}", exc_info=True)
+            self._on_runtime_health_warning(
+                "plugin_manager",
+                "插件加载失败，基础剪贴板功能仍可使用。",
+            )
+
+    def _startup_phase(self, name: str):
+        metrics = getattr(self, "startup_metrics", None)
+        return metrics.phase(name) if metrics is not None else nullcontext()
+
+    def _start_cloud_sync_deferred(self):
+        """Start optional cloud sync after the local clipboard path is ready."""
+        if not getattr(self, "cloud_sync_service", None):
+            return
+        try:
+            with self._startup_phase("cloud_sync_start_deferred"):
+                self.cloud_sync_service.start()
+            if not getattr(self, "_cloud_cursor_atexit_registered", False):
+                atexit.register(self._atexit_persist_cloud_cursor)
+                self._cloud_cursor_atexit_registered = True
+        except Exception as e:
+            logger.warning(f"云端同步启动失败: {e}", exc_info=True)
+            self._on_runtime_health_warning(
+                "cloud_sync",
+                "云端同步启动失败，已降级到本地剪贴板历史。",
+            )
+
+    def _start_file_sync_deferred(self):
+        """Start optional file sync after the local clipboard path is ready."""
+        try:
+            with self._startup_phase("file_sync_start_deferred"):
+                if not getattr(self, "file_sync_service", None):
+                    self._ensure_file_sync_services()
+                if not getattr(self, "file_sync_service", None):
+                    return
+                self.file_sync_service.start()
+            if not getattr(self, "_file_cursor_atexit_registered", False):
+                atexit.register(self._atexit_persist_file_cursor)
+                self._file_cursor_atexit_registered = True
+        except Exception as e:
+            logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
+            self._on_runtime_health_warning(
+                "file_sync",
+                "文件云同步启动失败，剪贴板文本和图片历史仍可继续使用。",
+            )
+
+    def _ensure_file_sync_services(self):
+        """Build optional file-sync services on demand."""
+        if not getattr(self, "cloud_api", None):
+            return
+        if getattr(self, "entitlement_service", None) is None:
+            from core.entitlement_service import get_entitlement_service
+            self.entitlement_service = get_entitlement_service(
+                cloud_api=self.cloud_api,
+                repository=self.repository,
+            )
+            self.entitlement_service.refresh_async()
+        else:
+            self.entitlement_service.set_cloud_api(self.cloud_api)
+
+        if getattr(self, "file_repository", None) is None:
+            from core.file_repository import CloudFileRepository
+            self.file_repository = CloudFileRepository(self.db_manager)
+
+        from core.file_sync_service import FileCloudSyncService
+        self.file_sync_service = FileCloudSyncService(
+            self.file_repository,
+            self.cloud_api,
+            self.entitlement_service,
+            self.repository,
+        )
+
+        if getattr(self, "ctx", None) is not None:
+            self.ctx.entitlement_service = self.entitlement_service
+            self.ctx.file_repository = self.file_repository
+            self.ctx.file_sync_service = self.file_sync_service
+        if getattr(self, "main_window", None) is not None:
+            self.main_window.entitlement_service = self.entitlement_service
+            self.main_window.file_repository = self.file_repository
+            self.main_window.file_sync_service = self.file_sync_service
+            controller = getattr(self.main_window, "cloud_controller", None)
+            if controller is not None and getattr(self.main_window, "file_list_widget", None) is None:
+                controller.bootstrap_files_stack_after_login()
 
     def _shutdown_context(self):
         """aboutToQuit 兜底：让 AppContext 清理基础资源。
@@ -337,41 +430,73 @@ class ClipboardApp:
             except Exception:
                 pass
 
-    def _maybe_warn_mysql_fallback(self):
-        """若 MySQL 初始化失败已降级到本地 SQLite，通过托盘气泡提醒一次用户。"""
+    def _record_health_issue(self, component: str, level: str, message: str) -> None:
+        try:
+            from core import health_reporter
+            health_reporter.add_issue(component, level, message)
+        except Exception:
+            logger.debug("记录健康状态失败", exc_info=True)
+
+    def _flush_startup_health_notifications(self):
+        """启动结束后把所有降级状态合并成一条托盘提示。"""
+        try:
+            from core import health_reporter
+            message = health_reporter.format_summary(limit=3)
+            if not message:
+                return
+            if not hasattr(self, "tray_icon") or self.tray_icon is None:
+                return
+            self.tray_icon.showMessage(
+                t("app_name"),
+                message,
+                QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
+        except Exception:
+            logger.debug("健康状态聚合提示发送失败", exc_info=True)
+
+    def _on_runtime_health_warning(self, component: str, message: str):
+        self._record_health_issue(component, "warning", message)
+        try:
+            if hasattr(self, "tray_icon") and self.tray_icon is not None:
+                self.tray_icon.showMessage(
+                    t("app_name"),
+                    message,
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    8000,
+                )
+        except Exception:
+            logger.debug("运行时健康状态提示发送失败", exc_info=True)
+
+    def _collect_mysql_fallback_health(self):
+        """若 MySQL 初始化失败已降级到本地 SQLite，登记健康状态。"""
         try:
             from core.db_factory import get_mysql_fallback_reason
             reason = get_mysql_fallback_reason()
             if not reason:
                 return
-            if not hasattr(self, "tray_icon") or self.tray_icon is None:
-                return
-            self.tray_icon.showMessage(
-                t("app_name"),
+            self._record_health_issue(
+                "mysql",
+                "warning",
                 f"MySQL 连接失败，已降级到本地数据库（同步暂不生效）。请检查设置中的 MySQL 配置。\n原因：{reason}",
-                QSystemTrayIcon.MessageIcon.Warning,
-                10000,
             )
         except Exception:
-            logger.debug("MySQL 降级提示发送失败", exc_info=True)
+            logger.debug("MySQL 降级状态登记失败", exc_info=True)
 
-    def _maybe_warn_degraded_store(self):
-        """若凭据存储降级到非 keyring 后端，通过托盘气泡提醒一次用户。"""
+    def _collect_degraded_store_health(self):
+        """若凭据存储降级到非 keyring 后端，登记健康状态。"""
         try:
             from utils import secure_store
             if not secure_store.is_degraded():
                 return
             backend = secure_store.get_active_backend()
-            if not hasattr(self, "tray_icon") or self.tray_icon is None:
-                return
-            self.tray_icon.showMessage(
-                t("app_name"),
+            self._record_health_issue(
+                "secure_store",
+                "warning",
                 f"当前密钥未加密存储（{backend}），建议安装 keyring 库以提升凭据安全性：pip install keyring",
-                QSystemTrayIcon.MessageIcon.Warning,
-                8000,
             )
         except Exception:
-            logger.debug("降级警告发送失败", exc_info=True)
+            logger.debug("凭据存储降级状态登记失败", exc_info=True)
 
     def _on_new_item_for_cloud(self, item):
         """剪贴板新条目回调 — 加入云端上传队列"""
@@ -406,6 +531,11 @@ class ClipboardApp:
 
         if not HOTKEY_AVAILABLE:
             logger.warning("pynput 未安装，全局热键功能不可用")
+            self._record_health_issue(
+                "hotkey",
+                "warning",
+                "全局热键不可用：pynput 未安装。仍可通过托盘图标打开窗口。",
+            )
             return
 
         hotkey = get_effective_hotkey()
@@ -417,6 +547,11 @@ class ClipboardApp:
         # dispatch_assert_queue 断言失败 SIGTRAP 闪退。所以先检查权限,无权限直接跳过。
         if IS_MACOS and not self._has_accessibility_permission():
             logger.warning("未授予辅助功能/输入监控权限,跳过全局热键监听以避免闪退")
+            self._record_health_issue(
+                "hotkey",
+                "warning",
+                "全局热键不可用：缺少输入监控权限。仍可通过菜单栏图标打开窗口。",
+            )
             self._prompt_input_monitoring_permission()
             return
 
@@ -432,6 +567,11 @@ class ClipboardApp:
                 QTimer.singleShot(3000, self._check_hotkey_listener_alive)
         except Exception as e:
             logger.error(f"注册全局热键失败: {e}")
+            self._record_health_issue(
+                "hotkey",
+                "warning",
+                f"全局热键注册失败：{e}",
+            )
             if IS_MACOS:
                 self._prompt_input_monitoring_permission()
 
@@ -457,6 +597,10 @@ class ClipboardApp:
             running = bool(is_alive()) if callable(is_alive) else True
         if not running:
             logger.warning("pynput 热键监听未运行，疑似缺少输入监控权限")
+            self._on_runtime_health_warning(
+                "hotkey",
+                "全局热键监听未运行，疑似缺少输入监控权限。仍可通过托盘图标打开窗口。",
+            )
             self._prompt_input_monitoring_permission()
 
     def _prompt_input_monitoring_permission(self):
@@ -533,6 +677,8 @@ class ClipboardApp:
     def run(self) -> int:
         """运行应用"""
         logger.debug(f"[startup] 进入 app.exec() 事件循环 t=+{time.time()-_STARTUP_T0:.2f}s")
+        if _SC_DEBUG or _SC_STARTUP_METRICS:
+            logger.warning(f"[startup-metrics] {self.startup_metrics.format_summary()}")
         return self.app.exec()
 
 
