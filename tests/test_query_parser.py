@@ -340,12 +340,12 @@ def test_fts_expression_empty():
 
 def test_fts_expression_single_keyword():
     spec = parse("python")
-    assert spec.fts_match_expression() == "python"
+    assert spec.fts_match_expression() == "python*"
 
 
 def test_fts_expression_multiple_keywords_space_joined():
     spec = parse("python code")
-    assert spec.fts_match_expression() == "python code"
+    assert spec.fts_match_expression() == "python* code*"
 
 
 def test_fts_expression_phrase_wrapped_in_quotes():
@@ -356,7 +356,7 @@ def test_fts_expression_phrase_wrapped_in_quotes():
 def test_fts_expression_phrase_plus_keyword():
     spec = parse('"hello world" python')
     # phrases 先于 keywords
-    assert spec.fts_match_expression() == '"hello world" python'
+    assert spec.fts_match_expression() == '"hello world" python*'
 
 
 def test_fts_expression_escapes_inner_quote():
@@ -378,4 +378,4 @@ def test_fts_expression_quotes_keyword_with_special_chars():
 def test_fts_expression_filters_do_not_leak_into_match():
     """filters 不应进入 FTS 表达式，只有 keywords/phrases 会。"""
     spec = parse("tag:work python")
-    assert spec.fts_match_expression() == "python"
+    assert spec.fts_match_expression() == "python*"

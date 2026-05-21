@@ -117,6 +117,59 @@ def _patch_settings(monkeypatch, capture_source_title: bool):
 
 
 class TestHandleTextSourceApp:
+    def test_main_path_saves_text_emits_signal_and_touches_duplicate(
+        self, qapp, tmp_config_env, monkeypatch
+    ):
+        """主路径：复制文本 -> 入库 -> 发信号；重复复制只置顶不新增。"""
+        from config import AppSettings
+        from core.clipboard_monitor import ClipboardMonitor
+        from core.database import DatabaseManager
+        from core.repository import ClipboardRepository
+        import core.clipboard_monitor as cm
+
+        db = DatabaseManager(str(tmp_config_env / "main_path.db"))
+        repo = ClipboardRepository(db)
+        monitor = ClipboardMonitor(repo)
+        monitor.clipboard = MagicMock()
+        monkeypatch.setattr(cm, "get_current_source_app", lambda: _make_source_app())
+        snap = AppSettings(
+            device_id="test-device",
+            device_name="Tester",
+            save_text=True,
+            max_items=100,
+            retention_days=0,
+            capture_source_title=False,
+        )
+
+        captured = []
+        monitor.item_added.connect(lambda item: captured.append(item))
+
+        try:
+            monitor.clipboard.text.return_value = "main path text"
+            monitor._handle_text(snap)
+
+            items, total = repo.get_items(page=0, page_size=10)
+            assert total == 1
+            assert len(captured) == 1
+            assert captured[0].id == items[0].id
+            assert captured[0].text_content == "main path text"
+            first_created_at = items[0].created_at
+
+            # 模拟用户后来再次复制相同内容。_last_text 清空是为了绕开“同一 tick”
+            # 去重，覆盖仓储层已有 hash 的置顶路径。
+            monitor._last_text = None
+            monitor.clipboard.text.return_value = "main path text"
+            monitor._handle_text(snap)
+
+            items_after, total_after = repo.get_items(page=0, page_size=10)
+            assert total_after == 1
+            assert len(captured) == 2
+            assert captured[1].id == items[0].id
+            assert items_after[0].created_at >= first_created_at
+        finally:
+            monitor.stop()
+            db.close()
+
     def test_source_app_from_bundle_id(self, monitor, monkeypatch):
         """默认配置下：source_app 取 bundle_id，source_title 为空。"""
         s = _patch_settings(monkeypatch, capture_source_title=False)
