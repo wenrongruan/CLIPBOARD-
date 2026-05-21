@@ -330,11 +330,13 @@ def get_cloud_client(create_if_missing: bool = True) -> Optional[CloudAPIClient]
     （测试 / 早期启动）时退回旧的单例逻辑。
     """
     # 走 AppContext 而非裸单例，避免 main 与 AppContext 各持一份不同步的 client
+    ctx_for_writeback = None
     try:
         from core.app_context import AppContext
         ctx = AppContext.current()
         if ctx.cloud_api is not None:
             return ctx.cloud_api
+        ctx_for_writeback = ctx
     except RuntimeError:
         pass
     except Exception:
@@ -346,18 +348,65 @@ def get_cloud_client(create_if_missing: bool = True) -> Optional[CloudAPIClient]
         return _cloud_client_singleton
     if not create_if_missing:
         return None
-    access = get_cloud_access_token()
-    # 始终创建实例（即使未登录也需要提供登录表单用）
     client = CloudAPIClient(settings().cloud_api_url)
+    access = get_cloud_access_token()
     if access:
         client.set_tokens(access, get_cloud_refresh_token())
     _cloud_client_singleton = client
+    if ctx_for_writeback is not None:
+        ctx_for_writeback.cloud_api = client
     return client
 
 
 def reset_cloud_client():
     """关闭并清除单例（仅测试或完全退出时使用）"""
     global _cloud_client_singleton
+    clients = []
     if _cloud_client_singleton is not None:
-        _cloud_client_singleton.close()
-        _cloud_client_singleton = None
+        clients.append(_cloud_client_singleton)
+    _cloud_client_singleton = None
+    try:
+        from core.app_context import AppContext
+        ctx = AppContext.current()
+        if getattr(ctx, "cloud_api", None) is not None:
+            if ctx.cloud_api not in clients:
+                clients.append(ctx.cloud_api)
+            ctx.cloud_api = None
+    except Exception:
+        pass
+    for client in clients:
+        try:
+            client.close()
+        except Exception:
+            logger.debug("关闭 CloudAPIClient 失败", exc_info=True)
+
+
+def rebuild_cloud_client_for_url(new_url: str) -> CloudAPIClient:
+    """切换服务器地址后重建客户端。
+
+    Why: HttpClient 的 base_url 在构造时固定，更换 cloud_api_url 后必须
+    丢掉旧 client，否则后续请求仍会打到旧域名。同时清掉 AppContext 的引用，
+    让 get_cloud_client() 走重新构造分支。
+    """
+    global _cloud_client_singleton
+    reset_cloud_client()
+    try:
+        from core.app_context import AppContext
+        ctx = AppContext.current()
+        if getattr(ctx, "cloud_api", None) is not None:
+            try:
+                ctx.cloud_api.close()
+            except Exception:
+                pass
+            ctx.cloud_api = None
+    except Exception:
+        pass
+    client = CloudAPIClient(new_url)
+    _cloud_client_singleton = client
+    try:
+        from core.app_context import AppContext
+        ctx = AppContext.current()
+        ctx.cloud_api = client
+    except Exception:
+        pass
+    return client

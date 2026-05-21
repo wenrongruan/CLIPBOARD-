@@ -6,7 +6,7 @@ bootstrap() 在 main 线程一次性装配所有 service；构造完即视为 im
 设计说明：
 - 与 main.py 中现有的初始化逻辑等价：未登录用户不会持有 CloudSyncService / FileCloudSyncService /
   EntitlementService 实例（这些字段保持 None），避免无网络/无 token 场景下的多余开销。
-- cloud_api 始终构造（即使未登录也作为登录表单 client 持有），与现有 get_cloud_client() 行为一致。
+- cloud_api 按需构造：未登录启动不创建 HTTP client；打开云端登录页或已登录启动时再创建。
 - 不在 bootstrap 阶段调用 plugin_manager.load_plugins() / clipboard_monitor.start() / sync_service.start()，
   这些 lifecycle 由 main.py 在 UI 准备好后触发。
 """
@@ -54,12 +54,11 @@ class AppContext:
 
     @classmethod
     def _do_bootstrap(cls) -> "AppContext":
-        from config import get_cloud_access_token, settings
+        from config import get_cloud_access_token
         from core.db_factory import create_database_manager
         from core.repository import ClipboardRepository
         from core.clipboard_monitor import ClipboardMonitor
         from core.sync_service import SyncService
-        from core.cloud_api import get_cloud_client
         from core.plugin_manager import PluginManager
         from core.space_service import SpaceService
         from core.tag_service import TagService
@@ -73,39 +72,23 @@ class AppContext:
         ctx.clipboard_monitor = ClipboardMonitor(ctx.repository)
         ctx.sync_service = SyncService(ctx.repository)
 
-        # ---------- 云端 API client（始终构造，未登录时仍可作为登录表单 client） ----------
-        ctx.cloud_api = get_cloud_client()
-
         # ---------- 云端业务服务（仅登录后装配；保持与 main.py 历史行为一致） ----------
         if get_cloud_access_token():
             try:
+                from core.cloud_api import get_cloud_client
                 from core.cloud_sync_service import CloudSyncService
 
+                ctx.cloud_api = get_cloud_client()
                 ctx.cloud_sync_service = CloudSyncService(ctx.repository, ctx.cloud_api)
 
                 # 付费闸 + 文件云同步
                 try:
-                    from core.entitlement_service import get_entitlement_service
                     from core.file_repository import CloudFileRepository
-                    from core.file_sync_service import FileCloudSyncService
-
-                    ctx.entitlement_service = get_entitlement_service(
-                        cloud_api=ctx.cloud_api, repository=ctx.repository,
-                    )
-                    ctx.entitlement_service.refresh_async()
 
                     ctx.file_repository = CloudFileRepository(ctx.db)
-                    if settings().files_sync_enabled:
-                        ctx.file_sync_service = FileCloudSyncService(
-                            ctx.file_repository,
-                            ctx.cloud_api,
-                            ctx.entitlement_service,
-                            ctx.repository,
-                        )
                 except Exception as ent_err:
                     logger.warning(f"文件云同步初始化失败: {ent_err}", exc_info=True)
                     ctx.file_repository = None
-                    ctx.file_sync_service = None
 
                 logger.info("云端同步已启用（叠加模式）")
             except Exception as e:

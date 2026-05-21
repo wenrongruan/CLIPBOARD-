@@ -93,8 +93,8 @@ ANIMATION_DURATION = 250 if IS_MACOS else 200
 PAGE_SIZE = 10  # 每页显示条数
 THUMBNAIL_SIZE = (100, 100)
 
-# 云端 API 域名白名单
-_ALLOWED_API_DOMAINS = {"www.jlike.com", "localhost", "127.0.0.1"}
+# 本地回环域名（这些允许 HTTP；其它域名必须 HTTPS）
+_LOCAL_API_HOSTS = {"localhost", "127.0.0.1", "::1"}
 # 数据库名白名单:仅字母、数字、下划线
 _DB_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 
@@ -649,14 +649,20 @@ def set_mysql_password(password: str) -> None:
 # ============ 校验 ============
 
 def validate_cloud_api_url(url: str) -> None:
-    """校验云端 API URL 的安全性(HTTPS + 域名白名单)。"""
+    """校验云端 API URL：必须是合法 URL，本地回环外强制 HTTPS。
+
+    Why: 允许用户自配私有部署的服务器（自托管 / 测试镜像），所以不再限制域名白名单，
+    但仍要求 HTTPS（本地回环除外）以避免中间人窃取 token。
+    """
     from urllib.parse import urlparse
     parsed = urlparse(url)
-    hostname = parsed.hostname or ""
-    if parsed.scheme != "https" and hostname not in ("localhost", "127.0.0.1"):
-        raise ValueError(f"云端 API 必须使用 HTTPS 协议: {url}")
-    if hostname not in _ALLOWED_API_DOMAINS:
-        raise ValueError(f"不允许的 API 域名: {hostname}")
+    hostname = (parsed.hostname or "").lower()
+    if not parsed.scheme or not hostname:
+        raise ValueError(f"无效的 URL（缺少协议或主机）: {url}")
+    if parsed.scheme not in ("https", "http"):
+        raise ValueError(f"云端 API URL 必须以 http(s):// 开头: {url}")
+    if parsed.scheme == "http" and hostname not in _LOCAL_API_HOSTS:
+        raise ValueError(f"非本地地址必须使用 HTTPS: {url}")
 
 
 def validate_mysql_database_name(name: str) -> bool:
@@ -665,9 +671,20 @@ def validate_mysql_database_name(name: str) -> bool:
 
 # ============ 带校验/凭据的复合 setters ============
 
+def normalize_cloud_api_url(url: str) -> str:
+    """把用户输入的服务器地址规范化：去空白/尾斜杠；裸主机名补 https://。"""
+    s = (url or "").strip().rstrip("/")
+    if not s:
+        return s
+    if "://" not in s:
+        s = "https://" + s
+    return s
+
+
 def set_cloud_api_url(url: str) -> None:
-    validate_cloud_api_url(url)
-    update_settings(cloud_api_url=url)
+    normalized = normalize_cloud_api_url(url)
+    validate_cloud_api_url(normalized)
+    update_settings(cloud_api_url=normalized)
 
 
 def set_sync_mode(mode: str) -> None:

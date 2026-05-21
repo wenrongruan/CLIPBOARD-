@@ -67,8 +67,8 @@ def test_bootstrap_returns_context_with_all_services():
         assert ctx.repository is not None
         assert ctx.clipboard_monitor is not None
         assert ctx.sync_service is not None
-        # cloud_api 始终构造（即使未登录，也作为表单 client 持有）
-        assert ctx.cloud_api is not None
+        # 未登录时不构造 cloud_api；打开云端登录页时再懒加载。
+        assert ctx.cloud_api is None
         # 未登录时云端业务服务保持 None；登录态下才装配
         # 这里只断言字段存在
         assert hasattr(ctx, "cloud_sync_service")
@@ -117,6 +117,56 @@ def test_bootstrap_is_idempotent():
         assert ctx1 is ctx2
     finally:
         ctx1.shutdown()
+
+
+def test_cloud_api_is_created_lazily_and_written_back():
+    from core.app_context import AppContext
+    from core.cloud_api import get_cloud_client
+
+    ctx = AppContext.bootstrap()
+    try:
+        assert ctx.cloud_api is None
+        client = get_cloud_client()
+        assert client is not None
+        assert ctx.cloud_api is client
+    finally:
+        ctx.shutdown()
+
+
+def test_reset_cloud_client_clears_context_reference():
+    from core.app_context import AppContext
+    from core.cloud_api import get_cloud_client, reset_cloud_client
+
+    ctx = AppContext.bootstrap()
+    try:
+        client = get_cloud_client()
+        assert ctx.cloud_api is client
+        reset_cloud_client()
+        assert ctx.cloud_api is None
+    finally:
+        ctx.shutdown()
+
+
+def test_logged_in_bootstrap_defers_file_sync_worker(monkeypatch):
+    import config
+    import core.cloud_api as cloud_api_mod
+    from core.app_context import AppContext
+
+    class FakeCloudClient:
+        is_authenticated = True
+
+    monkeypatch.setattr(config, "get_cloud_access_token", lambda: "token")
+    monkeypatch.setattr(cloud_api_mod, "get_cloud_client", lambda: FakeCloudClient())
+
+    ctx = AppContext.bootstrap()
+    try:
+        assert ctx.cloud_api is not None
+        assert ctx.cloud_sync_service is not None
+        assert ctx.file_repository is not None
+        assert ctx.entitlement_service is None
+        assert ctx.file_sync_service is None
+    finally:
+        ctx.shutdown()
 
 
 def test_shutdown_handles_partial_init():

@@ -15,7 +15,13 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 
-from core.cloud_api import CloudAPIClient, CloudAPIError
+from config import (
+    normalize_cloud_api_url,
+    set_cloud_api_url,
+    settings,
+)
+from core.cloud_api import CloudAPIClient, CloudAPIError, rebuild_cloud_client_for_url
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +64,16 @@ class CloudLoginWidget(QWidget):
         form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form_layout.setLabelAlignment(Qt.AlignLeft)
 
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("https://www.jlike.com")
+        self.url_edit.setText(settings().cloud_api_url or "https://www.jlike.com")
+        self.url_edit.setMinimumHeight(30)
+        self.url_edit.setToolTip(
+            "云端服务器地址。默认 https://www.jlike.com；\n"
+            "可改为自托管服务器或本地测试地址（http 仅限 localhost）。"
+        )
+        form_layout.addRow("服务器:", self.url_edit)
+
         self.email_edit = QLineEdit()
         self.email_edit.setPlaceholderText("your@email.com")
         self.email_edit.setMinimumHeight(30)
@@ -83,18 +99,26 @@ class CloudLoginWidget(QWidget):
         self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
         root.addWidget(self.status_label)
 
-        # 注册链接
+        # 注册链接 —— 跟随服务器地址，自托管用户也能跳到对应站点
         link_style = "color: #58a6ff; text-decoration: none;"
-        register_label = QLabel(
-            f'还没有账号？<a href="https://www.jlike.com/account.html" style="{link_style}">去注册</a>'
-            f'　|　<a href="https://www.jlike.com/privacy.html" style="{link_style}">隐私协议</a>'
-        )
-        register_label.setOpenExternalLinks(True)
-        register_label.setStyleSheet("color: #888888; font-size: 12px;")
-        root.addWidget(register_label)
+        self._link_style = link_style
+        self.register_label = QLabel()
+        self.register_label.setOpenExternalLinks(True)
+        self.register_label.setStyleSheet("color: #888888; font-size: 12px;")
+        self._refresh_register_links(self.url_edit.text())
+        self.url_edit.textChanged.connect(self._refresh_register_links)
+        root.addWidget(self.register_label)
 
         # 回车键触发登录
         self.password_edit.returnPressed.connect(self._do_login)
+
+    def _refresh_register_links(self, url: str):
+        normalized = normalize_cloud_api_url(url) or "https://www.jlike.com"
+        style = self._link_style
+        self.register_label.setText(
+            f'还没有账号？<a href="{normalized}/account.html" style="{style}">去注册</a>'
+            f'　|　<a href="{normalized}/privacy.html" style="{style}">隐私协议</a>'
+        )
 
     def _set_loading(self, loading: bool):
         self.login_btn.setEnabled(not loading)
@@ -111,6 +135,34 @@ class CloudLoginWidget(QWidget):
         if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email):
             self.status_label.setText("邮箱格式不正确")
             return
+
+        # 用户可能改了服务器地址：保存到 settings 并重建 client，让 login 走新域名
+        try:
+            new_url = normalize_cloud_api_url(self.url_edit.text())
+        except Exception:
+            new_url = ""
+        if not new_url:
+            self.status_label.setText("请填写服务器地址")
+            return
+        current_url = settings().cloud_api_url
+        if new_url != current_url:
+            try:
+                set_cloud_api_url(new_url)
+            except ValueError as e:
+                self.status_label.setText(f"服务器地址无效：{e}")
+                return
+            self.cloud_api = rebuild_cloud_client_for_url(new_url)
+        else:
+            # 即便 URL 没变，也确认当前 client 是用同一个 base_url 构造的；
+            # 不一致就重建（例如老版本残留的旧实例）
+            try:
+                base_url = getattr(self.cloud_api, "base_url", None)
+                if base_url is None and hasattr(self.cloud_api, "_http"):
+                    base_url = self.cloud_api._http.base_url
+                if base_url and urlparse(base_url).netloc != urlparse(new_url).netloc:
+                    self.cloud_api = rebuild_cloud_client_for_url(new_url)
+            except Exception:
+                pass
 
         self._set_loading(True)
         self.status_label.setText("")
