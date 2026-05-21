@@ -227,6 +227,7 @@ class MainWindow(EdgeHiddenWindow):
     def _connect_signals(self):
         # 剪贴板监控:新条目到 list_controller
         self.clipboard_monitor.item_added.connect(self.list_controller.on_item_added)
+        self.clipboard_monitor.item_added.connect(self._advance_onboarding_after_copy)
 
         # 同步服务:其它设备来的新条目
         self.sync_service.new_items_available.connect(self.list_controller.on_new_items)
@@ -244,6 +245,17 @@ class MainWindow(EdgeHiddenWindow):
             self.plugin_manager.action_progress.connect(self.plugin_controller.on_plugin_progress)
             self.plugin_manager.action_finished.connect(self.plugin_controller.on_plugin_finished)
             self.plugin_manager.action_error.connect(self.plugin_controller.on_plugin_error)
+
+    def _advance_onboarding_after_copy(self, _item: ClipboardItem) -> None:
+        """首启引导第 1 步跟随真实剪贴板记录自动推进。"""
+        dialog = self._onboarding_dialog
+        if dialog is None:
+            return
+        try:
+            dialog.advance_on_copy()
+            dialog.raise_()
+        except Exception:
+            logger.debug("推进首启引导复制步骤失败", exc_info=True)
 
     # ========== 向后兼容 shims:main.py 等外部调用点继续可用 ==========
 
