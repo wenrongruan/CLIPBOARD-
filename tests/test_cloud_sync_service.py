@@ -457,5 +457,177 @@ class TestCloudSyncServiceMetadataMerge(unittest.TestCase):
             db.close()
 
 
+class TestCloudSyncTagsRoundTrip(unittest.TestCase):
+    """v3.5: 标签云同步双向打通。
+
+    上行：do_push 应在 payload 中携带本地条目的 tag 名列表。
+    下行：do_pull 应把云端返回的 tags 写入本地 tag_definitions / clipboard_tags。
+    """
+
+    # Why: Windows + SQLite + DatabaseManager 内部 connection pool 在 close() 后
+    # 偶尔仍持有文件句柄，导致 TemporaryDirectory 清理时 PermissionError 让测试失败。
+    # 改用 mkdtemp + shutil.rmtree(ignore_errors=True) 把清理失败降级为静默。
+    def setUp(self):
+        import tempfile
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _make_db(self, fname: str):
+        return DatabaseManager(str(Path(self._tmpdir) / fname))
+
+    def test_push_payload_carries_tag_names(self):
+        from core.cloud_sync_service import _SyncWorker
+
+        db = self._make_db("push_tags.db")
+        try:
+            repo = ClipboardRepository(db)
+            item_id = repo.add_item(
+                TextClipboardItem(
+                    text_content="hello",
+                    content_hash="hash-push-1",
+                    preview="hello",
+                    device_id="local-dev",
+                    device_name="Local",
+                    created_at=1000,
+                )
+            )
+            repo.tag_service.apply_tag_names(item_id, "", ["工作", "紧急"])
+
+            cloud_api = MagicMock()
+            cloud_api.upload_items.return_value = [
+                {"id": 9100, "content_hash": "hash-push-1"}
+            ]
+
+            worker = _SyncWorker(cloud_api, repo)
+            worker.do_push(None, [repo.get_item_by_id(item_id)])
+
+            self.assertEqual(cloud_api.upload_items.call_count, 1)
+            sent_payload = cloud_api.upload_items.call_args.args[0]
+            self.assertEqual(len(sent_payload), 1)
+            sent_tags = sent_payload[0].get("tags")
+            self.assertIsNotNone(sent_tags, "payload 必须携带 tags 字段")
+            self.assertEqual(set(sent_tags), {"工作", "紧急"})
+        finally:
+            db.close()
+
+    def test_push_no_tags_omits_field(self):
+        """没有标签的条目不应在 payload 中带 tags（减小负载，向后兼容）。"""
+        from core.cloud_sync_service import _SyncWorker
+
+        db = self._make_db("push_no_tags.db")
+        try:
+            repo = ClipboardRepository(db)
+            item_id = repo.add_item(
+                TextClipboardItem(
+                    text_content="hello",
+                    content_hash="hash-empty",
+                    preview="hello",
+                    device_id="local-dev",
+                    device_name="Local",
+                    created_at=1000,
+                )
+            )
+
+            cloud_api = MagicMock()
+            cloud_api.upload_items.return_value = [
+                {"id": 9101, "content_hash": "hash-empty"}
+            ]
+
+            worker = _SyncWorker(cloud_api, repo)
+            worker.do_push(None, [repo.get_item_by_id(item_id)])
+
+            sent_payload = cloud_api.upload_items.call_args.args[0]
+            self.assertNotIn("tags", sent_payload[0])
+        finally:
+            db.close()
+
+    def test_pull_applies_remote_tags_to_new_item(self):
+        from core.cloud_sync_service import _SyncWorker
+
+        db = self._make_db("pull_tags.db")
+        try:
+            repo = ClipboardRepository(db)
+            cloud_api = MagicMock()
+            cloud_api.sync.return_value = {
+                "items": [
+                    {
+                        "id": 9200,
+                        "content_type": "text",
+                        "text_content": "remote-content",
+                        "content_hash": "hash-pull-1",
+                        "preview": "remote-content",
+                        "device_id": "remote-dev",
+                        "device_name": "Remote",
+                        "created_at": 2000,
+                        "is_starred": False,
+                        "tags": ["项目A", "重要"],
+                    }
+                ],
+                "has_more": False,
+            }
+
+            worker = _SyncWorker(cloud_api, repo)
+            worker.do_pull(None, 0)
+
+            local = repo.get_by_hash("hash-pull-1")
+            self.assertIsNotNone(local)
+            names = repo.tag_service.list_names_for_item(local.id)
+            self.assertEqual(set(names), {"项目A", "重要"})
+
+            tag_defs = repo.tag_service.list_tags("")
+            self.assertEqual({t.name for t in tag_defs}, {"项目A", "重要"})
+        finally:
+            db.close()
+
+    def test_pull_merges_tags_into_existing_item(self):
+        """已存在的本地条目，应把云端 tags 并入本地（不覆盖本地已有标签）。"""
+        from core.cloud_sync_service import _SyncWorker
+
+        db = self._make_db("pull_merge_tags.db")
+        try:
+            repo = ClipboardRepository(db)
+            item_id = repo.add_item(
+                TextClipboardItem(
+                    text_content="same",
+                    content_hash="hash-merge",
+                    preview="same",
+                    device_id="local-dev",
+                    device_name="Local",
+                    created_at=1000,
+                )
+            )
+            repo.tag_service.apply_tag_names(item_id, "", ["本地标签"])
+
+            cloud_api = MagicMock()
+            cloud_api.sync.return_value = {
+                "items": [
+                    {
+                        "id": 9201,
+                        "content_type": "text",
+                        "text_content": "same",
+                        "content_hash": "hash-merge",
+                        "preview": "same",
+                        "device_id": "remote-dev",
+                        "device_name": "Remote",
+                        "created_at": 1000,
+                        "is_starred": False,
+                        "tags": ["远端标签"],
+                    }
+                ],
+                "has_more": False,
+            }
+
+            worker = _SyncWorker(cloud_api, repo)
+            worker.do_pull(None, 0)
+
+            names = repo.tag_service.list_names_for_item(item_id)
+            self.assertEqual(set(names), {"本地标签", "远端标签"})
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

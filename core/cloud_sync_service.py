@@ -70,6 +70,8 @@ class _SyncWorker(QObject):
             items_data = data.get("items", [])
 
             # 第一遍：解析所有条目，收集 content_hash
+            # parsed_items 三元组：(server_id, item, tag_names) —— tag_names 由 do_pull
+            # 在 item 落库拿到本地 id 后调 apply_tag_names 写入，不在 _server_item_to_local 里做。
             parsed_items = []
             skipped_server_ids = []
             for item_data in items_data:
@@ -83,26 +85,30 @@ class _SyncWorker(QObject):
                     # 多次失败后登记到永久跳过集合，避免无限阻塞同步游标
                     self._register_skip(server_id)
                     continue
-                parsed_items.append((server_id, item))
+                raw_tags = item_data.get("tags") or []
+                tag_names = [str(t) for t in raw_tags if t]
+                parsed_items.append((server_id, item, tag_names))
 
             # 批量查询已存在的 hash（替代逐条 get_by_hash，减少 N 次查询为 1 次）
-            all_hashes = [item.content_hash for _, item in parsed_items]
+            all_hashes = [item.content_hash for _, item, _ in parsed_items]
             existing_map = self.repository.get_existing_hashes(all_hashes)
 
             new_items = []
             cloud_id_pairs = []
             max_server_id = last_sync_id
 
-            for server_id, item in parsed_items:
+            for server_id, item, tag_names in parsed_items:
                 # 记录来源 space：服务端会在 item 中回填 space_id（None=个人）。
                 # 以服务端值为准；fallback 到当前同步的 space_key 保持一致性。
                 existing = existing_map.get(item.content_hash)
+                local_item_id: Optional[int] = None
                 if existing is None:
                     item_id = self.repository.add_item(item)
                     item.id = item_id
                     new_items.append(item)
                     if server_id and item_id:
                         cloud_id_pairs.append((item_id, server_id))
+                    local_item_id = item_id
                 elif existing.id:
                     remote_starred = bool(item.is_starred)
                     needs_cloud_id = bool(server_id and existing.cloud_id != server_id)
@@ -112,6 +118,22 @@ class _SyncWorker(QObject):
                             existing.id,
                             cloud_id=server_id if needs_cloud_id else None,
                             is_starred=remote_starred if needs_star_merge else None,
+                        )
+                    local_item_id = existing.id
+
+                # v3.5：合并云端标签到本地（add-only 语义，删除不同步以避免误删）。
+                # apply_tag_names 内部 INSERT OR IGNORE，幂等。本地缺失的 tag_definitions
+                # 会在 (space_id, name) 上自动 create。
+                if tag_names and local_item_id:
+                    try:
+                        space_for_tag = item.space_id or ""
+                        self.repository.tag_service.apply_tag_names(
+                            local_item_id, space_for_tag, tag_names
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "为 item %s 写入云端标签 %s 失败: %s",
+                            local_item_id, tag_names, exc,
                         )
 
                 if server_id > max_server_id:
@@ -176,6 +198,16 @@ class _SyncWorker(QObject):
                 src_title = getattr(item, "source_title", "") or ""
                 if src_title:
                     item_dict["source_title"] = src_title
+                # v3.5：标签云同步。以 name 列表传输，服务端按 (space_id, name) upsert tag_definitions。
+                # 没有 item.id（未落库）的条目不带 tags；空列表不发，减小 payload。
+                if item.id:
+                    try:
+                        tag_names = self.repository.tag_service.list_names_for_item(item.id)
+                    except Exception as exc:
+                        logger.debug("读取 item %s 标签失败，跳过 tags 同步: %s", item.id, exc)
+                        tag_names = []
+                    if tag_names:
+                        item_dict["tags"] = tag_names
                 upload_items.append(item_dict)
                 if isinstance(item, ImageClipboardItem) and item.image_data:
                     image_items.append(item)

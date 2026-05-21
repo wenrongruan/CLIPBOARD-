@@ -148,6 +148,34 @@ class TagService:
         row = self._db.execute_read(op)
         return self._row_to_tag(row) if row else None
 
+    def list_names_for_item(self, item_id: int) -> List[str]:
+        """返回 item 已绑定的标签名列表（JOIN tag_definitions）。
+
+        用于云同步上行：标签以 name 列表传输，由对端 apply_tag_names 收敛。
+        clipboard_tags / tag_definitions 在 v3.4 之前不存在，迁移未执行时静默返回 []。
+        """
+        sql = (
+            "SELECT td.name FROM clipboard_tags ct "
+            "JOIN tag_definitions td ON ct.tag_id = td.id "
+            "WHERE ct.item_id = ?"
+        )
+
+        def op(conn):
+            try:
+                return self._db.fetch_all(conn, sql, (item_id,))
+            except Exception as exc:
+                logger.debug("读 clipboard_tags/tag_definitions 失败: %s", exc)
+                return []
+
+        rows = self._db.execute_read(op)
+        out: List[str] = []
+        for row in rows:
+            try:
+                out.append(str(row["name"]))
+            except (KeyError, IndexError, TypeError):
+                out.append(str(row[0]))
+        return out
+
     # ========== 打标签便利方法 ==========
 
     def apply_tag_names(

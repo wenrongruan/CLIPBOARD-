@@ -37,6 +37,9 @@ class ClipboardRepository:
         # 兼容字段：少量旧代码会读 repo._is_mysql / repo._has_fts
         self._is_mysql = self._dao._is_mysql
         self._has_fts = self._dao._has_fts
+        # lazy import 避免 tag_service 引入新依赖时产生循环
+        from .tag_service import TagService
+        self.tag_service = TagService(self)
 
     # ------------------------------------------------------------------
     # CRUD / 单条访问  -> DAO
