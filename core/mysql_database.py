@@ -25,7 +25,7 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
     placeholder = "%s"
     is_mysql = True
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -251,6 +251,69 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
                 )
                 conn.commit()
                 logger.info("MySQL Schema 已迁移到 v5（新增 space_id / source_app / source_title）")
+
+            if current_version < 6:
+                # v5 → v6: v3.4 团队 / 标签 / 分享的本地表。
+                # Why: 这些表此前只加进了 SQLite 迁移
+                # sql/migrations/v3_4_0_spaces_tags.sql（该文件是 SQLite 方言，
+                # TEXT 主键 / CREATE INDEX IF NOT EXISTS 在 MySQL 下不合法），
+                # MySQL 侧从未建过，导致 MySQL 模式下创建团队空间报
+                # 1146 Table 'spaces' doesn't exist。这里用 MySQL 方言补建。
+                v6_tables = [
+                    """CREATE TABLE IF NOT EXISTS spaces (
+                        id VARCHAR(64) PRIMARY KEY,
+                        name VARCHAR(255) NOT NULL,
+                        type VARCHAR(16) NOT NULL DEFAULT 'personal',
+                        owner_user_id VARCHAR(64) NOT NULL DEFAULT '',
+                        created_at BIGINT NOT NULL,
+                        updated_at BIGINT NOT NULL,
+                        INDEX idx_spaces_owner (owner_user_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+                    """CREATE TABLE IF NOT EXISTS space_members (
+                        space_id VARCHAR(64) NOT NULL,
+                        user_id VARCHAR(64) NOT NULL,
+                        role VARCHAR(16) NOT NULL DEFAULT 'editor',
+                        joined_at BIGINT NOT NULL,
+                        invited_by VARCHAR(64) DEFAULT NULL,
+                        PRIMARY KEY (space_id, user_id),
+                        INDEX idx_space_members_user (user_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+                    """CREATE TABLE IF NOT EXISTS tag_definitions (
+                        id VARCHAR(64) PRIMARY KEY,
+                        space_id VARCHAR(64) NOT NULL,
+                        name VARCHAR(255) NOT NULL,
+                        color VARCHAR(32) DEFAULT NULL,
+                        created_at BIGINT NOT NULL,
+                        UNIQUE KEY uq_tag_space_name (space_id, name),
+                        INDEX idx_tags_space (space_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+                    """CREATE TABLE IF NOT EXISTS clipboard_tags (
+                        item_id BIGINT NOT NULL,
+                        tag_id VARCHAR(64) NOT NULL,
+                        created_at BIGINT NOT NULL,
+                        PRIMARY KEY (item_id, tag_id),
+                        INDEX idx_clip_tags_tag (tag_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+                    """CREATE TABLE IF NOT EXISTS share_links (
+                        id VARCHAR(64) PRIMARY KEY,
+                        token VARCHAR(128) NOT NULL UNIQUE,
+                        space_id VARCHAR(64) NOT NULL,
+                        creator_user_id VARCHAR(64) NOT NULL,
+                        item_ids_json TEXT NOT NULL,
+                        expires_at BIGINT NOT NULL,
+                        created_at BIGINT NOT NULL,
+                        access_count BIGINT NOT NULL DEFAULT 0
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+                ]
+                for ddl in v6_tables:
+                    cursor.execute(ddl)
+
+                cursor.execute(
+                    "INSERT INTO app_meta (`key`, `value`) VALUES ('schema_version', '6') "
+                    "ON DUPLICATE KEY UPDATE `value` = '6'"
+                )
+                conn.commit()
+                logger.info("MySQL Schema 已迁移到 v6（v3.4 团队 / 标签 / 分享表）")
 
     def _create_connection(self) -> "pymysql.connections.Connection":
         """创建新的 MySQL 连接"""
