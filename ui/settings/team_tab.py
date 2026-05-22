@@ -224,17 +224,38 @@ class TeamTab(QWidget):
             self._team_member_list.addItem(f"{m.user_id}  [{m.role}]")
 
     def _on_team_new_space(self):
-        if self._space_service is None:
+        cloud_api = self._resolve_cloud_api()
+        if cloud_api is None:
+            QMessageBox.warning(self, "提示", "未登录或云端服务不可用，请先登录。")
             return
         name, ok = QInputDialog.getText(self, "新建团队空间", "空间名称：")
         if not ok or not name.strip():
             return
         try:
-            self._space_service.create_space(name=name.strip(), type_="team")
+            self._create_team_space(cloud_api, name.strip())
         except Exception as exc:
             QMessageBox.warning(self, "创建失败", str(exc))
             return
         self._refresh_team_spaces()
+
+    def _create_team_space(self, cloud_api, name: str) -> dict:
+        """在后端创建 team 空间，再把后端返回的空间落本地。
+
+        Why: 团队空间必须先在后端注册，邀请成员等云端操作才认得它。
+        旧实现只调 space_service.create_space() 写本地库，后端不知情，
+        导致邀请成员报"服务器错误 (404)"。
+        """
+        remote = cloud_api.create_space(name=name, type_="team")
+        # 后端 SpaceController::createSpace 返回 {"success":true,"space":{...}}
+        space = remote.get("space") if isinstance(remote, dict) else None
+        if not isinstance(space, dict):
+            # 兼容后端未来可能直接返回扁平结构
+            space = remote if isinstance(remote, dict) and remote.get("id") else None
+        if not space or not space.get("id"):
+            raise RuntimeError("后端创建空间未返回有效数据")
+        if self._space_service is not None:
+            self._space_service.upsert_from_remote(space)
+        return space
 
     def _resolve_cloud_api(self):
         """每次使用前重新解析 cloud_api。

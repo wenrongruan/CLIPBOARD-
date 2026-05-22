@@ -283,3 +283,63 @@ def test_team_tab_refreshes_entitlement_on_open_when_logged_in(qapp):
         assert svc.refresh_calls == 1
     finally:
         tab.close()
+
+
+class _StubCloudCreatesSpace:
+    """cloud_api 替身：模拟后端 POST /api/v1/spaces 的真实返回结构。"""
+
+    def __init__(self):
+        self.create_calls = []
+
+    def create_space(self, name, type_):
+        self.create_calls.append((name, type_))
+        # 后端 SpaceController::createSpace 真实返回：{success, space:{...}}
+        return {"success": True, "space": {
+            "id": "backend-space-1", "name": name, "type": type_,
+            "owner_user_id": "u1", "role": "owner",
+            "created_at": 111, "updated_at": 111,
+        }}
+
+
+class _StubSpaceService:
+    def __init__(self):
+        self.upserts = []
+        self.local_creates = []
+
+    def upsert_from_remote(self, d):
+        self.upserts.append(d)
+
+    def create_space(self, name, type_="personal", owner_user_id=""):
+        self.local_creates.append((name, type_))
+
+    def list_spaces(self):
+        return []
+
+
+def test_team_tab_create_space_registers_on_backend(qapp):
+    """复现 user-reported bug：新建团队空间只写了本地库，后端不知情，
+    邀请成员时后端找不到空间 → 404。
+
+    修复后：_create_team_space 先调 cloud_api.create_space 在后端建空间，
+    再把后端返回的空间（含后端 id）落本地；不再走纯本地的
+    space_service.create_space。
+    """
+    from core.entitlement_service import Plan
+    from ui.settings.team_tab import TeamTab
+
+    cloud = _StubCloudCreatesSpace()
+    spaces = _StubSpaceService()
+    tab = TeamTab(entitlement_service=_StubEntitlement(Plan.TEAM),
+                  space_service=spaces, cloud_api=cloud)
+    try:
+        tab._create_team_space(cloud, "我的团队")
+
+        # 必须在后端建空间（type=team）
+        assert cloud.create_calls == [("我的团队", "team")]
+        # 后端返回的空间（带后端 id）落本地
+        assert len(spaces.upserts) == 1
+        assert spaces.upserts[0]["id"] == "backend-space-1"
+        # 不再走纯本地建空间（那是 404 的根源）
+        assert spaces.local_creates == []
+    finally:
+        tab.close()
