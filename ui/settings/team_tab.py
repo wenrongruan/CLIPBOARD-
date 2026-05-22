@@ -38,14 +38,82 @@ class TeamTab(QWidget):
                 self._entitlement_service = getattr(ctx, "entitlement_service", None)
             if self._cloud_api is None:
                 self._cloud_api = getattr(ctx, "cloud_api", None)
+        # Why: entitlement_service 是惰性单例。设置页可能在用户登录、文件同步栈
+        # 建好之前就被打开，此时 ctx.entitlement_service 仍是 None。退化到全局
+        # 单例，保证团队 tab 总能拿到与主程序一致的实例并订阅其档位变更。
+        if self._entitlement_service is None:
+            try:
+                from core.entitlement_service import get_entitlement_service
+                repo = getattr(ctx, "repository", None) if ctx is not None else None
+                self._entitlement_service = get_entitlement_service(repository=repo)
+            except Exception:
+                logger.debug("退化获取 entitlement_service 失败", exc_info=True)
+                self._entitlement_service = None
+
         self._team_space_list = None
         self._team_member_list = None
-        self._team_enabled = self._build_ui()
+        self._team_enabled = False
+        self._body = None
+
+        # 根布局只建一次；闸门视图（_body）由 _rebuild 整体替换。
+        self._root_layout = QVBoxLayout(self)
+        self._root_layout.setContentsMargins(0, 0, 0, 0)
+        self._root_layout.setSpacing(0)
+
+        # 订阅档位变化：用户登录 / 升级导致档位刷新后，团队 tab 自动重渲染，
+        # 不再卡在登录前写入的 free 缓存上。
+        if self._entitlement_service is not None:
+            try:
+                self._entitlement_service.entitlement_changed.connect(
+                    self._on_entitlement_changed
+                )
+            except Exception:
+                logger.debug("订阅 entitlement_changed 失败", exc_info=True)
+
+        self._rebuild()
+
+    # ---- 对外接口 ----
+
+    def set_cloud_api(self, cloud_api) -> None:
+        """供 SettingsDialog 在用户于云端 tab 登录后调用：接上新 client 并刷新档位。
+
+        Why: 用户在设置对话框内的云端 tab 登录时，团队 tab 早已构造完毕。
+        若不在这里触发档位刷新，团队 tab 会一直停留在登录前的 free 档位，
+        误显示"升级到 Team 档位"。刷新结果经 entitlement_changed 触发重渲染。
+        """
+        self._cloud_api = cloud_api
+        ent = self._entitlement_service
+        if ent is None or cloud_api is None:
+            return
+        if not getattr(cloud_api, "is_authenticated", False):
+            return
+        try:
+            ent.set_cloud_api(cloud_api)
+            ent.refresh_async()
+        except Exception:
+            logger.debug("登录后触发档位刷新失败", exc_info=True)
+
+    # ---- 档位变化 → 重渲染 ----
+
+    def _on_entitlement_changed(self, *_args) -> None:
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        """整体替换闸门视图，使其反映当前会员档位。"""
+        if self._body is not None:
+            self._root_layout.removeWidget(self._body)
+            self._body.deleteLater()
+            self._body = None
+        self._team_space_list = None
+        self._team_member_list = None
+        self._body = QWidget(self)
+        self._root_layout.addWidget(self._body)
+        self._team_enabled = self._build_body(self._body)
         if self._team_enabled:
             self._refresh_team_spaces()
 
-    def _build_ui(self) -> bool:
-        layout = QVBoxLayout(self)
+    def _build_body(self, container: QWidget) -> bool:
+        layout = QVBoxLayout(container)
         layout.setSpacing(10)
         layout.setContentsMargins(12, 12, 12, 12)
 

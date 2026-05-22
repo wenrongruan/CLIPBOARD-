@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 
@@ -180,3 +181,83 @@ def test_team_tab_resolves_cloud_api_lazily(qapp, ctx):
     finally:
         tab.close()
         ctx.cloud_api = original_cloud_api
+
+
+# ---- 团队 tab 会员档位响应性回归测试 ----
+
+
+class _StubEntitlement(QObject):
+    """EntitlementService 的最小测试替身：只实现 team_tab 依赖的契约。"""
+
+    entitlement_changed = Signal(object)
+
+    def __init__(self, plan):
+        super().__init__()
+        from types import SimpleNamespace
+        self._ent = SimpleNamespace(plan=plan)
+        self.refresh_calls = 0
+
+    def current(self):
+        return self._ent
+
+    def set_cloud_api(self, _cloud_api):
+        pass
+
+    def refresh_async(self):
+        self.refresh_calls += 1
+
+    def emit_plan(self, plan):
+        """模拟一次后台档位刷新完成、档位发生变化。"""
+        from types import SimpleNamespace
+        self._ent = SimpleNamespace(plan=plan)
+        self.entitlement_changed.emit(self._ent)
+
+
+def test_team_tab_rerenders_when_entitlement_upgrades(qapp):
+    """复现 user-reported bug：用户在设置对话框内登录后，团队 tab 仍卡在
+    "升级到 Team 档位"界面。
+
+    根因：team_tab 构造时读一次档位就定型，不监听 entitlement_changed。
+    修复后：档位刷新到 super/team/ultimate 时，团队 tab 应自动重渲染为可用。
+    """
+    from core.entitlement_service import Plan
+    from ui.settings.team_tab import TeamTab
+
+    svc = _StubEntitlement(Plan.FREE)
+    tab = TeamTab(entitlement_service=svc, space_service=None, cloud_api=None)
+    try:
+        # 登录前：free 档 → 显示升级提示，团队功能不可用
+        assert tab._team_enabled is False
+
+        # 模拟登录后档位刷新到 super（后端对该账号的真实返回值）
+        svc.emit_plan(Plan.SUPER)
+
+        # 团队 tab 应已重渲染为可用，而不是继续卡在升级界面
+        assert tab._team_enabled is True
+    finally:
+        tab.close()
+
+
+def test_team_tab_set_cloud_api_triggers_entitlement_refresh(qapp):
+    """复现 user-reported bug 的另一半：在设置对话框内登录后，没有人触发
+    entitlement 刷新，团队 tab 永远等不到真实档位。
+
+    修复后：team_tab.set_cloud_api 收到已认证的 cloud_api 时，应触发一次
+    后台档位刷新。
+    """
+    from types import SimpleNamespace
+    from core.entitlement_service import Plan
+    from ui.settings.team_tab import TeamTab
+
+    svc = _StubEntitlement(Plan.FREE)
+    tab = TeamTab(entitlement_service=svc, space_service=None, cloud_api=None)
+    try:
+        # 构造时 cloud_api 为 None（未登录），不应刷新
+        assert svc.refresh_calls == 0
+
+        # 模拟用户在云端 tab 登录成功，SettingsDialog 把 client 转给团队 tab
+        tab.set_cloud_api(SimpleNamespace(is_authenticated=True))
+
+        assert svc.refresh_calls == 1
+    finally:
+        tab.close()

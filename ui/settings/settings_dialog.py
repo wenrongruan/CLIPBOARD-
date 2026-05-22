@@ -131,10 +131,12 @@ class SettingsDialog(QDialog):
     def _on_cloud_api_changed(self, cloud_api):
         """CloudTab 登录成功后通知 shell；主窗口在 exec() 后通过 get_cloud_api() 读取。"""
         self._cloud_api = cloud_api
-        # 同步给 TeamTab；否则用户在云端 tab 登录后切到团队 tab 仍会看到"未登录"。
+        # 同步给 TeamTab：set_cloud_api 内部会接上新 client 并刷新会员档位。
+        # 否则用户在云端 tab 登录后切到团队 tab，仍会停留在登录前的 free 档位，
+        # 误显示"升级到 Team 档位"。
         team_tab = getattr(self, "team_tab", None)
         if team_tab is not None:
-            team_tab._cloud_api = cloud_api
+            team_tab.set_cloud_api(cloud_api)
 
     # ---- OK / Cancel ----
 
