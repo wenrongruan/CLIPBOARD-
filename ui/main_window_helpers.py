@@ -269,6 +269,10 @@ def show_settings_dialog(window, initial_tab: str = ""):
     """打开设置对话框,并把对话框结果应用回 window/config。"""
     from .settings_dialog import SettingsDialog
 
+    # Why: 这里必须把 ctx 也透传过去。SettingsDialog 在 cloud_api 等显式参数为 None 时
+    # 会从 ctx 上兜底拿；TeamTab 也会从 ctx 拿 cloud_api。早期版本只传 cloud_api 不传 ctx,
+    # 一旦 window.cloud_api 暂时是 None(还没登录或被外部清掉), 团队 tab 就永久卡在
+    # "未登录或云端服务不可用"。
     dialog = SettingsDialog(
         window,
         plugin_manager=window.plugin_manager,
@@ -276,6 +280,7 @@ def show_settings_dialog(window, initial_tab: str = ""):
         space_service=window.space_service,
         entitlement_service=window.entitlement_service,
         initial_tab=initial_tab,
+        ctx=getattr(window, "ctx", None),
     )
     result = dialog.exec()
     # 无论确认还是取消,都同步登录状态(用户可能在对话框中登录了云端)

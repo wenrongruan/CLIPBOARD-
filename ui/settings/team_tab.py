@@ -153,6 +153,19 @@ class TeamTab(QWidget):
             return
         self._refresh_team_spaces()
 
+    def _resolve_cloud_api(self):
+        """每次使用前重新解析 cloud_api。
+
+        Why: 构造 team_tab 时 ctx.cloud_api 可能还是 None（用户尚未登录），
+        之后用户在云端 tab 登录会把 client 写回 ctx.cloud_api，
+        缓存的 self._cloud_api 永远拿不到。
+        """
+        if self._cloud_api is not None:
+            return self._cloud_api
+        if self.ctx is not None:
+            return getattr(self.ctx, "cloud_api", None)
+        return None
+
     def _on_team_invite_member(self):
         if self._team_space_list is None:
             return
@@ -160,7 +173,8 @@ class TeamTab(QWidget):
         if item is None:
             QMessageBox.information(self, "提示", "请先选择一个团队空间。")
             return
-        if self._cloud_api is None:
+        cloud_api = self._resolve_cloud_api()
+        if cloud_api is None:
             QMessageBox.warning(self, "邀请失败", "未登录或云端服务不可用，请先登录。")
             return
         space_id = item.data(Qt.UserRole)
@@ -173,7 +187,7 @@ class TeamTab(QWidget):
         if not ok:
             return
         try:
-            resp = self._cloud_api.invite_space_member(
+            resp = cloud_api.invite_space_member(
                 space_id=space_id, email=email.strip(), role=role,
             )
         except Exception as exc:

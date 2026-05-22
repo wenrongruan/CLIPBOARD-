@@ -94,18 +94,42 @@ class EdgeHiddenWindow(QWidget):
             pos = settings().floating_position
             if pos and len(pos) == 2:
                 x, y = pos
-                if QApplication.screenAt(QPoint(x, y)):
-                    self.setGeometry(QRect(x, y, self._window_width, self._window_height))
+                clamped = self._clamp_to_visible_screen(
+                    QRect(x, y, self._window_width, self._window_height)
+                )
+                if clamped is not None:
+                    if clamped.topLeft() != QPoint(x, y):
+                        # 屏幕配置变了（如撤掉副屏），把回收后的坐标写回 settings，避免每次启动 Qt 都报 "outside any known screen"
+                        update_settings(floating_position=(clamped.x(), clamped.y()))
+                    self.setGeometry(clamped)
                     self._is_visible = True
                     self._is_pinned = True
                     self.show()
                     return
-            # 保存的位置无效，回退到吸附模式
+            # 保存的位置完全不可用，回退到吸附模式并清理脏数据
             self._is_floating = False
-            update_settings(is_floating=False)
+            update_settings(is_floating=False, floating_position=None)
 
         self._move_to_hidden_position(screen_rect)
         self.show()
+
+    def _clamp_to_visible_screen(self, rect: QRect) -> Optional[QRect]:
+        """把窗口矩形夹到某块屏幕的可用区域内。
+
+        命中规则：先用 top-left 所在屏幕；不在任何屏幕上则用主屏；主屏不可用返回 None。
+        返回的 QRect 保证整体落在该屏幕内（若 rect 比屏幕大，则按屏幕大小裁剪）。
+        Why: 多屏 → 单屏切换后 floating_position 常落到不存在的副屏坐标，
+        直接 setGeometry 会触发 Qt "outside any known screen" 警告。
+        """
+        screen = QApplication.screenAt(rect.topLeft()) or QApplication.primaryScreen()
+        if screen is None:
+            return None
+        bounds = screen.availableGeometry()
+        w = min(rect.width(), bounds.width())
+        h = min(rect.height(), bounds.height())
+        x = max(bounds.left(), min(rect.x(), bounds.right() - w))
+        y = max(bounds.top(), min(rect.y(), bounds.bottom() - h))
+        return QRect(x, y, w, h)
 
     def _get_screen(self) -> Optional[QScreen]:
         """当前屏幕：窗口可见/悬浮时用窗口中心所在屏幕，否则用鼠标所在屏幕"""

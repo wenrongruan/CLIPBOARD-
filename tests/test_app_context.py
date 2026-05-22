@@ -42,6 +42,13 @@ def _redirect_config_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "get_user_plugins_dir", _fake_plugins_dir)
     monkeypatch.setattr(config, "get_files_local_dir", _fake_files_dir)
 
+    # 关键：把 cloud token 取值固定成空串。
+    # config.get_cloud_access_token 会先查系统 keyring，再 fallback 读 ~/.shared_clipboard/auth.json，
+    # 两条路径都不受 tmp_path 隔离影响——开发者本机如果登录过云端，
+    # bootstrap 就会装配 cloud_api，导致 "cloud_api is None" 这类断言偶发失败。
+    monkeypatch.setattr(config, "get_cloud_access_token", lambda: "")
+    monkeypatch.setattr(config, "get_cloud_refresh_token", lambda: "")
+
     # SettingsStore 已经持有 _path 缓存的情况下需要重置，让它走新的 tmp_path
     store = config.get_store()
     store._path = None

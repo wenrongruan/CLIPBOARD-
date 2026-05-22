@@ -37,11 +37,22 @@ from core.startup_metrics import StartupMetrics
 from ui.main_window import MainWindow
 
 # 全局热键支持
-try:
-    from pynput import keyboard
-    HOTKEY_AVAILABLE = True
-except ImportError:
-    HOTKEY_AVAILABLE = False
+# macOS 上不直接用 pynput，改走 NSEvent monitor（详见 core/macos_hotkey.py 的 Why）。
+# 其他平台仍使用 pynput.
+keyboard = None
+HOTKEY_AVAILABLE = False
+if IS_MACOS:
+    try:
+        from core.macos_hotkey import MacOSGlobalHotkey  # noqa: F401
+        HOTKEY_AVAILABLE = True
+    except ImportError:
+        HOTKEY_AVAILABLE = False
+else:
+    try:
+        from pynput import keyboard
+        HOTKEY_AVAILABLE = True
+    except ImportError:
+        HOTKEY_AVAILABLE = False
 
 # 日志配置：默认 WARNING，设置 SC_DEBUG=1 可切到 DEBUG 并同时落盘到 logs/debug.log
 _SC_DEBUG = os.environ.get("SC_DEBUG", "").strip() not in ("", "0", "false", "False")
@@ -530,11 +541,11 @@ class ClipboardApp:
         self.hotkey_listener = None
 
         if not HOTKEY_AVAILABLE:
-            logger.warning("pynput 未安装，全局热键功能不可用")
+            logger.warning("全局热键功能不可用（macOS 缺 AppKit / 其他平台缺 pynput）")
             self._record_health_issue(
                 "hotkey",
                 "warning",
-                "全局热键不可用：pynput 未安装。仍可通过托盘图标打开窗口。",
+                "全局热键不可用：底层依赖缺失。仍可通过托盘图标打开窗口。",
             )
             return
 
@@ -542,29 +553,50 @@ class ClipboardApp:
         if not hotkey:
             return
 
-        # macOS: 无辅助功能权限时启动 pynput 仍会装 CGEventTap,
-        # 后续按键经 NSEvent eventWithCGEvent: 触发 TSM,在新版 macOS 后台线程上
-        # dispatch_assert_queue 断言失败 SIGTRAP 闪退。所以先检查权限,无权限直接跳过。
-        if IS_MACOS and not self._has_accessibility_permission():
-            logger.warning("未授予辅助功能/输入监控权限,跳过全局热键监听以避免闪退")
-            self._record_health_issue(
-                "hotkey",
-                "warning",
-                "全局热键不可用：缺少输入监控权限。仍可通过菜单栏图标打开窗口。",
-            )
-            self._prompt_input_monitoring_permission()
+        # macOS: pynput 的 CGEventTap 后台线程在新版系统上按 CapsLock 系列键
+        # 会触发 TSM dispatch_assert_queue 闪退（SIGTRAP）。改用 NSEvent monitor,
+        # 回调走主线程,绕开这条崩溃链路。详见 core/macos_hotkey.py 的 Why。
+        if IS_MACOS:
+            if not self._has_accessibility_permission():
+                logger.warning("未授予辅助功能/输入监控权限,跳过全局热键监听")
+                self._record_health_issue(
+                    "hotkey",
+                    "warning",
+                    "全局热键不可用：缺少输入监控权限。仍可通过菜单栏图标打开窗口。",
+                )
+                self._prompt_input_monitoring_permission()
+                return
+            try:
+                from core.macos_hotkey import MacOSGlobalHotkey
+                self.hotkey_listener = MacOSGlobalHotkey(hotkey, self._on_hotkey_pressed)
+                started = self.hotkey_listener.start()
+                if started:
+                    logger.info(f"全局热键已注册（NSEvent monitor）: {hotkey}")
+                else:
+                    logger.warning("NSEvent global monitor 装载失败,疑似缺少输入监控权限")
+                    self._record_health_issue(
+                        "hotkey",
+                        "warning",
+                        "全局热键监听未启用，疑似缺少输入监控权限。仍可通过菜单栏图标打开窗口。",
+                    )
+                    self._prompt_input_monitoring_permission()
+            except Exception as e:
+                logger.error(f"注册 macOS 全局热键失败: {e}", exc_info=True)
+                self._record_health_issue(
+                    "hotkey",
+                    "warning",
+                    f"全局热键注册失败：{e}",
+                )
+                self._prompt_input_monitoring_permission()
             return
 
+        # 非 macOS：继续走 pynput
         try:
-            # 创建热键监听器
             self.hotkey_listener = keyboard.GlobalHotKeys({
                 hotkey: self._on_hotkey_pressed
             })
             self.hotkey_listener.start()
             logger.info(f"全局热键已注册: {hotkey}")
-            # macOS: pynput 无权限时常静默失败，延迟检查线程存活
-            if IS_MACOS:
-                QTimer.singleShot(3000, self._check_hotkey_listener_alive)
         except Exception as e:
             logger.error(f"注册全局热键失败: {e}")
             self._record_health_issue(
@@ -572,8 +604,6 @@ class ClipboardApp:
                 "warning",
                 f"全局热键注册失败：{e}",
             )
-            if IS_MACOS:
-                self._prompt_input_monitoring_permission()
 
     @staticmethod
     def _has_accessibility_permission() -> bool:

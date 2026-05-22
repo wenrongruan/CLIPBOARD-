@@ -184,6 +184,13 @@ class HttpClient:
         """
         try:
             auth_dir = Path.home() / ".shared_clipboard"
+            # 兜底：若同名路径意外是个文件（极端污染场景），删掉再建目录
+            if auth_dir.exists() and not auth_dir.is_dir():
+                try:
+                    auth_dir.unlink()
+                except OSError as e:
+                    logger.warning(f"~/.shared_clipboard 不是目录且无法删除: {e}")
+                    return
             auth_dir.mkdir(parents=True, exist_ok=True)
             auth_file = auth_dir / "auth.json"
             tmp_file = auth_dir / "auth.json.tmp"
@@ -214,6 +221,14 @@ class HttpClient:
             else:
                 tmp_file.write_text(serialized, encoding="utf-8")
 
+            # 防御性二次检查：在 os.replace 前确保 tmp 和目标目录都存在。
+            # 此前真机观察到 os.replace 报 ENOENT，怀疑是上层目录在某些时机被清理。
+            # Why: os.replace 失败会丢失 tmp 文件且不可恢复，这里宁可多花一次 stat。
+            if not tmp_file.exists():
+                logger.warning(f"auth.json.tmp 在写入后丢失，跳过 replace: {tmp_file}")
+                return
+            if not auth_dir.is_dir():
+                auth_dir.mkdir(parents=True, exist_ok=True)
             os.replace(tmp_file, auth_file)
 
             if platform.system() != "Windows":

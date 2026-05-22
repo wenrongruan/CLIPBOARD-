@@ -93,3 +93,90 @@ def test_each_tab_constructs(qapp, ctx):
     w = PluginsTab(ctx=ctx, auto_load_store=False)
     assert w is not None
     w.close()
+
+
+def test_show_settings_dialog_full_chain_propagates_cloud_api(qapp, ctx):
+    """端到端复现 user-reported "未登录" bug 的完整链路：
+
+    main_window 上有 cloud_api/ctx → show_settings_dialog 调 SettingsDialog →
+    SettingsDialog 把 cloud_api 转发给 TeamTab → 点邀请时 _resolve_cloud_api
+    应该能拿到 cloud_api, 而不是 None。
+    """
+    from PySide6.QtWidgets import QWidget
+    from ui.main_window_helpers import show_settings_dialog
+    from ui.settings.team_tab import TeamTab
+
+    # 用 Mock 让 cloud_tab._build_ui 读 is_authenticated 时不炸。
+    # 比 object() 实用：is_authenticated=False 走"未登录视图"分支不发网络请求。
+    from unittest.mock import Mock
+    sentinel_cloud_api = Mock(name="cloud_api", is_authenticated=False)
+    ctx.cloud_api = sentinel_cloud_api
+
+    # show_settings_dialog 把 window 当作 QDialog 的 parent，Qt 要求是 QWidget。
+    # 用 QWidget 子类挂上 main_window 暴露给 helper 的字段。
+    class _FakeMainWindow(QWidget):
+        pass
+
+    fake_window = _FakeMainWindow()
+    fake_window.cloud_api = sentinel_cloud_api
+    fake_window.plugin_manager = None
+    fake_window.space_service = ctx.space_service
+    fake_window.entitlement_service = ctx.entitlement_service
+    fake_window.ctx = ctx
+    fake_window.cloud_controller = Mock(name="cloud_controller")
+
+    captured: dict = {}
+    original_exec = None
+    try:
+        from ui.settings.settings_dialog import SettingsDialog
+        original_exec = SettingsDialog.exec
+
+        def fake_exec(self):
+            captured["dialog"] = self
+            return 0  # Rejected, 跳过 _on_accept 落盘逻辑
+
+        SettingsDialog.exec = fake_exec
+        show_settings_dialog(fake_window)
+    finally:
+        if original_exec is not None:
+            SettingsDialog.exec = original_exec
+        ctx.cloud_api = None
+        fake_window.deleteLater()
+
+    dlg = captured.get("dialog")
+    assert dlg is not None, "fake_exec 没被调到, show_settings_dialog 没构造 SettingsDialog"
+    team_tab = dlg.team_tab
+    assert isinstance(team_tab, TeamTab)
+    # 关键断言：链路应该把 cloud_api 一路送到 TeamTab
+    assert team_tab._resolve_cloud_api() is sentinel_cloud_api, (
+        f"cloud_api 没穿到 TeamTab：tab._cloud_api={team_tab._cloud_api!r}, "
+        f"tab.ctx={team_tab.ctx!r}"
+    )
+    dlg.close()
+
+
+def test_team_tab_resolves_cloud_api_lazily(qapp, ctx):
+    """复现并验证修复：team_tab 构造时 ctx.cloud_api 为 None，
+    用户随后在云端 tab 登录把 client 写回 ctx 后，团队 tab 仍能拿到。
+
+    Why: 之前 team_tab 在 __init__ 里把 ctx.cloud_api 缓存到 self._cloud_api，
+    构造时 ctx 还没 cloud_api 就永久卡在 None，邀请按钮一直误报"未登录"。
+    """
+    from ui.settings.team_tab import TeamTab
+
+    # 模拟"未登录"场景：手动把 ctx.cloud_api 清空
+    # （test_settings_tabs_smoke 的 ctx fixture 不像 test_app_context 那样
+    # monkeypatch 了 keyring，开发机有真实 token 时 bootstrap 会装配 cloud_api）
+    original_cloud_api = ctx.cloud_api
+    ctx.cloud_api = None
+    tab = TeamTab(ctx=ctx)
+    try:
+        assert tab._resolve_cloud_api() is None
+
+        # 模拟"用户在云端 tab 登录"——把一个假 client 写回 ctx
+        sentinel = object()
+        ctx.cloud_api = sentinel
+        assert tab._resolve_cloud_api() is sentinel
+    finally:
+        tab.close()
+        ctx.cloud_api = original_cloud_api

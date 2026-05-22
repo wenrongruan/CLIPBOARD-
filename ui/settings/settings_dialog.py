@@ -101,10 +101,14 @@ class SettingsDialog(QDialog):
         self.cloud_tab.cloud_api_changed.connect(self._on_cloud_api_changed)
         self._tab_name_to_index["cloud"] = tab_widget.addTab(self.cloud_tab, "云端同步")
 
+        # Why: 老调用方（main_window_helpers.show_settings_dialog）只传 cloud_api kwarg、
+        # 没传 ctx，TeamTab 里既拿不到 ctx 又没收到 cloud_api，导致团队 tab 一直
+        # 卡在"未登录或云端服务不可用"。这里把已经解析到的 _cloud_api 显式转发。
         self.team_tab = TeamTab(
             ctx=self.ctx, parent=self,
             space_service=self._space_service,
             entitlement_service=self._entitlement_service,
+            cloud_api=self._cloud_api,
         )
         self._tab_name_to_index["team"] = tab_widget.addTab(self.team_tab, "团队")
 
@@ -127,6 +131,10 @@ class SettingsDialog(QDialog):
     def _on_cloud_api_changed(self, cloud_api):
         """CloudTab 登录成功后通知 shell；主窗口在 exec() 后通过 get_cloud_api() 读取。"""
         self._cloud_api = cloud_api
+        # 同步给 TeamTab；否则用户在云端 tab 登录后切到团队 tab 仍会看到"未登录"。
+        team_tab = getattr(self, "team_tab", None)
+        if team_tab is not None:
+            team_tab._cloud_api = cloud_api
 
     # ---- OK / Cancel ----
 
