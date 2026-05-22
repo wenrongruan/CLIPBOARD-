@@ -239,7 +239,7 @@ def test_team_tab_rerenders_when_entitlement_upgrades(qapp):
 
 
 def test_team_tab_set_cloud_api_triggers_entitlement_refresh(qapp):
-    """复现 user-reported bug 的另一半：在设置对话框内登录后，没有人触发
+    """复现 user-reported bug 的一半：在设置对话框内登录后，没有人触发
     entitlement 刷新，团队 tab 永远等不到真实档位。
 
     修复后：team_tab.set_cloud_api 收到已认证的 cloud_api 时，应触发一次
@@ -258,6 +258,28 @@ def test_team_tab_set_cloud_api_triggers_entitlement_refresh(qapp):
         # 模拟用户在云端 tab 登录成功，SettingsDialog 把 client 转给团队 tab
         tab.set_cloud_api(SimpleNamespace(is_authenticated=True))
 
+        assert svc.refresh_calls == 1
+    finally:
+        tab.close()
+
+
+def test_team_tab_refreshes_entitlement_on_open_when_logged_in(qapp):
+    """复现 user-reported bug 的另一半，也是用户实际命中的场景：用户在已登录
+    状态下打开设置 → 团队 tab，而本地 entitlement 缓存是过期的 free（例如
+    登录前写入的兜底值）。
+
+    此时没有"登录事件"，set_cloud_api 不会被调用。团队 tab 若不在构造时
+    主动刷新，就会一直停留在过期档位，显示"升级到 Team 档位"。
+    修复后：team_tab 构造时若已带有已认证的 cloud_api，应触发一次后台刷新。
+    """
+    from types import SimpleNamespace
+    from core.entitlement_service import Plan
+    from ui.settings.team_tab import TeamTab
+
+    svc = _StubEntitlement(Plan.FREE)
+    authed = SimpleNamespace(is_authenticated=True)
+    tab = TeamTab(entitlement_service=svc, space_service=None, cloud_api=authed)
+    try:
         assert svc.refresh_calls == 1
     finally:
         tab.close()

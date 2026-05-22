@@ -71,6 +71,9 @@ class TeamTab(QWidget):
                 logger.debug("订阅 entitlement_changed 失败", exc_info=True)
 
         self._rebuild()
+        # 构造时若已登录，主动刷新一次档位。否则用户在已登录状态下打开设置，
+        # 团队 tab 只会读到本地可能过期的缓存（如登录前写入的 free 兜底值）。
+        self._maybe_refresh_entitlement()
 
     # ---- 对外接口 ----
 
@@ -79,10 +82,22 @@ class TeamTab(QWidget):
 
         Why: 用户在设置对话框内的云端 tab 登录时，团队 tab 早已构造完毕。
         若不在这里触发档位刷新，团队 tab 会一直停留在登录前的 free 档位，
-        误显示"升级到 Team 档位"。刷新结果经 entitlement_changed 触发重渲染。
+        误显示"升级到 Team 档位"。
         """
         self._cloud_api = cloud_api
+        self._maybe_refresh_entitlement()
+
+    # ---- 档位刷新 ----
+
+    def _maybe_refresh_entitlement(self) -> None:
+        """已登录时后台刷新会员档位；结果经 entitlement_changed 触发重渲染。
+
+        覆盖两种场景：
+        - 构造时用户已登录，但本地缓存是过期档位（如登录前写入的 free 兜底值）；
+        - 用户在设置对话框内的云端 tab 登录后，由 set_cloud_api 接上新 client。
+        """
         ent = self._entitlement_service
+        cloud_api = self._resolve_cloud_api()
         if ent is None or cloud_api is None:
             return
         if not getattr(cloud_api, "is_authenticated", False):
@@ -91,7 +106,7 @@ class TeamTab(QWidget):
             ent.set_cloud_api(cloud_api)
             ent.refresh_async()
         except Exception:
-            logger.debug("登录后触发档位刷新失败", exc_info=True)
+            logger.debug("触发档位刷新失败", exc_info=True)
 
     # ---- 档位变化 → 重渲染 ----
 
