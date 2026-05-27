@@ -20,7 +20,7 @@ APP_BUNDLE="${1:-dist/共享剪贴板.app}"
 BUNDLE_ID="com.wenrongruan.sharedclipboard"
 CONTAINER_PATH="$HOME/Library/Containers/${BUNDLE_ID}"
 APP_SUPPORT_PATH="$HOME/Library/Application Support/SharedClipboard"
-EXPECTED_VERSION="3.3.1"
+EXPECTED_VERSION="3.3.2"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 PASS_COUNT=0; FAIL_COUNT=0; WARN_COUNT=0
@@ -88,8 +88,12 @@ else
     spctl_out=$(spctl -a -vv -t install "$APP_BUNDLE" 2>&1 || true)
     echo "$spctl_out" | sed 's/^/      /'
     # spctl 对未公证 MAS 包会显示 rejected，这是预期；只要不是签名错就 warn
+    # MAS 包用 Apple Distribution 签名，spctl 一律 rejected，且不会带 "not notarized"
+    # 文案。只要 origin 行是 Apple Distribution / 3rd Party Mac Developer，就当 warn 处理。
     if echo "$spctl_out" | grep -qE "rejected.*not notarized|no usable signature"; then
         warn "spctl 拒绝但仅因未公证（MAS 包正常，Transporter 会处理）"
+    elif echo "$spctl_out" | grep -qE "origin=(Apple Distribution|3rd Party Mac Developer)"; then
+        warn "spctl 拒绝是因 Apple Distribution 签名（MAS 包预期行为，Transporter 会处理）"
     else
         fail "spctl 报签名问题"
     fi

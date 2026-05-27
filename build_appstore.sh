@@ -185,6 +185,30 @@ echo "Info.plist 已更新: 版本 ${VER} (Build ${BUILD_NUM})"
     || /usr/libexec/PlistBuddy -c "Set :SCBuildFlavor appstore" "$INFO_PLIST"
 echo "已写入 App Store 构建标志 (Info.plist SCBuildFlavor=appstore)"
 
+# 注入 App Store 必需的隐私用途说明与平台行为键
+# Why: PyInstaller 生成的 Info.plist 不包含这些 key；缺 NSPasteboardUsageDescription
+# 会被 App Store 审核拒收，缺 LSUIElement 会让应用错误地出现在 Dock。
+add_or_set_plist_str() {
+    local key="$1" val="$2"
+    /usr/libexec/PlistBuddy -c "Set :${key} ${val}" "$INFO_PLIST" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Add :${key} string ${val}" "$INFO_PLIST"
+}
+add_or_set_plist_bool() {
+    local key="$1" val="$2"
+    /usr/libexec/PlistBuddy -c "Set :${key} ${val}" "$INFO_PLIST" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Add :${key} bool ${val}" "$INFO_PLIST"
+}
+add_or_set_plist_bool "LSUIElement" "true"
+add_or_set_plist_bool "NSHighResolutionCapable" "true"
+add_or_set_plist_bool "NSSupportsAutomaticGraphicsSwitching" "true"
+add_or_set_plist_bool "NSRequiresAquaSystemAppearance" "false"
+add_or_set_plist_str "NSHumanReadableCopyright" "Copyright © 2024. All rights reserved."
+add_or_set_plist_str "NSPasteboardUsageDescription" "需要访问剪贴板以记录复制的文本与图片到本地历史，便于跨设备同步与快速重新粘贴。"
+add_or_set_plist_str "NSAccessibilityUsageDescription" "需要辅助功能权限以支持全局粘贴热键。"
+add_or_set_plist_str "NSAppleEventsUsageDescription" "需要通过 Apple Events 访问系统剪贴板服务。"
+add_or_set_plist_str "NSLocalNetworkUsageDescription" "共享剪贴板可通过局域网连接 MySQL 数据库，实现多设备剪贴板同步共享。"
+echo "已注入隐私用途说明与 LSUIElement"
+
 # 嵌入 Provisioning Profile（用数组展开 glob，避免引号内 glob 不展开）
 profiles=(*.provisionprofile)
 if [ -e "${profiles[0]}" ]; then
