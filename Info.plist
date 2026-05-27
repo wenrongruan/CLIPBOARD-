@@ -11,9 +11,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
-    <string>3.3.0</string>
+    <string>3.3.1</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.3.0</string>
+    <string>3.3.1</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSUIElement</key>
@@ -38,5 +38,7 @@
     <string>需要通过 Apple Events 访问系统剪贴板服务。</string>
     <key>NSAccessibilityUsageDescription</key>
     <string>需要辅助功能权限以支持全局粘贴热键。</string>
+    <key>NSPasteboardUsageDescription</key>
+    <string>需要访问剪贴板以记录复制的文本与图片到本地历史，便于跨设备同步与快速重新粘贴。</string>
 </dict>
 </plist>

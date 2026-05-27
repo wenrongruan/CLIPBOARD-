@@ -235,7 +235,7 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         active_profile=data.get("active_profile", "Default"),
         db_profiles=dict(data.get("db_profiles", {})),
         disabled_plugins=tuple(data.get("disabled_plugins", [])),
-        files_sync_enabled=bool(data.get("files_sync_enabled", True)),
+        files_sync_enabled=bool(data.get("files_sync_enabled", False)),
         files_auto_download=bool(data.get("files_auto_download", False)),
         files_max_autodownload_mb=int(data.get("files_max_autodownload_mb", 200)),
         capture_source_title=bool(data.get("capture_source_title", False)),

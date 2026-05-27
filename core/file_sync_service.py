@@ -400,7 +400,15 @@ class FileCloudSyncService(QObject):
         self.persist_sync_cursor()
         self._worker_thread.requestInterruption()
         self._worker_thread.quit()
-        self._worker_thread.wait(3000)
+        # 同 cloud_sync_service.stop：3s 等待 + terminate 兜底，避免退出时
+        # OSS / httpx 阻塞导致进程无法收尾。
+        if not self._worker_thread.wait(3000):
+            logger.warning("文件云同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
+            try:
+                self._worker_thread.terminate()
+                self._worker_thread.wait(500)
+            except Exception as e:
+                logger.debug(f"terminate file sync worker 失败（忽略）: {e}")
         logger.info("文件云同步服务已停止")
 
     # ---------- 公共 API（供 UI / 其它服务调用） ----------

@@ -30,6 +30,8 @@ from urllib.parse import urlparse
 import httpx
 
 from config import (
+    IS_APPSTORE_BUILD,
+    IS_MACOS,
     set_cloud_access_token,
     set_cloud_refresh_token,
     update_settings,
@@ -181,7 +183,15 @@ class HttpClient:
           2. 非 Windows 平台显式 chmod 0600，确保文件仅属主可读写
           3. Windows 平台通过 icacls 移除继承，仅授予当前用户 Full Control；
              ACL 失败不阻断登录流程（仅记日志），默认 NTFS 继承作为兜底。
+          4. macOS 上额外打 com.apple.metadata:com_apple_backup_excludeItem
+             扩展属性，把文件踢出 Time Machine / iCloud Backup，避免 token
+             流入备份。
+
+        App Store 构建不打包 ai_image_gen，没有外部进程会读 auth.json；
+        为避免 token 落进沙盒 container 又随备份外泄，直接跳过写入。
         """
+        if IS_APPSTORE_BUILD:
+            return
         try:
             auth_dir = Path.home() / ".shared_clipboard"
             # 兜底：若同名路径意外是个文件（极端污染场景），删掉再建目录
@@ -241,8 +251,36 @@ class HttpClient:
                 # Why: NTFS 默认 ACL 在某些组策略/共享目录下可能被覆盖，显式收紧更稳。
                 # 失败不阻断登录（仅降级日志），auth.json 已写入本地默认 ACL 兜底。
                 self._apply_windows_acl(auth_file)
+
+            if IS_MACOS:
+                # 把 auth.json 从 Time Machine / iCloud Backup 中排除。
+                # 注意：xattr 的 plist value 必须是 binary plist 头，否则 macOS
+                # 不识别。这里走 NSURL 资源属性 API（Foundation），失败则降级
+                # 用 `xattr -wx` 写裸字节，再失败就 silently 跳过——文件本身已
+                # chmod 0600，最坏情况只是会被备份。
+                self._exclude_from_backup_macos(auth_file)
         except Exception:
             logger.warning("更新 auth.json 失败", exc_info=True)
+
+    @staticmethod
+    def _exclude_from_backup_macos(path: Path) -> None:
+        """macOS: 给文件打 NSURLIsExcludedFromBackupKey，使其不进 Time Machine。"""
+        try:
+            from Foundation import NSURL  # type: ignore[import-not-found]
+            url = NSURL.fileURLWithPath_(str(path))
+            ok, err = url.setResourceValue_forKey_error_(True, "NSURLIsExcludedFromBackupKey", None)
+            if not ok:
+                logger.debug(f"NSURL excludeFromBackup 失败: {err}")
+        except Exception as e:
+            logger.debug(f"NSURL 方式排除备份失败，尝试 xattr 兜底: {e}")
+            try:
+                subprocess.run(
+                    ["xattr", "-wx", "com.apple.metadata:com_apple_backup_excludeItem",
+                     "62706c6973743030093103090a", str(path)],
+                    check=False, capture_output=True, timeout=2,
+                )
+            except Exception as e2:
+                logger.debug(f"xattr 兜底也失败（忽略）: {e2}")
 
     @staticmethod
     def _apply_windows_acl(path: Path) -> None:

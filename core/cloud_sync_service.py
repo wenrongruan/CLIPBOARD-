@@ -752,7 +752,16 @@ class CloudSyncService(QObject):
             except Exception as e:
                 logger.debug(f"关闭 cloud_api 客户端失败（忽略）: {e}")
             self._worker_thread.quit()
-            self._worker_thread.wait(3000)
+            # 3s 让 worker 主动退出；若仍卡在 socket 上则 terminate 兜底，
+            # 防止 atexit join 让进程不退（也避免日志里出现 "wrapped C/C++
+            # object has been deleted" 这类析构期访问问题）。
+            if not self._worker_thread.wait(3000):
+                logger.warning("云端同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
+                try:
+                    self._worker_thread.terminate()
+                    self._worker_thread.wait(500)
+                except Exception as e:
+                    logger.debug(f"terminate worker 线程失败（忽略）: {e}")
 
         logger.info("云端同步服务已停止")
 

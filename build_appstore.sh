@@ -27,7 +27,9 @@ set -e  # 任何命令失败立即退出
 # ─── 请修改以下变量 ────────────────────────────────────────────────────────────
 TEAM_ID="N9B2B6LN88"
 APPLE_ID="rwr@qq.com"            # Apple ID
-APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"  # App 专用密码
+# App 专用密码：从环境变量读取，避免明文落仓库。未设置时跳过 notarytool/altool 步骤。
+# 用法: APPLE_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx" ./build_appstore.sh
+APP_PASSWORD="${APPLE_APP_PASSWORD:-}"
 # ──────────────────────────────────────────────────────────────────────────────
 
 APP_NAME="共享剪贴板"
@@ -201,6 +203,21 @@ echo "已清除 quarantine 扩展属性"
 
 # ─── [5/7] 深度代码签名 ───────────────────────────────────────────────────────
 step 5 "代码签名（App Sandbox + Hardened Runtime）"
+
+# MAS 包禁止出现 DevID-only 例外（cs.disable-library-validation /
+# cs.allow-unsigned-executable-memory），否则 Transporter 上传会被拒。
+# 操作员若误把 ENTITLEMENTS 指向 Entitlements.devid.plist，这里直接 fail。
+for forbidden_key in \
+    "com.apple.security.cs.disable-library-validation" \
+    "com.apple.security.cs.allow-unsigned-executable-memory" \
+    "com.apple.security.cs.allow-dyld-environment-variables" \
+    "com.apple.security.cs.disable-executable-page-protection"
+do
+    if grep -q "$forbidden_key" "$ENTITLEMENTS"; then
+        fail "Entitlements 文件 $ENTITLEMENTS 含 App Store 禁用键: $forbidden_key。请改用 Entitlements.plist (沙盒版)。"
+    fi
+done
+echo "Entitlements 合规检查通过: $ENTITLEMENTS"
 
 if [ "$TEAM_ID" = "YOUR_TEAM_ID" ]; then
     warn "TEAM_ID 未设置，使用 ad-hoc 签名（仅用于本地测试，无法上传 App Store）"

@@ -695,9 +695,13 @@ class ClipboardApp:
             logger.debug("reset_cloud_client failed", exc_info=True)
         # 刷新延迟写入的配置
         flush_settings()
-        # 关闭持久数据库连接
+        # 关闭持久数据库连接。Why: close() 内部异常会被吞掉，若 SQLite WAL
+        # checkpoint 失败下次启动会触发磁盘恢复 I/O；记一行 warning 方便排查。
         if hasattr(self.db_manager, 'close'):
-            self.db_manager.close()
+            try:
+                self.db_manager.close()
+            except Exception as e:
+                logger.warning(f"db_manager.close 失败（WAL 可能未 checkpoint）: {e}", exc_info=True)
         # Why: ThreadPoolExecutor 的 atexit 会 join 所有 worker；若有网络请求
         # 卡在 socket 上，进程就退不掉（托盘已 hide 但 Python 还活着）。
         # 给正常收尾 1.5s，超时直接 _exit 兜底。
