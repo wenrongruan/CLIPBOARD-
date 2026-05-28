@@ -277,8 +277,13 @@ class _SyncWorker(QObject):
         """检查配额（在工作线程中执行）"""
         try:
             sub = self.cloud_api.get_subscription()
-            current = sub.get("used_records", 0)
-            max_count = sub.get("max_records", 30)
+            if not isinstance(sub, dict):
+                return
+            try:
+                current = int(sub.get("used_records", 0) or 0)
+                max_count = int(sub.get("max_records", 30) or 0)
+            except (TypeError, ValueError):
+                return
             if max_count > 0 and current >= max_count * 0.8:
                 self.quota_warning.emit(current, max_count)
         except CloudAPIError as e:
