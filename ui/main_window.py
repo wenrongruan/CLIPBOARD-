@@ -182,8 +182,6 @@ class MainWindow(EdgeHiddenWindow):
         self.pin_btn = _mk("⇩", t("pin_window"), 28, self._toggle_pin)
         self.settings_btn = _mk("⚙", t("settings"), 28, self._show_settings)
         self.minimize_btn = _mk("—", t("minimize"), 28, self._minimize_window)
-        if IS_MACOS:
-            self.minimize_btn.setVisible(False)
         self.quit_btn = _mk("✕", t("quit_app"), 28, self._request_quit)
 
         layout.addLayout(header_layout)

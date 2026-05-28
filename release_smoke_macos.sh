@@ -154,6 +154,22 @@ else
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
+# D2. 关键第三方依赖是否打进包（自动）
+# ════════════════════════════════════════════════════════════════════════════
+# Why: build_appstore.sh 早期手写依赖清单漏掉 httpx/keyring，PyInstaller 只警告不报错，
+# 结果上架包一打开设置（CloudTab 导入 httpx）就崩。这里在包内静态搜这些模块，缺一即 fail，
+# 把"漏装依赖"从用户点击时的崩溃提前到冒烟阶段拦下。
+section "D2. 关键 Python 依赖打包校验"
+
+for dep in httpx keyring; do
+    if find "$APP_BUNDLE/Contents" \( -type d -name "$dep" -o -name "${dep}.py" -o -name "${dep}.pyc" \) 2>/dev/null | grep -q .; then
+        pass "$dep 已打进包"
+    else
+        fail "$dep 未打进包 — 检查 build_appstore.sh 依赖安装是否跟随 requirements.txt"
+    fi
+done
+
+# ════════════════════════════════════════════════════════════════════════════
 # E. 干净 container 启动检查（自动）
 # ════════════════════════════════════════════════════════════════════════════
 section "E. 新装机模拟（清空 sandbox container）"

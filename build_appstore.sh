@@ -82,7 +82,13 @@ rm -rf "$VENV_DIR"  # 每次重建 venv（TARGET_ARCH=$TARGET_ARCH）
 $PYTHON -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install --quiet --upgrade pip
-pip install --quiet PySide6 Pillow pymysql  # 不安装 pynput（App Sandbox 不支持输入监控）
+# 按 requirements.txt 安装运行时依赖，只排除 pynput（App Sandbox 不支持输入监控）。
+# Why: 早期这里手写 "PySide6 Pillow pymysql" 漏掉了 httpx/keyring，导致上架包打开设置
+# 时 CloudTab 导入 httpx 直接崩溃。改成跟随 requirements.txt 后不会再因漏装依赖而崩。
+# 用 -r 读过滤后的文件（而非命令替换），避免平台 marker 里的空格被 word-split 破坏。
+APPSTORE_REQ="$VENV_DIR/requirements.appstore.txt"
+grep -vE '^\s*#|^\s*$|^\s*pynput' "$SCRIPT_DIR/requirements.txt" > "$APPSTORE_REQ"
+pip install --quiet -r "$APPSTORE_REQ"
 pip install --quiet pyinstaller
 
 # Pillow 不发布 universal2 wheel，本地默认装到当前架构的单拱 wheel，
@@ -156,6 +162,8 @@ pyinstaller \
     --hidden-import "PySide6.QtWidgets" \
     --hidden-import "PIL" \
     --hidden-import "pymysql" \
+    --hidden-import "httpx" \
+    --hidden-import "keyring" \
     --osx-bundle-identifier "$BUNDLE_ID" \
     main.py
 
