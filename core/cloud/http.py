@@ -20,6 +20,7 @@ import os
 import platform
 import stat
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -138,6 +139,10 @@ class HttpClient:
         self._base_url = base_url.rstrip("/")
         self._access_token: Optional[str] = None
         self._refresh_token_str: Optional[str] = None
+        # 刷新串行化：服务端 refresh token 单次使用（用完即焚），多个后台线程
+        # 共用本 HttpClient，access token 到期时会集体撞 401 并发刷新。无锁时第二个
+        # 线程拿已被消费的旧 token 撞 401 会误清登录态 → 用户"自动掉线"。
+        self._refresh_lock = threading.Lock()
         self._client = httpx.Client(base_url=self._base_url, timeout=_DEFAULT_TIMEOUT, verify=True)
 
     @property
@@ -408,19 +413,42 @@ class HttpClient:
 
         放在 HttpClient 上是因为 _request 的 401 自动重试需要直接调用它,
         避免 HttpClient 反向依赖 AuthClient。AuthClient.refresh_token 直接转发。
+
+        并发安全：服务端 refresh token 单次使用（换一次即作废），多个后台线程共用
+        同一 HttpClient，access token 到期时会并发进入本方法。用 _refresh_lock 串行化，
+        并在拿到锁后做"双重检查"——若等锁期间已有其他线程换到新 access_token，直接
+        复用，绝不再拿已被消费的旧 refresh token 去换（那必然撞 401 → 误清登录态）。
         """
         if not self._refresh_token_str:
             return False
 
-        try:
-            response = self._client.post(
-                "/api/v1/auth/refresh",
-                json={"refresh_token": self._refresh_token_str},
-                timeout=15.0,
-            )
-        except httpx.HTTPError as e:
-            logger.warning(f"Token 刷新网络失败（保留本地 token 待下次重试）: {e}")
-            return False
+        # 锁前快照当前 access_token：用于在拿到锁后判断"是否已被别的线程刷新过"。
+        access_before = self._access_token
+
+        with self._refresh_lock:
+            # 双重检查：等锁期间若 access_token 已被其他线程换新，说明刷新已成功，
+            # 直接复用，不重复消费旧 refresh token。
+            if self._access_token and self._access_token != access_before:
+                return True
+
+            refresh_str = self._refresh_token_str
+            if not refresh_str:
+                return False
+
+            try:
+                response = self._client.post(
+                    "/api/v1/auth/refresh",
+                    json={"refresh_token": refresh_str},
+                    timeout=15.0,
+                )
+            except httpx.HTTPError as e:
+                logger.warning(f"Token 刷新网络失败（保留本地 token 待下次重试）: {e}")
+                return False
+
+            return self._apply_refresh_response(response)
+
+    def _apply_refresh_response(self, response: httpx.Response) -> bool:
+        """处理 /auth/refresh 响应：200 保存新 token；401/403 清登录态。调用方持有 _refresh_lock。"""
 
         if response.status_code == 200:
             try:
