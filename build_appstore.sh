@@ -155,6 +155,8 @@ pyinstaller \
     --add-data "core:core" \
     --add-data "ui:ui" \
     --add-data "utils:utils" \
+    --add-data "sql:sql" \
+    --add-data "i18n_strings:i18n_strings" \
     --add-data "${APPSTORE_PLUGINS_DIR}:plugins" \
     --add-data "i18n.py:." \
     --hidden-import "PySide6.QtCore" \
@@ -164,6 +166,10 @@ pyinstaller \
     --hidden-import "pymysql" \
     --hidden-import "httpx" \
     --hidden-import "keyring" \
+    --hidden-import "AppKit" \
+    --hidden-import "Foundation" \
+    --hidden-import "Cocoa" \
+    --hidden-import "Quartz" \
     --osx-bundle-identifier "$BUNDLE_ID" \
     main.py
 

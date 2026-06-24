@@ -142,14 +142,34 @@ class CloudLifecycleController(QObject):
             logger.warning(f"登录后补建云端同步失败: {e}", exc_info=True)
 
     def teardown_cloud_sync_after_logout(self):
+        """登出：停止并释放云端同步 + 文件同步。
+
+        Why: 两个 service 各自持有 worker QThread，必须在丢弃引用前 stop()，
+        否则线程仍运行时对象被 GC → Qt qFatal("QThread: Destroyed while thread
+        is still running") abort 进程。同时同步清理 ctx 上的引用保持一致。
+        """
         parent = self._parent
-        if parent.cloud_sync_service is None:
-            return
-        try:
-            parent.cloud_sync_service.stop()
-        except Exception as e:
-            logger.warning(f"退出登录后停止云端同步失败: {e}", exc_info=True)
-        finally:
-            parent.cloud_sync_service = None
-            parent._cloud_sync_item_added_connected = False
-            parent._cloud_sync_ui_connected = False
+        ctx = self.ctx
+        if parent.cloud_sync_service is not None:
+            try:
+                parent.cloud_sync_service.stop()
+            except Exception as e:
+                logger.warning(f"退出登录后停止云端同步失败: {e}", exc_info=True)
+            finally:
+                parent.cloud_sync_service = None
+                parent._cloud_sync_item_added_connected = False
+                parent._cloud_sync_ui_connected = False
+                if ctx is not None:
+                    ctx.cloud_sync_service = None
+        # 文件同步此前在登出路径被遗漏：worker 线程会一直运行，直到对象被 GC
+        # 或进程退出时触发 abort。这里一并停止并释放引用。
+        fss = getattr(parent, "file_sync_service", None)
+        if fss is not None:
+            try:
+                fss.stop()
+            except Exception as e:
+                logger.warning(f"退出登录后停止文件同步失败: {e}", exc_info=True)
+            finally:
+                parent.file_sync_service = None
+                if ctx is not None:
+                    ctx.file_sync_service = None

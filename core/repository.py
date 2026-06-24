@@ -119,9 +119,13 @@ class ClipboardRepository:
     # ------------------------------------------------------------------
 
     def get_items(
-        self, page: int = 0, page_size: int = 10, starred_only: bool = False
+        self,
+        page: int = 0,
+        page_size: int = 10,
+        starred_only: bool = False,
+        space_id: Optional[str] = None,
     ) -> Tuple[List[ClipboardItem], int]:
-        return self._query.get_items(page, page_size, starred_only)
+        return self._query.get_items(page, page_size, starred_only, space_id=space_id)
 
     def get_items_full(
         self, page: int = 0, page_size: int = 100

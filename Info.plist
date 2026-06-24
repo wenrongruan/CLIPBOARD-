@@ -40,5 +40,7 @@
     <string>需要辅助功能权限以支持全局粘贴热键。</string>
     <key>NSPasteboardUsageDescription</key>
     <string>需要访问剪贴板以记录复制的文本与图片到本地历史，便于跨设备同步与快速重新粘贴。</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>需要输入监控权限以支持全局热键唤出剪贴板面板。</string>
 </dict>
 </plist>

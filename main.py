@@ -172,7 +172,7 @@ class ClipboardApp:
         self.app.aboutToQuit.connect(flush_settings)
 
         from PySide6.QtGui import QPixmapCache
-        QPixmapCache.setCacheLimit(10240)
+        QPixmapCache.setCacheLimit(32768)  # 缩略图像素缓存上限，单位 KB（32 MB），减少翻页/搜索时重复解码
 
         # 初始化语言设置
         set_language(settings().language)
@@ -607,13 +607,14 @@ class ClipboardApp:
 
     @staticmethod
     def _has_accessibility_permission() -> bool:
-        """macOS: 通过 AXIsProcessTrusted 判断是否拿到辅助功能权限。"""
+        """macOS: 检测「输入监控」权限（pynput 全局热键实际依赖此权限，非辅助功能）。"""
         try:
-            from ApplicationServices import AXIsProcessTrusted
-            return bool(AXIsProcessTrusted())
+            # CGPreflightListenEventAccess 对应 TCC kTCCServiceListenEvent
+            from Quartz import CGPreflightListenEventAccess
+            return bool(CGPreflightListenEventAccess())
         except Exception:
-            # pyobjc 未装或符号缺失,保守认为没权限
-            return False
+            # pyobjc-framework-Quartz 未装或符号缺失时安全降级，让流程继续
+            return True
 
     def _check_hotkey_listener_alive(self):
         """macOS: 3 秒后检查热键监听是否真正在运行"""
@@ -648,9 +649,23 @@ class ClipboardApp:
         msg.addButton("暂时跳过", QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         if msg.clickedButton() == open_btn:
-            QDesktopServices.openUrl(QUrl(
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-            ))
+            # macOS 13+ 使用新格式 URL；12 及以下保留旧格式
+            mac_ver_str = platform.mac_ver()[0]  # 形如 "13.4.1"
+            try:
+                mac_major = int(mac_ver_str.split(".")[0])
+            except (ValueError, IndexError):
+                mac_major = 12
+            if mac_major >= 13:
+                prefs_url = (
+                    "x-apple.systempreferences:com.apple.settings."
+                    "PrivacySecurity.extension?Privacy_ListenEvent"
+                )
+            else:
+                prefs_url = (
+                    "x-apple.systempreferences:com.apple.preference.security"
+                    "?Privacy_ListenEvent"
+                )
+            QDesktopServices.openUrl(QUrl(prefs_url))
 
     def _on_hotkey_pressed(self):
         """热键被按下时触发"""

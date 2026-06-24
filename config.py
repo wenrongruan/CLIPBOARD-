@@ -453,6 +453,12 @@ class SettingsStore:
 
     def flush(self) -> None:
         """手动触发落盘(应用退出时调用)。"""
+        # 先停掉防抖定时器，避免 flush 后定时器触发重复写盘
+        if self._save_timer is not None:
+            try:
+                self._save_timer.stop()
+            except RuntimeError:
+                pass  # Qt 对象已析构，忽略
         with self._lock:
             if not self._dirty:
                 return
@@ -496,7 +502,10 @@ class SettingsStore:
                 self._sync_flush()
                 return
             if self._save_timer is None:
-                self._save_timer = QTimer()
+                # SettingsStore 不是 QObject，无法设 parent。
+                # 改用 QCoreApplication 实例作为 parent，确保事件循环退出时 Qt 托管其生命周期，
+                # 避免无 parent 的 QTimer 在 GC 顺序不确定时产生悬空对象。
+                self._save_timer = QTimer(app)
                 self._save_timer.setSingleShot(True)
                 self._save_timer.timeout.connect(self._deferred_flush)
             if not self._save_timer.isActive():

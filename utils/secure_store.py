@@ -151,7 +151,7 @@ def store_credential(key: str, value: str):
             _set_active_backend("keyring")
             return
         except Exception as e:
-            logger.warning(f"keyring 存储失败，回退到其他方式: {e}")
+            _log_keyring_error("写入", key, e)
 
     if _HAS_DPAPI:
         try:

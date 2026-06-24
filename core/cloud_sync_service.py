@@ -580,7 +580,7 @@ class CloudSyncService(QObject):
         self._worker.quota_warning.connect(self.quota_warning)
         # 显式 QueuedConnection：信号发自 worker 线程，槽要在主线程写 _device_registered
         self._worker.device_registered.connect(
-            lambda: setattr(self, '_device_registered', True), Qt.QueuedConnection
+            self._on_device_registered, Qt.QueuedConnection
         )
         # 用信号槽替代 QMetaObject.invokeMethod + Q_ARG 传递 list
         self._trigger_push.connect(self._worker.do_push, Qt.QueuedConnection)
@@ -764,11 +764,33 @@ class CloudSyncService(QObject):
                 logger.warning("云端同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
                 try:
                     self._worker_thread.terminate()
-                    self._worker_thread.wait(500)
+                    # Why: 必须无限 wait 到线程真正结束才返回。若带超时且超时返回，
+                    # 后续对象析构时 QThread 仍 isRunning() → Qt qFatal abort。
+                    self._worker_thread.wait()
                 except Exception as e:
                     logger.debug(f"terminate worker 线程失败（忽略）: {e}")
 
         logger.info("云端同步服务已停止")
+
+    def __del__(self):
+        """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。
+
+        Why: _worker_thread = QThread(self) 是本对象的 child。若对象在 worker
+        线程仍运行时被 GC（登录态切换重建 service、解释器退出时的 GC 顺序等），
+        Qt 会在 QThread 析构链（~QObject → deleteChildren → ~QThread）里
+        qFatal("QThread: Destroyed while thread is still running") 直接 abort
+        进程——Windows 上表现为 0xc0000409 无提示闪退。这里只保证线程停止；
+        cloud_api 为多个 service 共享，故不在此 close，避免误伤其它 service。
+        """
+        try:
+            t = self.__dict__.get("_worker_thread")
+            if t is not None and t.isRunning():
+                t.quit()
+                if not t.wait(2000):
+                    t.terminate()
+                    t.wait()
+        except Exception:
+            pass
 
     def force_sync(self):
         """强制立即同步(拉取 + 推送)"""
@@ -806,6 +828,12 @@ class CloudSyncService(QObject):
         self._pending_upload_queue.append(item)
 
     # ========== 设备注册 ==========
+
+    @Slot()
+    def _on_device_registered(self) -> None:
+        """worker 线程设备注册成功后，在主线程（QueuedConnection）写入标志位。
+        使用具名槽替代 lambda，避免 lambda 强引用 self 阻止 GC。"""
+        self._device_registered = True
 
     def _register_device(self):
         """向云端注册当前设备（在工作线程执行，避免阻塞启动）"""

@@ -406,10 +406,30 @@ class FileCloudSyncService(QObject):
             logger.warning("文件云同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
             try:
                 self._worker_thread.terminate()
-                self._worker_thread.wait(500)
+                # Why: 无限 wait 到线程真正结束，避免对象析构时 QThread 仍在运行
+                # → Qt qFatal("QThread: Destroyed while thread is still running") abort。
+                self._worker_thread.wait()
             except Exception as e:
                 logger.debug(f"terminate file sync worker 失败（忽略）: {e}")
         logger.info("文件云同步服务已停止")
+
+    def __del__(self):
+        """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。
+
+        Why: _worker_thread = QThread(self) 是本对象的 child。若对象在 worker
+        线程仍运行时被 GC（登出未 teardown、登录态切换、解释器退出 GC 顺序等），
+        Qt 在 ~QThread 里 qFatal abort 进程（Windows 0xc0000409 无提示闪退）。
+        只保证线程停止；cloud_api 为共享资源，不在此 close。
+        """
+        try:
+            t = self.__dict__.get("_worker_thread")
+            if t is not None and t.isRunning():
+                t.quit()
+                if not t.wait(2000):
+                    t.terminate()
+                    t.wait()
+        except Exception:
+            pass
 
     # ---------- 公共 API（供 UI / 其它服务调用） ----------
 

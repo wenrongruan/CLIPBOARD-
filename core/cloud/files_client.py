@@ -179,6 +179,7 @@ class FilesClient:
         last_emit_ts = 0.0
         last_emit = 0
         tmp_path = dest_path + ".part"
+        _success = False
         try:
             with self._http._client.stream(
                 "GET", url,
@@ -209,12 +210,15 @@ class FilesClient:
                             last_emit_ts = now
                             last_emit = total_bytes
             os.replace(tmp_path, dest_path)
+            _success = True
         except httpx.HTTPError as e:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
             raise CloudAPIError(f"OSS 下载网络错误: {e}", 0)
+        finally:
+            if not _success:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
         if progress_cb is not None:
             try:
                 progress_cb(total_bytes, expected or total_bytes)

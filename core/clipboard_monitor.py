@@ -9,7 +9,7 @@ _IS_MACOS = platform.system() == "Darwin"
 # macOS 下 dataChanged 信号可靠，用低频轮询兜底防极端丢失
 _MACOS_FALLBACK_POLL_MS = 3000
 
-from PySide6.QtCore import QObject, Signal, QTimer, Qt
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, Qt, QMetaObject, Q_ARG
 from PySide6.QtGui import QClipboard, QImage
 from PySide6.QtWidgets import QApplication
 
@@ -18,7 +18,6 @@ from .repository import ClipboardRepository
 from .source_app import get_current_source_app
 from config import settings, THUMBNAIL_SIZE
 from utils.hash_utils import compute_content_hash
-from utils.image_utils import create_thumbnail, image_to_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -324,12 +323,47 @@ class ClipboardMonitor(QObject):
             source_app_value, source_title_value,
         )
 
+    def _threadsafe_emit_item_added(self, item) -> None:
+        """线程安全 emit item_added：若已在主线程则直接发射，否则通过 QueuedConnection 投队列。"""
+        from PySide6.QtCore import QCoreApplication
+        if threading.current_thread() is threading.main_thread():
+            self.item_added.emit(item)
+        else:
+            QMetaObject.invokeMethod(
+                self, "_emit_item_added",
+                Qt.QueuedConnection,
+                Q_ARG("QVariant", item),
+            )
+
+    def _threadsafe_emit_error_occurred(self, msg: str) -> None:
+        """线程安全 emit error_occurred：若已在主线程则直接发射，否则通过 QueuedConnection 投队列。"""
+        if threading.current_thread() is threading.main_thread():
+            self.error_occurred.emit(msg)
+        else:
+            QMetaObject.invokeMethod(
+                self, "_emit_error_occurred",
+                Qt.QueuedConnection,
+                Q_ARG(str, msg),
+            )
+
+    @Slot("QVariant")
+    def _emit_item_added(self, item):
+        """主线程转发槽：供后台线程通过 QMetaObject.invokeMethod 投递 item_added 信号。"""
+        self.item_added.emit(item)
+
+    @Slot(str)
+    def _emit_error_occurred(self, msg: str):
+        """主线程转发槽：供后台线程通过 QMetaObject.invokeMethod 投递 error_occurred 信号。"""
+        self.error_occurred.emit(msg)
+
     def _process_image_background(self, raw_bytes: bytes, width: int, height: int, s,
                                    source_app_value: str = "", source_title_value: str = ""):
         """后台线程：PNG 编码、缩略图生成、数据库写入"""
         try:
-            # 延迟导入 PIL，缩短冷启动时间
+            # 延迟导入 PIL 和 image_utils，缩短冷启动时间，且仅在后台线程首次使用时加载
             from PIL import Image
+            from utils.image_utils import create_thumbnail, image_to_bytes
+
             pil_img = Image.frombytes("RGBA", (width, height), raw_bytes)
             image_data = image_to_bytes(pil_img, format="PNG")
 
@@ -350,7 +384,7 @@ class ClipboardMonitor(QObject):
                 try:
                     self.repository.touch_item(existing.id, now_ms)
                     existing.created_at = now_ms
-                    self.item_added.emit(existing)
+                    self._threadsafe_emit_item_added(existing)
                 except Exception as e:
                     logger.warning(f"重复图片置顶失败: {e}")
                 return
@@ -380,11 +414,11 @@ class ClipboardMonitor(QObject):
             self._maybe_cleanup()
 
             logger.info(f"保存图片成功: {width}x{height}")
-            self.item_added.emit(item)
+            self._threadsafe_emit_item_added(item)
 
         except Exception as e:
             logger.error(f"后台处理图片失败: {e}")
-            self.error_occurred.emit(f"图片保存失败: {e}")
+            self._threadsafe_emit_error_occurred(f"图片保存失败: {e}")
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
         if isinstance(item, TextClipboardItem) and item.text_content:

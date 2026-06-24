@@ -27,7 +27,7 @@ OPTIONS = {
     'plist': {
         'CFBundleName': '共享剪贴板',
         'CFBundleDisplayName': '共享剪贴板',
-        'CFBundleIdentifier': 'com.sharedclipboard.app',
+        'CFBundleIdentifier': 'com.wenrongruan.sharedclipboard',
         'CFBundleVersion': '3.3.3',
         'CFBundleShortVersionString': '3.3.3',
         'LSUIElement': True,  # 作为菜单栏应用运行，不显示在 Dock

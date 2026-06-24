@@ -43,19 +43,41 @@ class ClipboardQuery:
     # ------------------------------------------------------------------
 
     def get_items(
-        self, page: int = 0, page_size: int = 10, starred_only: bool = False
+        self,
+        page: int = 0,
+        page_size: int = 10,
+        starred_only: bool = False,
+        space_id: Optional[str] = None,
     ) -> Tuple[List[ClipboardItem], int]:
+        """分页查询列表。
+
+        space_id 语义（与 search/get_timeline 保持一致）：
+          - None  → 个人空间：WHERE space_id IS NULL
+          - ""    → 不过滤，返回全部空间的条目
+          - 其他  → 按具体 space_id 过滤
+        """
         def operation(conn) -> Tuple[List[ClipboardItem], int]:
             offset = page * page_size
 
-            # 获取总数
-            count_sql = "SELECT COUNT(*) FROM clipboard_items"
+            # 构造 WHERE 条件
+            clauses: List[str] = []
+            params_where: List = []
             if starred_only:
-                count_sql += " WHERE is_starred = 1"
-            total = self._dao._scalar(conn, count_sql)
+                clauses.append("is_starred = 1")
+            if space_id is None:
+                clauses.append("space_id IS NULL")
+            elif space_id != "":
+                clauses.append("space_id = ?")
+                params_where.append(space_id)
+            # space_id == "" → 不追加任何 space 过滤，返回全部空间
+
+            where_clause = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+            # 获取总数（条件与分页查询完全一致）
+            count_sql = f"SELECT COUNT(*) FROM clipboard_items {where_clause}"
+            total = self._dao._scalar(conn, count_sql, tuple(params_where))
 
             # 获取分页数据（不加载完整图片数据以提高性能）
-            where_clause = "WHERE is_starred = 1" if starred_only else ""
             sql = f"""
                 SELECT {ClipboardDAO._SELECT_FIELDS_NO_IMAGE}
                 FROM clipboard_items
@@ -63,7 +85,7 @@ class ClipboardQuery:
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
             """
-            rows = self._dao._fetchall(conn, sql, (page_size, offset))
+            rows = self._dao._fetchall(conn, sql, tuple(params_where) + (page_size, offset))
             items = [ClipboardItem.from_db_row(row) for row in rows]
             return items, total
 

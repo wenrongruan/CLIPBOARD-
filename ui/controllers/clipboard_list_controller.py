@@ -90,14 +90,15 @@ class ClipboardListController(QObject):
                 )
                 total = len(items)
             else:
+                # _current_space_id 语义：None = 显示全部空间；具体值 = 过滤到该空间。
+                # get_items 的 space_id 语义：None = 仅个人空间(IS NULL)；"" = 全部空间。
+                # 因此 controller 的 None 必须翻译为 ""，具体值原样透传。
+                get_space_id = "" if self._current_space_id is None else self._current_space_id
                 items, total = self.repository.get_items(
                     self._current_page, self._page_size,
-                    starred_only=self._starred_only
+                    starred_only=self._starred_only,
+                    space_id=get_space_id,
                 )
-                if self._current_space_id is not None:
-                    target = self._current_space_id
-                    items = [i for i in items if (i.space_id or None) == target]
-                    total = len(items)
 
             self._items = items
             self._total_pages = max(1, (total + self._page_size - 1) // self._page_size)

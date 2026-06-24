@@ -43,7 +43,7 @@ jobs:
           path: dist/SharedClipboard.exe
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
       - name: Checkout code
@@ -67,14 +67,20 @@ jobs:
         run: |
           pyinstaller --onefile --windowed \
             --name "共享剪贴板" \
-            --osx-bundle-identifier "com.sharedclipboard.app" \
+            --osx-bundle-identifier "com.wenrongruan.sharedclipboard" \
             --add-data "core:core" \
             --add-data "ui:ui" \
             --add-data "utils:utils" \
+            --add-data "sql:sql" \
+            --add-data "i18n_strings:i18n_strings" \
             --hidden-import "PySide6.QtCore" \
             --hidden-import "PySide6.QtGui" \
             --hidden-import "PySide6.QtWidgets" \
             --hidden-import "PIL" \
+            --hidden-import "AppKit" \
+            --hidden-import "Foundation" \
+            --hidden-import "Cocoa" \
+            --hidden-import "Quartz" \
             main.py
           # 替换 Info.plist 以隐藏 Dock 图标 (LSUIElement)
           cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"

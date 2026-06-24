@@ -151,21 +151,30 @@ class EntitlementService(QObject):
 
     def refresh_async(self) -> None:
         """后台刷新；同一时刻只允许一条刷新线程。"""
+        _emit_ent = None
+        _thread = None
         with self._lock:
             if self._refresh_thread and self._refresh_thread.is_alive():
                 return
             if self._cloud_api is None or not self._cloud_api.is_authenticated:
-                # 未登录：置为 free；无后台请求
-                self._apply_locked(Entitlement(
+                # 未登录：置为 free；无后台请求。
+                # 注意：_apply_locked 返回是否变化，不在锁内 emit，用局部变量记录。
+                free_ent = Entitlement(
                     plan=Plan.FREE, status="inactive", files_enabled=False,
                     fetched_at=int(time.time()),
-                ))
-                return
-            t = threading.Thread(
-                target=self._do_refresh, name="EntitlementRefresh", daemon=True,
-            )
-            self._refresh_thread = t
-        t.start()
+                )
+                if self._apply_locked(free_ent):
+                    _emit_ent = free_ent
+            else:
+                _thread = threading.Thread(
+                    target=self._do_refresh, name="EntitlementRefresh", daemon=True,
+                )
+                self._refresh_thread = _thread
+        # 锁外：emit 或启动线程（两者互斥，不会同时非 None）
+        if _emit_ent is not None:
+            self.entitlement_changed.emit(_emit_ent)
+        if _thread is not None:
+            _thread.start()
 
     def invalidate(self) -> None:
         """登出时调用：清空内存与持久化缓存。"""
@@ -177,12 +186,16 @@ class EntitlementService(QObject):
     def record_local_upload(self, size: int) -> None:
         """乐观更新本地 files_used_bytes，避免连续上传时本地预检过于乐观。
         真实用量以下次 refresh_async 的服务端返回为准。"""
+        _emit_ent = None
         with self._lock:
             new = replace(
                 self._current,
                 files_used_bytes=max(0, self._current.files_used_bytes + int(size)),
             )
-            self._apply_locked(new)
+            if self._apply_locked(new):
+                _emit_ent = new
+        if _emit_ent is not None:
+            self.entitlement_changed.emit(_emit_ent)
 
     # ---------- internal ----------
 
@@ -246,24 +259,32 @@ class EntitlementService(QObject):
             can_share_link=can_share_link,
             is_team_owner=is_team_owner,
         )
+        _emit_needed = False
         with self._lock:
-            self._apply_locked(ent)
+            _emit_needed = self._apply_locked(ent)
+        # 锁外 emit：_do_refresh 在后台线程执行，持锁时 emit 会从非主线程触发槽函数
+        if _emit_needed:
+            self.entitlement_changed.emit(ent)
 
     def _extend_grace_on_error(self) -> None:
         """网络失败时不动 plan / status，仅重设 offline_grace_until（若从未联网过则置 0）。"""
+        emit_ent = None
         with self._lock:
             cur = self._current
             if cur.fetched_at == 0:
                 return
             # grace 基于上次成功时间，不因失败延长；这里仅 emit 给 UI 刷一下显示
-            self.entitlement_changed.emit(cur)
+            emit_ent = cur
+        # 锁外 emit，避免持 RLock 期间从后台线程触发槽函数导致死锁
+        if emit_ent is not None:
+            self.entitlement_changed.emit(emit_ent)
 
-    def _apply_locked(self, ent: Entitlement) -> None:
+    def _apply_locked(self, ent: Entitlement) -> bool:
+        """更新内存 + 持久化；返回 True 表示值发生变化（调用方应在锁外 emit）。"""
         changed = ent != self._current
         self._current = ent
         self._persist_locked(ent)
-        if changed:
-            self.entitlement_changed.emit(ent)
+        return changed
 
     def _persist_locked(self, ent: Optional[Entitlement]) -> None:
         if self._repository is None:
