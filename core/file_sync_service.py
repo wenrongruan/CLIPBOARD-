@@ -296,6 +296,26 @@ class _FileSyncWorker(QObject):
                 url, dest,
                 progress_cb=lambda done, total: self.download_progress.emit(local_id, done, total),
             )
+
+            import os
+            import hashlib
+            if os.path.getsize(dest) != f.size_bytes:
+                os.remove(dest)
+                self.download_finished.emit(local_id, False, "下载文件大小不匹配")
+                return
+            
+            h = hashlib.sha256()
+            with open(dest, "rb") as fp:
+                while True:
+                    chunk = fp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            if h.hexdigest() != f.content_sha256:
+                os.remove(dest)
+                self.download_finished.emit(local_id, False, "下载文件校验和不匹配")
+                return
+
             self.repo.update_meta(
                 local_id, local_path=dest, sync_state=FileSyncState.SYNCED.value,
             )
@@ -400,27 +420,18 @@ class FileCloudSyncService(QObject):
         self.persist_sync_cursor()
         self._worker_thread.requestInterruption()
         self._worker_thread.quit()
-        # 同 cloud_sync_service.stop：3s 等待 + terminate 兜底，避免退出时
-        # OSS / httpx 阻塞导致进程无法收尾。
+        # 同 cloud_sync_service.stop：3s 等待，避免退出时 OSS / httpx 阻塞导致卡死
         if not self._worker_thread.wait(3000):
             logger.warning("文件云同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
             try:
                 self._worker_thread.terminate()
-                # Why: 无限 wait 到线程真正结束，避免对象析构时 QThread 仍在运行
-                # → Qt qFatal("QThread: Destroyed while thread is still running") abort。
                 self._worker_thread.wait()
             except Exception as e:
                 logger.debug(f"terminate file sync worker 失败（忽略）: {e}")
         logger.info("文件云同步服务已停止")
 
     def __del__(self):
-        """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。
-
-        Why: _worker_thread = QThread(self) 是本对象的 child。若对象在 worker
-        线程仍运行时被 GC（登出未 teardown、登录态切换、解释器退出 GC 顺序等），
-        Qt 在 ~QThread 里 qFatal abort 进程（Windows 0xc0000409 无提示闪退）。
-        只保证线程停止；cloud_api 为共享资源，不在此 close。
-        """
+        """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。"""
         try:
             t = self.__dict__.get("_worker_thread")
             if t is not None and t.isRunning():

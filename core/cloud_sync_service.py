@@ -227,12 +227,13 @@ class _SyncWorker(QObject):
                 for item in batch
                 if item.id and item.content_hash in hash_to_server_id
             ]
-            self.repository.set_cloud_ids_bulk(cloud_id_pairs)
 
             for item in image_items:
                 server_id = hash_to_server_id.get(item.content_hash)
                 if server_id:
                     self._upload_image_for_item(item, server_id)
+
+            self.repository.set_cloud_ids_bulk(cloud_id_pairs)
 
             uploaded_count = len(server_items) if server_items else len(batch)
             self.push_done.emit(space_key, uploaded_count)
@@ -415,9 +416,14 @@ class _SyncWorker(QObject):
         try:
             from utils.image_utils import compress_for_cloud
             compressed = compress_for_cloud(item.image_data)
-            self.cloud_api.upload_image(server_id, compressed)
-        except CloudAPIError as e:
-            logger.warning(f"图片上传失败 (server_id={server_id}): {e}")
+        except Exception as e:
+            logger.warning(f"图片压缩失败，放弃上传该图片数据 (id={item.id}): {e}")
+            return
+        
+        # 检查返回值，如果失败则抛出 CloudAPIError 供外层 do_push 捕获，触发重试
+        if not self.cloud_api.upload_image(server_id, compressed):
+            from core.cloud_api import CloudAPIError
+            raise CloudAPIError(f"图片上传被服务端拒绝或网络错误 (server_id={server_id})", 0)
 
     @Slot()
     def do_starred_sync(self):
@@ -750,22 +756,13 @@ class CloudSyncService(QObject):
             self._persist_cursor()
 
         if self._worker_thread.isRunning():
-            # 先请求中断 + 关闭 httpx 客户端，强行解除阻塞中的网络 I/O，否则 wait 会被耗尽
+            # 请求中断，让 worker 安全退出
             self._worker_thread.requestInterruption()
-            try:
-                self.cloud_api.close()
-            except Exception as e:
-                logger.debug(f"关闭 cloud_api 客户端失败（忽略）: {e}")
             self._worker_thread.quit()
-            # 3s 让 worker 主动退出；若仍卡在 socket 上则 terminate 兜底，
-            # 防止 atexit join 让进程不退（也避免日志里出现 "wrapped C/C++
-            # object has been deleted" 这类析构期访问问题）。
             if not self._worker_thread.wait(3000):
                 logger.warning("云端同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
                 try:
                     self._worker_thread.terminate()
-                    # Why: 必须无限 wait 到线程真正结束才返回。若带超时且超时返回，
-                    # 后续对象析构时 QThread 仍 isRunning() → Qt qFatal abort。
                     self._worker_thread.wait()
                 except Exception as e:
                     logger.debug(f"terminate worker 线程失败（忽略）: {e}")
@@ -773,15 +770,7 @@ class CloudSyncService(QObject):
         logger.info("云端同步服务已停止")
 
     def __del__(self):
-        """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。
-
-        Why: _worker_thread = QThread(self) 是本对象的 child。若对象在 worker
-        线程仍运行时被 GC（登录态切换重建 service、解释器退出时的 GC 顺序等），
-        Qt 会在 QThread 析构链（~QObject → deleteChildren → ~QThread）里
-        qFatal("QThread: Destroyed while thread is still running") 直接 abort
-        进程——Windows 上表现为 0xc0000409 无提示闪退。这里只保证线程停止；
-        cloud_api 为多个 service 共享，故不在此 close，避免误伤其它 service。
-        """
+        """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。"""
         try:
             t = self.__dict__.get("_worker_thread")
             if t is not None and t.isRunning():

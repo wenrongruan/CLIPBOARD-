@@ -117,9 +117,20 @@ class SyncClient:
         if not self._http._validate_storage_url(url, self._http._ALLOWED_DOWNLOAD_DOMAINS):
             return None
         try:
-            resp = self._http._client.get(url, timeout=30.0)
-            if resp.status_code == 200:
-                return resp.content
+            with self._http._client.stream("GET", url, timeout=30.0) as resp:
+                if resp.status_code == 200:
+                    ct = resp.headers.get("Content-Type", "")
+                    if not ct.startswith("image/") and ct != "application/octet-stream":
+                        logger.warning(f"下载的不是图片 (Content-Type: {ct})")
+                        return None
+                    
+                    data = bytearray()
+                    for chunk in resp.iter_bytes(chunk_size=8192):
+                        data.extend(chunk)
+                        if len(data) > 20 * 1024 * 1024:  # 20MB limit
+                            logger.warning(f"图片下载超过 20MB 限制 (item_id={item_id})")
+                            return None
+                    return bytes(data)
         except httpx.HTTPError as e:
             logger.warning(f"图片下载失败 (item_id={item_id}): {e}")
         return None

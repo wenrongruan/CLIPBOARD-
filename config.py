@@ -239,6 +239,9 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         files_auto_download=bool(data.get("files_auto_download", False)),
         files_max_autodownload_mb=int(data.get("files_max_autodownload_mb", 200)),
         capture_source_title=bool(data.get("capture_source_title", False)),
+        excluded_source_apps=tuple(data.get("excluded_source_apps", [])),
+        onboarding_done=bool(data.get("onboarding_done", False)),
+        cloud_scope_explainer_shown=bool(data.get("cloud_scope_explainer_shown", False)),
     )
     return snapshot, extras
 
@@ -279,6 +282,9 @@ def _snapshot_to_dict(s: AppSettings, extras: dict) -> dict:
         "files_auto_download": s.files_auto_download,
         "files_max_autodownload_mb": s.files_max_autodownload_mb,
         "capture_source_title": s.capture_source_title,
+        "excluded_source_apps": list(s.excluded_source_apps),
+        "onboarding_done": s.onboarding_done,
+        "cloud_scope_explainer_shown": s.cloud_scope_explainer_shown,
     })
     return d
 
@@ -481,13 +487,15 @@ class SettingsStore:
         的标准模式即可消除这类陷阱。
         """
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            tmp_path = path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             if not IS_WINDOWS:
                 try:
-                    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+                    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
                 except OSError:
                     pass
+            os.replace(tmp_path, path)
         except IOError as e:
             logger.error(f"配置写入失败 ({path}): {e}")
             with self._lock:
