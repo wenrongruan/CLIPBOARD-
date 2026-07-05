@@ -150,21 +150,25 @@ class DatabaseManager(AbstractDatabaseManager):
         self._run_file_migrations()
 
     def _run_file_migrations(self) -> None:
-        """执行 sql/migrations 下的幂等迁移。失败不致命（记日志后继续）。"""
+        """执行 sql/migrations 下的幂等迁移。失败则抛出异常，防止数据库结构不完整。"""
         try:
             from core.db_migrations import run_migrations
             migrations_dir = Path(__file__).parent.parent / "sql" / "migrations"
             if not migrations_dir.exists():
                 return
-            with self.get_connection() as conn:
+            
+            def _do_migration(conn):
                 run_migrations(
                     conn,
                     migrations_dir,
                     dialect="sqlite",
                     db_path=Path(self.db_path),
                 )
+                
+            self.execute_with_retry(_do_migration)
         except Exception:
-            logger.exception("执行文件迁移失败（SQLite）")
+            logger.exception("执行文件迁移失败（SQLite），数据库可能处于不完整状态。")
+            raise
 
     def _migrate_schema(self, conn):
         """执行 Schema 迁移"""
