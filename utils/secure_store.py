@@ -106,8 +106,9 @@ def _make_blob(data: bytes) -> "DATA_BLOB":
     """创建 DATA_BLOB，正确处理 ctypes 指针"""
     blob = DATA_BLOB()
     blob.cbData = len(data)
-    blob.pbData = ctypes.cast(ctypes.create_string_buffer(data, len(data)),
-                              ctypes.POINTER(ctypes.c_char))
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob.pbData = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
+    blob._keep_alive = buf  # 维持强引用，防止被 GC 提前回收
     return blob
 
 

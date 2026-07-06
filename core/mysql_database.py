@@ -399,12 +399,30 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         for attempt in range(max_retries):
             try:
                 with self.get_connection() as conn:
-                    result = operation(conn)
-                    conn.commit()
-                    return result
+                    try:
+                        result = operation(conn)
+                        conn.commit()
+                        return result
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        raise
             except pymysql.OperationalError as e:
                 last_error = e
                 error_code = e.args[0] if e.args else 0
+                # 2006/2013: Connection lost. Discard thread connection so retry can reconnect.
+                if error_code in (2006, 2013):
+                    try:
+                        self._discard_thread_conn(conn)
+                    except Exception:
+                        pass
+                    if hasattr(self._tls, "conn"):
+                        try:
+                            delattr(self._tls, "conn")
+                        except Exception:
+                            pass
                 # 1205: Lock wait timeout, 1213: Deadlock
                 if error_code in (1205, 1213, 2006, 2013):
                     wait_time = (2**attempt) * 0.1 + random.uniform(0, 0.1)

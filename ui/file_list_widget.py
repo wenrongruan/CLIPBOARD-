@@ -447,13 +447,8 @@ class FileListWidget(QWidget):
         )
         if reply != QMessageBox.Yes:
             return
-        # 云端删（同步调用，失败仅提示；实际生产可放到后台）
-        if f.cloud_id and self.cloud_api:
-            try:
-                self.cloud_api.files_delete(f.cloud_id)
-            except Exception as e:
-                logger.warning(f"云端删除失败: {e}")
-        # 本地
+
+        # 本地状态更新（主线程即时完成）
         try:
             if f.local_path and os.path.exists(f.local_path):
                 os.unlink(f.local_path)
@@ -461,3 +456,16 @@ class FileListWidget(QWidget):
             pass
         self.repo.mark_deleted(f.id)
         self.model.remove_by_local_id(f.id)
+
+        # 异步执行云端删除，防止卡死 UI
+        cloud_api = self.cloud_api
+        cloud_id = f.cloud_id
+        if cloud_id and cloud_api:
+            import threading
+            def run_delete():
+                try:
+                    cloud_api.files_delete(cloud_id)
+                except Exception as e:
+                    logger.warning(f"云端删除失败: {e}")
+            
+            threading.Thread(target=run_delete, daemon=True).start()

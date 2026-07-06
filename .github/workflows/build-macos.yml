@@ -34,7 +34,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name "SharedClipboard" --icon "NONE" --add-data "core;core" --add-data "ui;ui" --add-data "utils;utils" --hidden-import "PySide6.QtCore" --hidden-import "PySide6.QtGui" --hidden-import "PySide6.QtWidgets" --hidden-import "PIL" main.py
+          pyinstaller --onefile --windowed --name "SharedClipboard" --icon "NONE" --add-data "core;core" --add-data "ui;ui" --add-data "utils;utils" --add-data "sql;sql" --add-data "i18n_strings;i18n_strings" --hidden-import "PySide6.QtCore" --hidden-import "PySide6.QtGui" --hidden-import "PySide6.QtWidgets" --hidden-import "PIL" main.py
 
       - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
@@ -87,10 +87,10 @@ jobs:
 
       - name: Sign and prepare app
         run: |
+          # 移除隔离属性（必须在签名之前执行，否则会擦除签名）
+          xattr -cr "dist/共享剪贴板.app"
           # Ad-hoc 签名，避免 Gatekeeper "已损坏" 提示
           codesign --force --deep --sign - "dist/共享剪贴板.app"
-          # 移除隔离属性
-          xattr -cr "dist/共享剪贴板.app"
 
       - name: Create DMG
         run: |
@@ -159,6 +159,8 @@ jobs:
             --add-data "ui:ui" \
             --add-data "utils:utils" \
             --add-data "icons:icons" \
+            --add-data "sql:sql" \
+            --add-data "i18n_strings:i18n_strings" \
             --hidden-import "PySide6.QtCore" \
             --hidden-import "PySide6.QtGui" \
             --hidden-import "PySide6.QtWidgets" \

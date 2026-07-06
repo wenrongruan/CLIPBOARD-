@@ -295,13 +295,15 @@ class EdgeHiddenWindow(QWidget):
 
         if trigger_zone.contains(cursor_pos):
             if not self._is_visible or not self.geometry().intersects(cursor_screen_rect):
-                self._slide_in(cursor_screen_rect)
+                self._slide_in(cursor_screen_rect, activate=False)
         else:
             if self._is_visible and not self._is_pinned:
                 if not self.geometry().contains(cursor_pos):
+                    if self.isActiveWindow():
+                        return
                     self._slide_out()
 
-    def _slide_in(self, screen_rect: Optional[QRect] = None):
+    def _slide_in(self, screen_rect: Optional[QRect] = None, activate: bool = False):
         if self._animation.state() == QPropertyAnimation.Running:
             self._animation.stop()
 
@@ -324,7 +326,8 @@ class EdgeHiddenWindow(QWidget):
         self._is_visible = True
         self._mouse_check_timer.setInterval(100)  # 窗口可见时快速检测
         self.raise_()
-        self.activateWindow()
+        if activate:
+            self.activateWindow()
 
     def _slide_out(self):
         if self._is_pinned or self._is_floating:
@@ -350,7 +353,7 @@ class EdgeHiddenWindow(QWidget):
         # 启动显示保护期，防止立即隐藏
         self._show_protection = True
         self._protection_timer.start(1500)  # 1.5秒保护期
-        self._slide_in()
+        self._slide_in(activate=True)
 
     def hide_window(self):
         self._is_pinned = False
@@ -366,7 +369,7 @@ class EdgeHiddenWindow(QWidget):
         # 鼠标进入窗口时确保显示
         self._show_protection = False  # 鼠标进入后取消保护期
         if not self._is_visible:
-            self._slide_in()
+            self._slide_in(activate=False)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -377,6 +380,8 @@ class EdgeHiddenWindow(QWidget):
 
     def _check_should_hide(self):
         if self._is_pinned or self._show_protection:
+            return
+        if self.isActiveWindow():
             return
 
         cursor_pos = QCursor.pos()

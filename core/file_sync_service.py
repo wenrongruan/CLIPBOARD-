@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections import deque
 from typing import Optional
@@ -85,7 +86,7 @@ class _FileSyncWorker(QObject):
                 if cid > max_id:
                     max_id = cid
                 sha = srv.get("content_sha256", "") or ""
-                if not sha:
+                if not sha or not re.match(r"^[a-fA-F0-9]{64}$", sha):
                     continue
                 is_deleted = bool(srv.get("is_deleted", False))
                 existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)

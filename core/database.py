@@ -333,9 +333,16 @@ class DatabaseManager(AbstractDatabaseManager):
         for attempt in range(max_retries):
             try:
                 with self.get_connection() as conn:
-                    result = operation(conn)
-                    conn.commit()
-                    return result
+                    try:
+                        result = operation(conn)
+                        conn.commit()
+                        return result
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        raise
             except sqlite3.OperationalError as e:
                 last_error = e
                 error_msg = str(e).lower()

@@ -68,6 +68,11 @@ class CloudLifecycleController(QObject):
                     parent.file_sync_service.start()
                 except Exception as e:
                     logger.warning(f"文件云同步启动失败: {e}", exc_info=True)
+            if self.ctx is not None:
+                self.ctx.cloud_api = parent.cloud_api
+                self.ctx.entitlement_service = parent.entitlement_service
+                self.ctx.file_repository = parent.file_repository
+                self.ctx.file_sync_service = parent.file_sync_service
         except Exception as e:
             logger.warning(f"登录后补建文件同步栈失败: {e}", exc_info=True)
             return
@@ -137,6 +142,9 @@ class CloudLifecycleController(QObject):
                 )
                 parent._cloud_sync_ui_connected = True
 
+            if self.ctx is not None:
+                self.ctx.cloud_api = parent.cloud_api
+                self.ctx.cloud_sync_service = parent.cloud_sync_service
             QTimer.singleShot(0, parent.cloud_sync_service.start)
         except Exception as e:
             logger.warning(f"登录后补建云端同步失败: {e}", exc_info=True)
@@ -173,3 +181,11 @@ class CloudLifecycleController(QObject):
                 parent.file_sync_service = None
                 if ctx is not None:
                     ctx.file_sync_service = None
+        
+        # 清理 parent 与 AppContext 的其余凭证/文件服务缓存，防止旧实例残留
+        parent.entitlement_service = None
+        parent.file_repository = None
+        if ctx is not None:
+            ctx.cloud_api = None
+            ctx.entitlement_service = None
+            ctx.file_repository = None
