@@ -52,6 +52,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VER=$(cd "$SCRIPT_DIR" && python3 -c "from config import APP_VERSION; print(APP_VERSION)" 2>/dev/null || echo "0.0.0")
 # Build 号优先读环境变量 BUILD_NUMBER，否则用时间戳
 BUILD_NUM="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
+PROFILE_HELPER="$SCRIPT_DIR/scripts/find_appstore_profile.py"
+APPSTORE_PROFILE_PATH="${APPSTORE_PROFILE_PATH:-}"
+APPSTORE_PROFILE_DIR="${APPSTORE_PROFILE_DIR:-}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 step() { echo -e "\n${GREEN}[$1/7]${NC} $2"; }
@@ -74,6 +77,7 @@ echo "Python: $PY_VER"
 
 echo "应用名称: ${APP_NAME}"
 echo "Bundle ID: ${BUNDLE_ID}"
+[ -f "$PROFILE_HELPER" ] || fail "缺少 Profile 查找工具: $PROFILE_HELPER"
 
 # ─── [2/7] 创建虚拟环境并安装依赖 ───────────────────────────────────────────────
 step 2 "创建虚拟环境并安装依赖"
@@ -219,20 +223,33 @@ add_or_set_plist_bool "NSRequiresAquaSystemAppearance" "false"
 add_or_set_plist_str "NSHumanReadableCopyright" "Copyright © 2024. All rights reserved."
 add_or_set_plist_str "NSPasteboardUsageDescription" "需要访问剪贴板以记录复制的文本与图片到本地历史，便于跨设备同步与快速重新粘贴。"
 add_or_set_plist_str "NSAccessibilityUsageDescription" "需要辅助功能权限以支持全局粘贴热键。"
+add_or_set_plist_str "NSInputMonitoringUsageDescription" "需要输入监控权限以支持全局热键唤出剪贴板面板。"
 add_or_set_plist_str "NSAppleEventsUsageDescription" "需要通过 Apple Events 访问系统剪贴板服务。"
 add_or_set_plist_str "NSLocalNetworkUsageDescription" "共享剪贴板可通过局域网连接 MySQL 数据库，实现多设备剪贴板同步共享。"
 echo "已注入隐私用途说明与 LSUIElement"
 
-# 嵌入 Provisioning Profile（用数组展开 glob，避免引号内 glob 不展开）
-profiles=(*.provisionprofile)
-if [ -e "${profiles[0]}" ]; then
-    PROFILE="${profiles[0]}"
+# 嵌入 Provisioning Profile：优先显式路径，其次自动扫描本地 macOS App Store profiles。
+PROFILE=""
+if [ -n "$APPSTORE_PROFILE_PATH" ] && [ -f "$APPSTORE_PROFILE_PATH" ]; then
+    PROFILE="$APPSTORE_PROFILE_PATH"
+else
+    profile_cmd=(python3 "$PROFILE_HELPER" --bundle-id "$BUNDLE_ID" --team-id "$TEAM_ID")
+    if [ -n "$APPSTORE_PROFILE_DIR" ]; then
+        profile_cmd+=("$APPSTORE_PROFILE_DIR")
+    fi
+    if PROFILE=$(cd "$SCRIPT_DIR" && "${profile_cmd[@]}" 2>/dev/null); then
+        :
+    fi
+fi
+
+if [ -n "$PROFILE" ] && [ -f "$PROFILE" ]; then
     cp "$PROFILE" "${APP_BUNDLE}/Contents/embedded.provisionprofile"
     echo "已嵌入 Provisioning Profile: $PROFILE"
 elif [ -f "${APP_BUNDLE}/Contents/embedded.provisionprofile" ]; then
     echo "embedded.provisionprofile 已存在"
 else
-    warn "未找到 .provisionprofile 文件！App Store 上传将失败，请手动复制到 ${APP_BUNDLE}/Contents/embedded.provisionprofile"
+    warn "未找到匹配 ${BUNDLE_ID} 的 macOS App Store provisioning profile。"
+    warn "可通过 APPSTORE_PROFILE_PATH=/path/to/profile.provisionprofile 显式指定。"
 fi
 
 # 清除 quarantine 扩展属性（浏览器下载文件会自动带此属性，App Store 不允许）
@@ -337,13 +354,10 @@ echo ""
 echo "  方式一：Transporter（推荐，图形界面）"
 echo "    从 Mac App Store 安装 Transporter，拖入 ${PKG_OUTPUT} 上传"
 echo ""
-echo "  方式二：命令行上传（altool --upload-app 已停用）"
-echo "    # Mac App Store (.pkg) → 使用 altool --upload-package 或 Transporter"
-echo "    xcrun altool --upload-package ${PKG_OUTPUT} \\"
-echo "        --type macos --bundle-id ${BUNDLE_ID} \\"
-echo "        --bundle-version ${BUILD_NUM} --bundle-short-version-string ${VER} \\"
-echo "        --apple-id YOUR_APP_APPLE_ID \\"
-echo "        --apiKey YOUR_API_KEY --apiIssuer YOUR_ISSUER_ID"
+echo "  方式二：仓库内命令行上传脚本"
+echo "    APPLE_APP_PASSWORD='xxxx-xxxx-xxxx-xxxx' ./upload_appstore.sh ${PKG_OUTPUT}"
+echo "    # 或"
+echo "    ASC_API_KEY='xxx' ASC_API_ISSUER='xxx' ./upload_appstore.sh ${PKG_OUTPUT}"
 echo ""
 echo "  DevID 分发版请改用 notarytool 公证（本脚本不产出 DevID 版）："
 echo "    xcrun notarytool submit YourApp.zip --keychain-profile \"AC_PASSWORD\" --wait"

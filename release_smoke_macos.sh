@@ -20,7 +20,8 @@ APP_BUNDLE="${1:-dist/共享剪贴板.app}"
 BUNDLE_ID="com.wenrongruan.sharedclipboard"
 CONTAINER_PATH="$HOME/Library/Containers/${BUNDLE_ID}"
 APP_SUPPORT_PATH="$HOME/Library/Application Support/SharedClipboard"
-EXPECTED_VERSION="3.3.2"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EXPECTED_VERSION=$(cd "$SCRIPT_DIR" && python3 -c "from config import APP_VERSION; print(APP_VERSION)" 2>/dev/null || echo "0.0.0")
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 PASS_COUNT=0; FAIL_COUNT=0; WARN_COUNT=0
@@ -56,6 +57,7 @@ ver_short=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$INF
 ver_build=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$INFO_PLIST" 2>/dev/null)
 flavor=$(/usr/libexec/PlistBuddy -c "Print :SCBuildFlavor" "$INFO_PLIST" 2>/dev/null)
 pasteboard_desc=$(/usr/libexec/PlistBuddy -c "Print :NSPasteboardUsageDescription" "$INFO_PLIST" 2>/dev/null)
+input_monitor_desc=$(/usr/libexec/PlistBuddy -c "Print :NSInputMonitoringUsageDescription" "$INFO_PLIST" 2>/dev/null)
 
 [ "$ver_short" = "$EXPECTED_VERSION" ] \
     && pass "CFBundleShortVersionString = $ver_short" \
@@ -67,6 +69,9 @@ pasteboard_desc=$(/usr/libexec/PlistBuddy -c "Print :NSPasteboardUsageDescriptio
 [ -n "$pasteboard_desc" ] \
     && pass "NSPasteboardUsageDescription 已声明" \
     || fail "NSPasteboardUsageDescription 缺失"
+[ -n "$input_monitor_desc" ] \
+    && pass "NSInputMonitoringUsageDescription 已声明" \
+    || fail "NSInputMonitoringUsageDescription 缺失"
 
 PROFILE_PATH="$APP_BUNDLE/Contents/embedded.provisionprofile"
 [ -f "$PROFILE_PATH" ] \

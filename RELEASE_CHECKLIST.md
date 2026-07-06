@@ -109,6 +109,8 @@ macOS:
 - Confirm input monitoring/accessibility permission handling.
 - Confirm app quits cleanly.
 - Confirm data directory is under `~/Library/Application Support/SharedClipboard/`.
+- For Mac App Store builds, prefer `./build_appstore.sh` so versioning, sandbox entitlements, and embedded provisioning profile selection stay consistent.
+- After packaging, use `./upload_appstore.sh` with either `APPLE_APP_PASSWORD` or `ASC_API_KEY` / `ASC_API_ISSUER` to avoid reopening the browser just for upload.
 
 Linux:
 
