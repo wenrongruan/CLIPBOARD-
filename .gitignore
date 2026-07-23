@@ -37,6 +37,9 @@ upload.sh
 .playwright-mcp/
 .claude/
 .serena/
+.codex/
+dist_windows/
+sharedclipboard-appstore-release/
 
 # Website (not open source)
 website/
