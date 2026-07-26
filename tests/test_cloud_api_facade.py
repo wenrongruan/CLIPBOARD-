@@ -14,7 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from core.cloud_api import CloudAPIClient
+from core.cloud_api import CloudAPIClient, CloudAPIError
 
 
 def _make_client() -> CloudAPIClient:
@@ -50,6 +50,19 @@ def test_files_request_upload_delegates_to_files_client():
             result = client.files_request_upload({"size": 10, "name": "a", "sha256": "x"})
             m.assert_called_once()
             assert result == {"upload_mode": "exists"}
+    finally:
+        client.close()
+
+
+def test_files_delete_treats_not_found_as_success():
+    client = _make_client()
+    try:
+        with patch.object(
+            client,
+            "_request",
+            side_effect=CloudAPIError("not found", 404),
+        ):
+            assert client.files_delete(123) is True
     finally:
         client.close()
 

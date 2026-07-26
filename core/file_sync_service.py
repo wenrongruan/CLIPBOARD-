@@ -47,6 +47,7 @@ class _FileSyncWorker(QObject):
     upload_started = Signal(int)               # (local_id) 用于通知 UI 状态已翻到 syncing
     upload_finished = Signal(int, bool, str)   # (local_id, success, err)
     download_finished = Signal(int, bool, str)
+    delete_finished = Signal(int, bool, str)
     pull_done = Signal(list, int)              # (list[CloudFile], max_server_id)
     pull_error = Signal(str, int)
 
@@ -83,20 +84,44 @@ class _FileSyncWorker(QObject):
         for srv in items:
             try:
                 cid = int(srv.get("id") or srv.get("cloud_id") or 0)
+                if cid <= 0:
+                    continue
                 if cid > max_id:
                     max_id = cid
                 sha = srv.get("content_sha256", "") or ""
-                if not sha or not re.match(r"^[a-fA-F0-9]{64}$", sha):
-                    continue
                 is_deleted = bool(srv.get("is_deleted", False))
-                existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)
-                if is_deleted and existing is not None and existing.id:
-                    self.repo.mark_deleted(existing.id)
-                    # mark_deleted 只改 DB；同步翻 in-memory 对象的 is_deleted，
-                    # 否则 _on_pull_done 里 `if f.is_deleted` 为假，会错把删除事件发成 file_added。
-                    existing.is_deleted = True
-                    parsed.append(existing)
+
+                # 删除事件只需 cloud_id 即可定位。服务端 tombstone 可能不再携带
+                # content_sha256，不能先做 SHA 校验，否则游标会越过删除事件但
+                # 本地记录永久残留。
+                if is_deleted:
+                    existing = self.repo.get_by_cloud_id(cid)
+                    if (
+                        existing is None
+                        and isinstance(sha, str)
+                        and re.fullmatch(r"[a-fA-F0-9]{64}", sha) is not None
+                    ):
+                        existing = self.repo.get_by_sha(sha.lower())
+                    if existing is not None and existing.id:
+                        # 服务端已确认删除，不再标成 pending 回推。
+                        self.repo.update_meta(
+                            existing.id,
+                            is_deleted=1,
+                            sync_state=FileSyncState.SYNCED.value,
+                            last_error=None,
+                        )
+                        # update_meta 只改 DB；同步翻 in-memory 对象的 is_deleted，
+                        # 否则 _on_pull_done 里 `if f.is_deleted` 为假，会错把删除事件发成 file_added。
+                        existing.is_deleted = True
+                        parsed.append(existing)
                     continue
+
+                if not isinstance(sha, str) or re.fullmatch(r"[a-fA-F0-9]{64}", sha) is None:
+                    continue
+                # hashlib.hexdigest() 固定返回小写；入口统一规范化，避免合法的大写
+                # SHA-256 在下载完整性校验时被误判。
+                sha = sha.lower()
+                existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)
                 if existing is None:
                     f = CloudFile(
                         cloud_id=cid,
@@ -128,6 +153,42 @@ class _FileSyncWorker(QObject):
                 continue
 
         self.pull_done.emit(parsed, max_id)
+
+    # ---------- delete ----------
+    @Slot(int)
+    def do_delete(self, local_id: int):
+        f = self.repo.get_by_id(local_id)
+        if not f or not f.is_deleted:
+            self.delete_finished.emit(local_id, True, "")
+            return
+        if not f.cloud_id:
+            self.repo.update_meta(
+                local_id,
+                sync_state=FileSyncState.SYNCED.value,
+                last_error=None,
+            )
+            self.delete_finished.emit(local_id, True, "")
+            return
+
+        try:
+            deleted = self.cloud_api.files_delete(f.cloud_id)
+            if not deleted:
+                raise CloudAPIError("云端删除未成功", 0)
+            self.repo.update_meta(
+                local_id,
+                sync_state=FileSyncState.SYNCED.value,
+                last_error=None,
+            )
+            self.delete_finished.emit(local_id, True, "")
+        except Exception as e:
+            logger.warning(
+                "云端文件删除失败 local_id=%s cloud_id=%s: %s",
+                local_id,
+                f.cloud_id,
+                e,
+            )
+            self.repo.set_sync_state(local_id, FileSyncState.ERROR.value, str(e))
+            self.delete_finished.emit(local_id, False, str(e))
 
     # ---------- upload ----------
     @Slot(int)
@@ -340,12 +401,14 @@ class FileCloudSyncService(QObject):
     download_progress = Signal(int, int, int)
     upload_finished = Signal(int, bool, str)
     download_finished = Signal(int, bool, str)
+    delete_finished = Signal(int, bool, str)
     sync_error = Signal(str, int)
     quota_warning = Signal(int, int)            # (used, total)
 
     _trigger_pull = Signal(int)
     _trigger_upload = Signal(int)
     _trigger_download = Signal(int)
+    _trigger_delete = Signal(int)
 
     _PULL_INTERVAL_MS = 30_000
 
@@ -366,9 +429,13 @@ class FileCloudSyncService(QObject):
 
         self._upload_queue: deque = deque(maxlen=_UPLOAD_QUEUE_MAX)
         self._download_queue: deque = deque(maxlen=_DOWNLOAD_QUEUE_MAX)
+        # 删除 tombstone 本身只占一个整数，使用无界队列避免批量删除超过
+        # maxlen 时静默挤掉尚未提交的云端删除；数据库仍是最终恢复来源。
+        self._delete_queue: deque = deque()
         self._pulling = False
         self._uploading = False
         self._downloading = False
+        self._deleting = False
 
         self._last_sync_id = self._load_cursor()
 
@@ -382,10 +449,12 @@ class FileCloudSyncService(QObject):
         self._worker.upload_started.connect(self._on_upload_started)
         self._worker.upload_finished.connect(self._on_upload_finished)
         self._worker.download_finished.connect(self._on_download_finished)
+        self._worker.delete_finished.connect(self._on_delete_finished)
 
         self._trigger_pull.connect(self._worker.do_pull, Qt.QueuedConnection)
         self._trigger_upload.connect(self._worker.do_upload, Qt.QueuedConnection)
         self._trigger_download.connect(self._worker.do_download, Qt.QueuedConnection)
+        self._trigger_delete.connect(self._worker.do_delete, Qt.QueuedConnection)
 
         self._worker_thread.start()
 
@@ -398,13 +467,29 @@ class FileCloudSyncService(QObject):
         if self._state != CloudSyncState.STOPPED:
             return
         self._state = CloudSyncState.RUNNING
-        # 启动时扫残留 pending/syncing 入队
+        # 启动时扫残留状态入队；删除失败会持久化为 error，下次启动继续重试。
         try:
             for f in self.repo.list_by_states([
                 FileSyncState.PENDING.value,
                 FileSyncState.SYNCING.value,
+                FileSyncState.ERROR.value,
             ]):
-                if f.id and not f.is_deleted and f.local_path and os.path.exists(f.local_path):
+                if not f.id:
+                    continue
+                if f.is_deleted:
+                    if f.cloud_id:
+                        self._delete_queue.append(f.id)
+                    else:
+                        self.repo.update_meta(
+                            f.id,
+                            sync_state=FileSyncState.SYNCED.value,
+                            last_error=None,
+                        )
+                elif (
+                    f.sync_state != FileSyncState.ERROR.value
+                    and f.local_path
+                    and os.path.exists(f.local_path)
+                ):
                     self._upload_queue.append(f.id)
         except Exception as e:
             logger.debug(f"加载待上传失败: {e}")
@@ -458,6 +543,14 @@ class FileCloudSyncService(QObject):
         self._download_queue.append(local_id)
         QTimer.singleShot(0, self._drive_queues)
 
+    def enqueue_delete(self, local_id: int) -> None:
+        """安排已落盘 tombstone 的云端删除；停止态由下次 start() 自动恢复。"""
+        if self._state != CloudSyncState.RUNNING:
+            return
+        if local_id not in self._delete_queue:
+            self._delete_queue.append(local_id)
+        QTimer.singleShot(0, self._drive_queues)
+
     def force_sync(self) -> None:
         if self._state == CloudSyncState.RUNNING:
             self._tick_pull()
@@ -474,7 +567,7 @@ class FileCloudSyncService(QObject):
     def _drive_queues(self) -> None:
         if self._state != CloudSyncState.RUNNING:
             return
-        if self._uploading and self._downloading:
+        if self._uploading and self._downloading and self._deleting:
             return
         if not self._uploading and self._upload_queue:
             lid = self._upload_queue.popleft()
@@ -484,6 +577,10 @@ class FileCloudSyncService(QObject):
             lid = self._download_queue.popleft()
             self._downloading = True
             self._trigger_download.emit(lid)
+        if not self._deleting and self._delete_queue:
+            lid = self._delete_queue.popleft()
+            self._deleting = True
+            self._trigger_delete.emit(lid)
 
     # ---------- pull ----------
 
@@ -561,6 +658,14 @@ class FileCloudSyncService(QObject):
         if not ok:
             self.sync_error.emit(err or "下载失败", 0)
         self.download_finished.emit(local_id, ok, err)
+        QTimer.singleShot(0, self._drive_queues)
+
+    @Slot(int, bool, str)
+    def _on_delete_finished(self, local_id: int, ok: bool, err: str):
+        self._deleting = False
+        if not ok:
+            self.sync_error.emit(err or "云端文件删除失败", 0)
+        self.delete_finished.emit(local_id, ok, err)
         QTimer.singleShot(0, self._drive_queues)
 
     # ---------- cursor ----------

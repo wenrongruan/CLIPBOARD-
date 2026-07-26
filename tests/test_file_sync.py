@@ -9,10 +9,13 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from unittest.mock import MagicMock
+from PySide6.QtCore import QCoreApplication
 
 from core.database import DatabaseManager
 from core.file_models import CloudFile, FileSyncState
 from core.file_repository import CloudFileRepository
+from core.file_sync_service import FileCloudSyncService
 
 
 @pytest.fixture
@@ -103,3 +106,30 @@ def test_total_used_bytes(repo):
         ))
     total = repo.total_used_bytes()
     assert total == 100 + 200 + 300
+
+
+def test_start_recovers_failed_delete_tombstone(repo):
+    QCoreApplication.instance() or QCoreApplication([])
+    f = CloudFile(
+        cloud_id=700,
+        name="delete-retry",
+        content_sha256="7" * 64,
+        device_id="d",
+        mtime=1,
+        created_at=1,
+    )
+    local_id = repo.add_file(f)
+    repo.mark_deleted(local_id)
+    repo.set_sync_state(local_id, FileSyncState.ERROR.value, "offline")
+    cloud_api = MagicMock()
+    cloud_api.is_authenticated = False
+    entitlement = MagicMock()
+    meta_store = MagicMock()
+    meta_store.get_meta.return_value = None
+    service = FileCloudSyncService(repo, cloud_api, entitlement, meta_store)
+
+    try:
+        service.start()
+        assert local_id in service._delete_queue
+    finally:
+        service.stop()

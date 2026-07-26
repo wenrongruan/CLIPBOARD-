@@ -86,6 +86,24 @@ class _SingleCloudAPI:
         return {}
 
 
+class _DeleteCloudAPI:
+    def __init__(self, result: bool):
+        self.result = result
+        self.deleted_ids: list[int] = []
+
+    def files_delete(self, cloud_id: int) -> bool:
+        self.deleted_ids.append(cloud_id)
+        return self.result
+
+
+class _PullCloudAPI:
+    def __init__(self, items: list[dict]):
+        self.items = items
+
+    def files_list(self, since_id: int, device_id: str) -> dict:
+        return {"items": self.items}
+
+
 @pytest.fixture
 def repo(tmp_path):
     db = DatabaseManager(str(tmp_path / "upload.db"))
@@ -173,3 +191,78 @@ def test_worker_single_upload_adds_private_acl_header(repo, tmp_path):
         (789, [{"part_number": 1, "etag": "etag-1"}]),
     ]
     assert entitlement.recorded_sizes == [len(b"single-upload")]
+
+
+def test_worker_delete_persists_success(repo, tmp_path):
+    local_id = _make_file(repo, tmp_path, "delete.txt", b"delete-me")
+    repo.update_meta(local_id, cloud_id=901)
+    repo.mark_deleted(local_id)
+    cloud_api = _DeleteCloudAPI(result=True)
+
+    worker = _FileSyncWorker(cloud_api, repo, _FakeEntitlement())
+    worker.do_delete(local_id)
+
+    saved = repo.get_by_id(local_id)
+    assert saved is not None
+    assert saved.is_deleted is True
+    assert saved.sync_state == FileSyncState.SYNCED.value
+    assert saved.last_error == ""
+    assert cloud_api.deleted_ids == [901]
+
+
+def test_worker_delete_persists_failure_for_retry(repo, tmp_path):
+    local_id = _make_file(repo, tmp_path, "delete-fail.txt", b"delete-me-later")
+    repo.update_meta(local_id, cloud_id=902)
+    repo.mark_deleted(local_id)
+    cloud_api = _DeleteCloudAPI(result=False)
+
+    worker = _FileSyncWorker(cloud_api, repo, _FakeEntitlement())
+    worker.do_delete(local_id)
+
+    saved = repo.get_by_id(local_id)
+    assert saved is not None
+    assert saved.is_deleted is True
+    assert saved.sync_state == FileSyncState.ERROR.value
+    assert "删除" in saved.last_error
+    assert cloud_api.deleted_ids == [902]
+
+
+def test_pull_normalizes_uppercase_sha(repo):
+    uppercase_sha = "ABCDEF" * 10 + "ABCD"
+    cloud_api = _PullCloudAPI([{
+        "id": 903,
+        "name": "upper.bin",
+        "content_sha256": uppercase_sha,
+        "size_bytes": 10,
+    }])
+
+    worker = _FileSyncWorker(cloud_api, repo, _FakeEntitlement())
+    worker.do_pull(0)
+
+    saved = repo.get_by_cloud_id(903)
+    assert saved is not None
+    assert saved.content_sha256 == uppercase_sha.lower()
+
+
+def test_pull_applies_delete_tombstone_without_sha(repo, tmp_path):
+    local_id = _make_file(repo, tmp_path, "remote-delete.txt", b"delete-remotely")
+    repo.update_meta(
+        local_id,
+        cloud_id=904,
+        sync_state=FileSyncState.SYNCED.value,
+    )
+    cloud_api = _PullCloudAPI([{
+        "id": 904,
+        "is_deleted": True,
+    }])
+
+    worker = _FileSyncWorker(cloud_api, repo, _FakeEntitlement())
+    pulled = []
+    worker.pull_done.connect(lambda items, _cursor: pulled.extend(items))
+    worker.do_pull(0)
+
+    saved = repo.get_by_id(local_id)
+    assert saved is not None
+    assert saved.is_deleted is True
+    assert saved.sync_state == FileSyncState.SYNCED.value
+    assert [item.id for item in pulled] == [local_id]

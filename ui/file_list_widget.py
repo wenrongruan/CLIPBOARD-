@@ -210,7 +210,49 @@ class FileListWidget(QWidget):
         self.sync_service.upload_finished.connect(self._on_upload_finished)
         self.sync_service.download_finished.connect(self._on_upload_finished)
         self.sync_service.sync_error.connect(self._on_sync_error)
-        self.entitlement.entitlement_changed.connect(lambda *_: self._refresh_gate_view())
+        self.entitlement.entitlement_changed.connect(self._on_entitlement_changed)
+
+    def _disconnect_signals(self):
+        connections = (
+            (self.sync_service.file_added, self._on_file_added_or_updated),
+            (self.sync_service.file_updated, self._on_file_added_or_updated),
+            (self.sync_service.file_deleted, self.model.remove_by_local_id),
+            (self.sync_service.upload_progress, self.model.set_progress),
+            (self.sync_service.download_progress, self.model.set_progress),
+            (self.sync_service.upload_finished, self._on_upload_finished),
+            (self.sync_service.download_finished, self._on_upload_finished),
+            (self.sync_service.sync_error, self._on_sync_error),
+            (self.entitlement.entitlement_changed, self._on_entitlement_changed),
+        )
+        for signal, slot in connections:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+    def rebind_services(
+        self,
+        repository: CloudFileRepository,
+        sync_service,
+        entitlement: EntitlementService,
+        cloud_api: CloudAPIClient | None,
+    ) -> None:
+        """重新登录后切换到新服务实例，避免继续调用已停止的旧同步线程。"""
+        unchanged = (
+            self.repo is repository
+            and self.sync_service is sync_service
+            and self.entitlement is entitlement
+            and self.cloud_api is cloud_api
+        )
+        if not unchanged:
+            self._disconnect_signals()
+            self.repo = repository
+            self.sync_service = sync_service
+            self.entitlement = entitlement
+            self.cloud_api = cloud_api
+            self._connect_signals()
+        self.reload()
+        self._refresh_gate_view()
 
     # ---------- data ----------
 
@@ -237,6 +279,9 @@ class FileListWidget(QWidget):
     def _on_sync_error(self, msg: str, status: int):
         logger.warning(f"文件同步错误: {msg} (status={status})")
         self._show_sync_status(f"文件同步出错：{msg}")
+
+    def _on_entitlement_changed(self, *_):
+        self._refresh_gate_view()
 
     def _show_sync_status(self, text: str) -> None:
         try:
@@ -457,15 +502,6 @@ class FileListWidget(QWidget):
         self.repo.mark_deleted(f.id)
         self.model.remove_by_local_id(f.id)
 
-        # 异步执行云端删除，防止卡死 UI
-        cloud_api = self.cloud_api
-        cloud_id = f.cloud_id
-        if cloud_id and cloud_api:
-            import threading
-            def run_delete():
-                try:
-                    cloud_api.files_delete(cloud_id)
-                except Exception as e:
-                    logger.warning(f"云端删除失败: {e}")
-            
-            threading.Thread(target=run_delete, daemon=True).start()
+        # 交给持久化同步队列处理；失败状态会留在 DB，下次启动继续重试。
+        if f.cloud_id:
+            self.sync_service.enqueue_delete(f.id)

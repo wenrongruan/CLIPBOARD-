@@ -333,6 +333,7 @@ class ClipboardApp:
 
     def _start_cloud_sync_deferred(self):
         """Start optional cloud sync after the local clipboard path is ready."""
+        self._refresh_optional_services_from_context()
         if not getattr(self, "cloud_sync_service", None):
             return
         try:
@@ -351,6 +352,9 @@ class ClipboardApp:
     def _start_file_sync_deferred(self):
         """Start optional file sync after the local clipboard path is ready."""
         try:
+            # 登录/登出可能发生在这个 20 秒延迟窗口内。以 AppContext 当前值
+            # 为准，避免重启已停止的旧 service 或重复创建第二套同步线程。
+            self._refresh_optional_services_from_context()
             with self._startup_phase("file_sync_start_deferred"):
                 if not getattr(self, "file_sync_service", None):
                     self._ensure_file_sync_services()
@@ -367,8 +371,27 @@ class ClipboardApp:
                 "文件云同步启动失败，剪贴板文本和图片历史仍可继续使用。",
             )
 
+    def _refresh_optional_services_from_context(self):
+        """把动态登录/登出后的可选云服务引用同步回应用壳。"""
+        ctx = getattr(self, "ctx", None)
+        if ctx is None:
+            return
+        for name in (
+            "cloud_api",
+            "cloud_sync_service",
+            "entitlement_service",
+            "file_repository",
+            "file_sync_service",
+        ):
+            # 兼容测试/旧调用方传入的精简 context；只有 context 明确声明
+            # 该字段时才让它覆盖应用壳上的现值。正式 AppContext 始终声明全量字段，
+            # 因而登出后的显式 None 仍能正确清掉旧引用。
+            if hasattr(ctx, name):
+                setattr(self, name, getattr(ctx, name))
+
     def _ensure_file_sync_services(self):
         """Build optional file-sync services on demand."""
+        self._refresh_optional_services_from_context()
         if not getattr(self, "cloud_api", None):
             return
         if getattr(self, "entitlement_service", None) is None:
@@ -385,13 +408,14 @@ class ClipboardApp:
             from core.file_repository import CloudFileRepository
             self.file_repository = CloudFileRepository(self.db_manager)
 
-        from core.file_sync_service import FileCloudSyncService
-        self.file_sync_service = FileCloudSyncService(
-            self.file_repository,
-            self.cloud_api,
-            self.entitlement_service,
-            self.repository,
-        )
+        if getattr(self, "file_sync_service", None) is None:
+            from core.file_sync_service import FileCloudSyncService
+            self.file_sync_service = FileCloudSyncService(
+                self.file_repository,
+                self.cloud_api,
+                self.entitlement_service,
+                self.repository,
+            )
 
         if getattr(self, "ctx", None) is not None:
             self.ctx.entitlement_service = self.entitlement_service
@@ -402,7 +426,7 @@ class ClipboardApp:
             self.main_window.file_repository = self.file_repository
             self.main_window.file_sync_service = self.file_sync_service
             controller = getattr(self.main_window, "cloud_controller", None)
-            if controller is not None and getattr(self.main_window, "file_list_widget", None) is None:
+            if controller is not None:
                 controller.bootstrap_files_stack_after_login()
 
     def _shutdown_context(self):
@@ -682,6 +706,7 @@ class ClipboardApp:
 
     def _quit(self):
         """退出应用"""
+        self._refresh_optional_services_from_context()
         # 停止热键监听
         if self.hotkey_listener:
             self.hotkey_listener.stop()

@@ -77,11 +77,16 @@ class CloudLifecycleController(QObject):
             logger.warning(f"登录后补建文件同步栈失败: {e}", exc_info=True)
             return
 
-        if parent.file_list_widget is not None:
-            parent.file_list_widget.reload()
+        if not (parent.file_sync_service and parent.file_repository and parent.entitlement_service):
             return
 
-        if not (parent.file_sync_service and parent.file_repository and parent.entitlement_service):
+        if parent.file_list_widget is not None:
+            parent.file_list_widget.rebind_services(
+                parent.file_repository,
+                parent.file_sync_service,
+                parent.entitlement_service,
+                parent.cloud_api,
+            )
             return
 
         try:
@@ -138,7 +143,7 @@ class CloudLifecycleController(QObject):
                 )
                 parent.cloud_sync_service.new_items_available.connect(self.advance_sync_after_cloud)
                 parent.cloud_sync_service.upload_completed.connect(
-                    lambda _count: parent.list_controller.refresh_cloud_state()
+                    self._refresh_cloud_state_after_upload
                 )
                 parent._cloud_sync_ui_connected = True
 
@@ -148,6 +153,9 @@ class CloudLifecycleController(QObject):
             QTimer.singleShot(0, parent.cloud_sync_service.start)
         except Exception as e:
             logger.warning(f"登录后补建云端同步失败: {e}", exc_info=True)
+
+    def _refresh_cloud_state_after_upload(self, _count: int):
+        self._parent.list_controller.refresh_cloud_state()
 
     def teardown_cloud_sync_after_logout(self):
         """登出：停止并释放云端同步 + 文件同步。
@@ -159,8 +167,38 @@ class CloudLifecycleController(QObject):
         parent = self._parent
         ctx = self.ctx
         if parent.cloud_sync_service is not None:
+            cloud_sync_service = parent.cloud_sync_service
             try:
-                parent.cloud_sync_service.stop()
+                # 先解绑长期存活的 clipboard_monitor sender，否则它会继续持有
+                # 已停止的旧 service；重新登录后还会叠加一条新连接。
+                if parent._cloud_sync_item_added_connected:
+                    try:
+                        self.clipboard_monitor.item_added.disconnect(
+                            cloud_sync_service.enqueue_upload
+                        )
+                    except (RuntimeError, TypeError):
+                        pass
+                if parent._cloud_sync_ui_connected:
+                    connections = (
+                        (
+                            cloud_sync_service.new_items_available,
+                            parent.list_controller.on_new_items,
+                        ),
+                        (
+                            cloud_sync_service.new_items_available,
+                            self.advance_sync_after_cloud,
+                        ),
+                        (
+                            cloud_sync_service.upload_completed,
+                            self._refresh_cloud_state_after_upload,
+                        ),
+                    )
+                    for signal, slot in connections:
+                        try:
+                            signal.disconnect(slot)
+                        except (RuntimeError, TypeError):
+                            pass
+                cloud_sync_service.stop()
             except Exception as e:
                 logger.warning(f"退出登录后停止云端同步失败: {e}", exc_info=True)
             finally:

@@ -76,6 +76,9 @@ class FilesClient:
             self._facade._request("DELETE", f"/api/v1/files/{cloud_id}")
             return True
         except CloudAPIError as e:
+            # DELETE 必须幂等：重试时服务端已不存在等价于目标状态已达成。
+            if e.status_code == 404:
+                return True
             logger.warning(f"删除云端文件失败 (cloud_id={cloud_id}): {e}")
             return False
 
