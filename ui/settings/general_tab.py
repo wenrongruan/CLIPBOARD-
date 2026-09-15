@@ -4,7 +4,12 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QWidget,
 )
 
-from config import get_effective_hotkey, settings, update_settings
+from config import (
+    get_effective_hotkey,
+    get_effective_screenshot_hotkey,
+    settings,
+    update_settings,
+)
 from i18n import get_languages, t
 
 
@@ -52,6 +57,26 @@ class GeneralTab(QWidget):
         hotkey_layout.addWidget(hotkey_help)
         layout.addRow(t("global_hotkey"), hotkey_layout)
 
+        # 截图热键
+        screenshot_layout = QHBoxLayout()
+        self.screenshot_hotkey_edit = QLineEdit()
+        self.screenshot_hotkey_edit.setText(get_effective_screenshot_hotkey())
+        self.screenshot_hotkey_edit.setPlaceholderText(t("hotkey_placeholder"))
+        screenshot_layout.addWidget(self.screenshot_hotkey_edit)
+
+        screenshot_help = QLabel("?")
+        screenshot_help.setToolTip(t("hotkey_help"))
+        screenshot_help.setStyleSheet("color: #888; font-weight: bold;")
+        screenshot_layout.addWidget(screenshot_help)
+        layout.addRow(t("screenshot_hotkey"), screenshot_layout)
+
+        # 截图后是否覆盖系统剪贴板
+        self.screenshot_copy_check = QCheckBox(t("screenshot_copy_to_clipboard"))
+        self.screenshot_copy_check.setChecked(
+            bool(getattr(settings(), "screenshot_copy_to_clipboard", True))
+        )
+        layout.addRow("", self.screenshot_copy_check)
+
         # 隐私：捕获窗口标题
         self.capture_source_title_check = QCheckBox("捕获窗口标题（存入来源记录）")
         self.capture_source_title_check.setToolTip(
@@ -73,16 +98,20 @@ class GeneralTab(QWidget):
     def selected_hotkey(self) -> str:
         return self.hotkey_edit.text()
 
+    def selected_screenshot_hotkey(self) -> str:
+        return self.screenshot_hotkey_edit.text()
+
     def apply(self) -> None:
-        """OK 时持久化 capture_source_title（其余字段通过 collect() 由主窗口批量落盘）。"""
+        """OK 时持久化本 Tab 独有的开关（热键类字段通过 collect() 由主窗口批量落盘）。"""
         import logging
         logger = logging.getLogger(__name__)
         try:
             update_settings(
                 capture_source_title=self.capture_source_title_check.isChecked(),
+                screenshot_copy_to_clipboard=self.screenshot_copy_check.isChecked(),
             )
         except Exception as e:
-            logger.warning(f"保存 capture_source_title 失败: {e}")
+            logger.warning(f"保存通用设置失败: {e}")
 
     def collect(self) -> dict:
         """返回主窗口在 OK 后需要的字段。"""
@@ -90,4 +119,5 @@ class GeneralTab(QWidget):
             "language": self.selected_language(),
             "dock_edge": self.selected_dock_edge(),
             "hotkey": self.selected_hotkey(),
+            "screenshot_hotkey": self.selected_screenshot_hotkey(),
         }

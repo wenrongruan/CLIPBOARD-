@@ -38,6 +38,7 @@ upload.sh
 .claude/
 .serena/
 .codex/
+.workbuddy/
 dist_windows/
 sharedclipboard-appstore-release/
 
@@ -47,3 +48,6 @@ website/
 
 # Local database exports
 sql/公共.sql
+
+# pytest 临时目录（--basetemp 会落在仓库内）
+.pytest_tmp/

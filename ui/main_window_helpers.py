@@ -30,6 +30,7 @@ from config import (
     update_settings,
     flush_settings,
     get_effective_hotkey,
+    get_effective_screenshot_hotkey,
     get_effective_database_path,
     get_mysql_config,
     apply_profile,
@@ -320,6 +321,12 @@ def show_settings_dialog(window, initial_tab: str = ""):
     new_hotkey = dlg_settings["hotkey"]
     if new_hotkey != get_effective_hotkey():
         batch["hotkey"] = new_hotkey
+        need_restart = True
+
+    # 截图热键同样只在注册时读取，改了需要重启才生效
+    new_shot_hotkey = dlg_settings.get("screenshot_hotkey", "")
+    if new_shot_hotkey != get_effective_screenshot_hotkey():
+        batch["screenshot_hotkey"] = new_shot_hotkey
         need_restart = True
 
     new_poll_interval = dlg_settings["poll_interval_ms"]

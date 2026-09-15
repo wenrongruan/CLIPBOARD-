@@ -25,12 +25,19 @@ from config import (
     flush_settings,
     get_cloud_access_token,
     get_effective_hotkey,
+    get_effective_screenshot_hotkey,
 )
 from i18n import t, set_language
 from core.app_context import AppContext
 from core.db_factory import create_database_manager
 from core.repository import ClipboardRepository
 from core.clipboard_monitor import ClipboardMonitor
+from core.screenshot_service import (
+    ScreenshotService,
+    REGION as SCREENSHOT_REGION,
+    FULL as SCREENSHOT_FULL,
+    WINDOW as SCREENSHOT_WINDOW,
+)
 from core.sync_service import SyncService
 from core.plugin_manager import PluginManager
 from core.startup_metrics import StartupMetrics
@@ -216,6 +223,13 @@ class ClipboardApp:
         self.db_manager = self.ctx.db
         self.repository = self.ctx.repository
         logger.debug(f"[startup] AppContext.bootstrap 用时 {time.time()-_t:.3f}s")
+        # 截图服务复用剪贴板监控的入库链路；在这里建是因为托盘菜单比主窗口先构造。
+        self.screenshot_service = ScreenshotService(self.ctx.clipboard_monitor)
+        self.screenshot_service.item_saved.connect(self._on_screenshot_saved)
+        self.screenshot_service.capture_failed.connect(self._on_screenshot_failed)
+        self.screenshot_service.permission_required.connect(
+            self._prompt_screen_recording_permission
+        )
         # aboutToQuit 兜底：保证非正常退出路径也能清理 db / monitor / plugin
         self.app.aboutToQuit.connect(self._shutdown_context)
 
@@ -228,10 +242,29 @@ class ClipboardApp:
 
         # 创建托盘菜单
         menu = QMenu()
+        # 持有引用：菜单里嵌了子菜单，父 QMenu 若是临时对象会被 GC 掉，
+        # 表现为右键后子项失效。
+        self.tray_menu = menu
 
         show_action = QAction(t("show_window"), menu)
         show_action.triggered.connect(self._show_window)
         menu.addAction(show_action)
+
+        menu.addSeparator()
+
+        # 截图子菜单：区域 / 全屏 / 窗口
+        screenshot_menu = QMenu(t("screenshot"), menu)
+        for mode, label_key in (
+            (SCREENSHOT_REGION, "screenshot_region"),
+            (SCREENSHOT_FULL, "screenshot_full"),
+            (SCREENSHOT_WINDOW, "screenshot_window"),
+        ):
+            action = QAction(t(label_key), screenshot_menu)
+            action.triggered.connect(
+                lambda _checked=False, m=mode: self._request_screenshot(m)
+            )
+            screenshot_menu.addAction(action)
+        menu.addMenu(screenshot_menu)
 
         menu.addSeparator()
 
@@ -561,8 +594,9 @@ class ClipboardApp:
             self.tray_icon.contextMenu().popup(QCursor.pos())
 
     def _init_hotkey(self):
-        """初始化全局热键"""
+        """初始化全局热键（「唤出窗口」+「截图」两个）"""
         self.hotkey_listener = None
+        self.screenshot_hotkey_listener = None
 
         if not HOTKEY_AVAILABLE:
             logger.warning("全局热键功能不可用（macOS 缺 AppKit / 其他平台缺 pynput）")
@@ -574,7 +608,20 @@ class ClipboardApp:
             return
 
         hotkey = get_effective_hotkey()
-        if not hotkey:
+        screenshot_hotkey = get_effective_screenshot_hotkey()
+        if screenshot_hotkey and screenshot_hotkey == hotkey:
+            # 同一个键注册两次时后注册的会顶掉先前那个（pynput 的 dict 甚至直接塌成一项）。
+            # 保留「唤出窗口」优先，截图退化为只能从托盘菜单发起。
+            logger.warning(f"截图热键与唤出窗口热键相同 ({hotkey})，跳过截图热键注册")
+            self._record_health_issue(
+                "hotkey",
+                "warning",
+                f"截图热键与「显示窗口」热键冲突（都是 {hotkey}），截图热键未生效；"
+                "可在设置 → 通用里改成不同的组合，或从托盘菜单发起截图。",
+            )
+            screenshot_hotkey = ""
+
+        if not hotkey and not screenshot_hotkey:
             return
 
         # macOS: pynput 的 CGEventTap 后台线程在新版系统上按 CapsLock 系列键
@@ -590,37 +637,31 @@ class ClipboardApp:
                 )
                 self._prompt_input_monitoring_permission()
                 return
-            try:
-                from core.macos_hotkey import MacOSGlobalHotkey
-                self.hotkey_listener = MacOSGlobalHotkey(hotkey, self._on_hotkey_pressed)
-                started = self.hotkey_listener.start()
-                if started:
-                    logger.info(f"全局热键已注册（NSEvent monitor）: {hotkey}")
-                else:
-                    logger.warning("NSEvent global monitor 装载失败,疑似缺少输入监控权限")
-                    self._record_health_issue(
-                        "hotkey",
-                        "warning",
-                        "全局热键监听未启用，疑似缺少输入监控权限。仍可通过菜单栏图标打开窗口。",
-                    )
-                    self._prompt_input_monitoring_permission()
-            except Exception as e:
-                logger.error(f"注册 macOS 全局热键失败: {e}", exc_info=True)
-                self._record_health_issue(
-                    "hotkey",
-                    "warning",
-                    f"全局热键注册失败：{e}",
-                )
+            # 权限没问题时才注册；若两个热键里有任何一个装不上（典型原因就是缺权限），
+            # 只在最后统一弹一次引导，避免连弹两个对话框。
+            self._hotkey_permission_suspect = False
+            self.hotkey_listener = self._register_macos_hotkey(
+                hotkey, self._on_hotkey_pressed, "唤出窗口"
+            )
+            self.screenshot_hotkey_listener = self._register_macos_hotkey(
+                screenshot_hotkey, self._on_screenshot_hotkey, "截图"
+            )
+            if self._hotkey_permission_suspect:
                 self._prompt_input_monitoring_permission()
             return
 
-        # 非 macOS：继续走 pynput
+        # 非 macOS：继续走 pynput（GlobalHotKeys 用 dict 一次注册多个组合键）
+        mapping = {}
+        if hotkey:
+            mapping[hotkey] = self._on_hotkey_pressed
+        if screenshot_hotkey:
+            mapping[screenshot_hotkey] = self._on_screenshot_hotkey
+        if not mapping:
+            return
         try:
-            self.hotkey_listener = keyboard.GlobalHotKeys({
-                hotkey: self._on_hotkey_pressed
-            })
+            self.hotkey_listener = keyboard.GlobalHotKeys(mapping)
             self.hotkey_listener.start()
-            logger.info(f"全局热键已注册: {hotkey}")
+            logger.info(f"全局热键已注册: {sorted(mapping)}")
         except Exception as e:
             logger.error(f"注册全局热键失败: {e}")
             self._record_health_issue(
@@ -628,6 +669,35 @@ class ClipboardApp:
                 "warning",
                 f"全局热键注册失败：{e}",
             )
+
+    def _register_macos_hotkey(self, spec: str, callback, label: str):
+        """注册一个 macOS 全局热键（NSEvent monitor）。spec 为空或注册失败返回 None。"""
+        if not spec:
+            return None
+        try:
+            from core.macos_hotkey import MacOSGlobalHotkey
+            listener = MacOSGlobalHotkey(spec, callback)
+            if listener.start():
+                logger.info(f"全局热键已注册（NSEvent monitor）: {label} = {spec}")
+                return listener
+            logger.warning(f"{label}热键装载失败,疑似缺少输入监控权限")
+            self._record_health_issue(
+                "hotkey",
+                "warning",
+                f"{label}热键监听未启用，疑似缺少输入监控权限。仍可通过菜单栏图标操作。",
+            )
+            # macOS 在缺「输入监控」权限时 addGlobalMonitor 返回 None 但不抛异常，
+            # 这是唯一能区分"装不上"和"其他异常"的信号，交给调用方合并弹一次引导。
+            self._hotkey_permission_suspect = True
+            return None
+        except Exception as e:
+            logger.error(f"注册 macOS {label}热键失败: {e}", exc_info=True)
+            self._record_health_issue(
+                "hotkey",
+                "warning",
+                f"{label}热键注册失败：{e}",
+            )
+            return None
 
     @staticmethod
     def _has_accessibility_permission() -> bool:
@@ -704,12 +774,119 @@ class ClipboardApp:
         except Exception as e:
             logger.error(f"热键触发显示窗口失败: {e}")
 
+    # ========== 截图 ==========
+
+    #: mode -> ScreenshotService 上的无参槽名（QMetaObject.invokeMethod 需要槽名）
+    _SCREENSHOT_SLOTS = {
+        SCREENSHOT_REGION: "capture_region",
+        SCREENSHOT_FULL: "capture_full",
+        SCREENSHOT_WINDOW: "capture_window",
+    }
+
+    def _request_screenshot(self, mode: str = SCREENSHOT_REGION):
+        """发起一次截图。可被托盘菜单（主线程）或热键回调（非 Qt 线程）调用。
+
+        取景本身由 ScreenshotService 在后台线程/主线程自行安排，这里只用
+        QueuedConnection 把调用投递到主线程，保证 Qt 侧对象都在 GUI 线程被碰。
+        """
+        service = getattr(self, "screenshot_service", None)
+        slot = self._SCREENSHOT_SLOTS.get(mode)
+        if service is None or not slot:
+            logger.warning(f"截图请求被忽略: service={service!r} mode={mode!r}")
+            return
+        try:
+            QMetaObject.invokeMethod(service, slot, Qt.QueuedConnection)
+        except Exception as e:
+            logger.error(f"发起截图失败: {e}")
+
+    def _on_screenshot_hotkey(self):
+        """截图热键回调：默认走区域框选。"""
+        self._request_screenshot(SCREENSHOT_REGION)
+
+    def _on_screenshot_saved(self, item):
+        """截图已入库（必要时也已复制到剪贴板），给用户一个轻提示。"""
+        try:
+            from config import settings as _settings
+            copied = bool(_settings().screenshot_copy_to_clipboard)
+        except Exception:
+            copied = True
+        message = t("screenshot_saved") if copied else t("screenshot_saved_no_copy")
+        self._notify_tray(message)
+
+    def _on_screenshot_failed(self, message: str):
+        logger.warning(f"截图失败: {message}")
+        self._record_health_issue("screenshot", "warning", message)
+        self._notify_tray(message, warning=True)
+
+    def _notify_tray(self, message: str, warning: bool = False):
+        """托盘气泡提示。缺托盘（如 headless 测试）时静默跳过。"""
+        try:
+            icon = getattr(self, "tray_icon", None)
+            if icon is None:
+                return
+            icon.showMessage(
+                t("app_name"),
+                message,
+                QSystemTrayIcon.MessageIcon.Warning
+                if warning
+                else QSystemTrayIcon.MessageIcon.Information,
+                5000,
+            )
+        except Exception:
+            logger.debug("托盘提示发送失败", exc_info=True)
+
+    def _prompt_screen_recording_permission(self):
+        """macOS: 引导用户授权「屏幕录制」权限（截图必需）。"""
+        from core.screenshot_service import request_screen_recording_permission
+
+        msg = QMessageBox()
+        msg.setWindowTitle(t("screenshot_permission_title"))
+        msg.setText(t("screenshot_permission_msg"))
+        msg.setInformativeText(t("screenshot_permission_hint"))
+        msg.setIcon(QMessageBox.Icon.Information)
+        open_btn = msg.addButton(
+            t("open_system_settings"), QMessageBox.ButtonRole.ActionRole
+        )
+        msg.addButton(t("cancel"), QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if msg.clickedButton() != open_btn:
+            return
+
+        # 先让系统弹一次 TCC 授权框（首次有效）；用户此前拒绝过就不会再弹，
+        # 此时仍把设置页打开，由用户手动勾选。
+        granted = request_screen_recording_permission()
+        if granted:
+            return
+        mac_ver_str = platform.mac_ver()[0]  # 形如 "13.4.1"
+        try:
+            mac_major = int(mac_ver_str.split(".")[0])
+        except (ValueError, IndexError):
+            mac_major = 12
+        if mac_major >= 13:
+            prefs_url = (
+                "x-apple.systempreferences:com.apple.settings."
+                "PrivacySecurity.extension?Privacy_ScreenCapture"
+            )
+        else:
+            prefs_url = (
+                "x-apple.systempreferences:com.apple.preference.security"
+                "?Privacy_ScreenCapture"
+            )
+        QDesktopServices.openUrl(QUrl(prefs_url))
+
     def _quit(self):
         """退出应用"""
         self._refresh_optional_services_from_context()
-        # 停止热键监听
-        if self.hotkey_listener:
-            self.hotkey_listener.stop()
+        # 停止热键监听（唤出窗口 + 截图两个监听器）
+        for listener in (
+            getattr(self, "hotkey_listener", None),
+            getattr(self, "screenshot_hotkey_listener", None),
+        ):
+            if listener is not None:
+                try:
+                    listener.stop()
+                except Exception:
+                    logger.debug("停止热键监听失败", exc_info=True)
 
         # 卸载插件
         if hasattr(self, 'plugin_manager'):

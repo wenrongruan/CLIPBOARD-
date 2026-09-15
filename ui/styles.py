@@ -115,6 +115,30 @@ QPushButton#tabBtn:checked {
     border-bottom: 2px solid #4fc3f7;
 }
 
+/* 左侧栏：折叠成窄轨道后靠这条分隔线才读得出是"一条轨道"而不是空掉 */
+QWidget#sidebar {
+    border-right: 1px solid #3a3a3a;
+}
+
+QPushButton#sidebarToggleBtn {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    color: #8f8f8f;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 0;
+}
+
+QPushButton#sidebarToggleBtn:hover {
+    background-color: #3c3c3c;
+    color: #ffffff;
+}
+
+QPushButton#sidebarToggleBtn:pressed {
+    background-color: #4a4a4a;
+}
+
 QListWidget {
     background-color: #2b2b2b;
     border: none;

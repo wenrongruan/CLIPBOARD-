@@ -362,7 +362,7 @@ class ClipboardMonitor(QObject):
         try:
             # 延迟导入 PIL 和 image_utils，缩短冷启动时间，且仅在后台线程首次使用时加载
             from PIL import Image
-            from utils.image_utils import create_thumbnail, image_to_bytes
+            from utils.image_utils import image_to_bytes
 
             pil_img = Image.frombytes("RGBA", (width, height), raw_bytes)
             image_data = image_to_bytes(pil_img, format="PNG")
@@ -370,55 +370,105 @@ class ClipboardMonitor(QObject):
             if not image_data:
                 return
 
-            if s.max_image_size_kb > 0 and len(image_data) > s.max_image_size_kb * 1024:
-                logger.info(f"图片超过最大大小限制 ({len(image_data) // 1024}KB > {s.max_image_size_kb}KB)，跳过")
-                return
-
-            content_hash = compute_content_hash(image_data)
-
-            now_ms = int(time.time() * 1000)
-
-            # 检查是否已存在：重复图片刷新 created_at 并通知 UI 置顶
-            existing = self.repository.get_by_hash(content_hash)
-            if existing and existing.id:
-                try:
-                    self.repository.touch_item(existing.id, now_ms)
-                    existing.created_at = now_ms
-                    self._threadsafe_emit_item_added(existing)
-                except Exception as e:
-                    logger.warning(f"重复图片置顶失败: {e}")
-                return
-
-            # 创建缩略图
-            try:
-                thumbnail = create_thumbnail(image_data, THUMBNAIL_SIZE)
-            except Exception as e:
-                logger.warning(f"创建缩略图失败: {e}")
-                thumbnail = None
-
-            item = ImageClipboardItem(
-                image_data=image_data,
-                image_thumbnail=thumbnail,
-                content_hash=content_hash,
-                preview=f"[图片 {width}x{height}]",
-                device_id=s.device_id,
-                device_name=s.device_name,
-                created_at=int(time.time() * 1000),
-                source_app=source_app_value,
-                source_title=source_title_value,
-            )
-
-            item_id = self.repository.add_item(item)
-            item.id = item_id
-
-            self._maybe_cleanup()
-
-            logger.info(f"保存图片成功: {width}x{height}")
-            self._threadsafe_emit_item_added(item)
+            self._persist_image(image_data, s, source_app_value, source_title_value)
 
         except Exception as e:
             logger.error(f"后台处理图片失败: {e}")
             self._threadsafe_emit_error_occurred(f"图片保存失败: {e}")
+
+    def persist_image_bytes(
+        self,
+        image_data: bytes,
+        *,
+        source_app: str = "",
+        source_title: str = "",
+        preview_prefix: str = "图片",
+    ) -> Optional[ImageClipboardItem]:
+        """把一段已编码的图片字节（PNG/JPEG…）走与剪贴板图片一致的入库链路。
+
+        供截图等"外部产图方"复用：大小限制 → 去重 → 缩略图 → 入库 → 发 item_added。
+        同步执行，调用方自己负责放到合适的线程上（解码+缩略图会占用几十到几百毫秒）。
+
+        返回落库的条目；命中同 hash 的已有图片时返回该条目并已 touch 置顶；
+        被 max_image_size_kb 拦下时返回 None。
+
+        注意：这里不检查 settings().save_images——截图是用户显式动作，
+        即使关掉了"记录复制图片"也应当保留。
+        """
+        return self._persist_image(
+            image_data, settings(), source_app, source_title, preview_prefix
+        )
+
+    def _persist_image(
+        self,
+        image_data: bytes,
+        s,
+        source_app_value: str = "",
+        source_title_value: str = "",
+        preview_prefix: str = "图片",
+    ) -> Optional[ImageClipboardItem]:
+        """图片入库的共享实现。剪贴板路径和 persist_image_bytes 都走这里。"""
+        # 延迟导入：冷启动时不必加载 PIL / image_utils
+        from utils.image_utils import create_thumbnail, get_image_size
+
+        if s.max_image_size_kb > 0 and len(image_data) > s.max_image_size_kb * 1024:
+            logger.info(
+                f"图片超过最大大小限制 ({len(image_data) // 1024}KB > "
+                f"{s.max_image_size_kb}KB)，跳过"
+            )
+            return None
+
+        content_hash = compute_content_hash(image_data)
+
+        now_ms = int(time.time() * 1000)
+
+        # 检查是否已存在：重复图片刷新 created_at 并通知 UI 置顶
+        existing = self.repository.get_by_hash(content_hash)
+        if existing and existing.id:
+            try:
+                self.repository.touch_item(existing.id, now_ms)
+                existing.created_at = now_ms
+                self._threadsafe_emit_item_added(existing)
+            except Exception as e:
+                logger.warning(f"重复图片置顶失败: {e}")
+            return existing
+
+        try:
+            width, height = get_image_size(image_data)
+        except Exception as e:
+            logger.warning(f"读取图片尺寸失败: {e}")
+            width = height = 0
+
+        # 创建缩略图
+        try:
+            thumbnail = create_thumbnail(image_data, THUMBNAIL_SIZE)
+        except Exception as e:
+            logger.warning(f"创建缩略图失败: {e}")
+            thumbnail = None
+
+        preview = (
+            f"[{preview_prefix} {width}x{height}]" if width and height else f"[{preview_prefix}]"
+        )
+        item = ImageClipboardItem(
+            image_data=image_data,
+            image_thumbnail=thumbnail,
+            content_hash=content_hash,
+            preview=preview,
+            device_id=s.device_id,
+            device_name=s.device_name,
+            created_at=int(time.time() * 1000),
+            source_app=source_app_value,
+            source_title=source_title_value,
+        )
+
+        item_id = self.repository.add_item(item)
+        item.id = item_id
+
+        self._maybe_cleanup()
+
+        logger.info(f"保存图片成功: {width}x{height}")
+        self._threadsafe_emit_item_added(item)
+        return item
 
     def copy_to_clipboard(self, item: ClipboardItem) -> bool:
         if isinstance(item, TextClipboardItem) and item.text_content:

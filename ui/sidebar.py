@@ -5,6 +5,10 @@
 - 列出当前 space 的标签，选中时 emit tag_filter_changed(tag_id or None)
 - 提供"新建 Space"、"管理团队"、"升级"按钮
 
+折叠：
+- 标题行右侧的 ‹/› 按钮可把整块内容收进 36px 窄轨道，给右侧列表让出宽度
+- 状态写入 settings.sidebar_collapsed，重启后保持
+
 注意：
 - 所有 service 调用都 try/except 兜底，避免未登录/schema 缺失时崩溃
 - 个人空间统一用 space_id=None 表示（SpaceService 的约定）
@@ -15,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -27,11 +31,19 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 logger = logging.getLogger(__name__)
+
+# 展开 / 折叠态的侧栏宽度（px）。
+# 折叠态 = 只剩一条窄轨道放切换按钮，展开态 = 原来的 200px。
+EXPANDED_WIDTH = 200
+COLLAPSED_WIDTH = 38
+# 折叠动画时长（ms）；太慢会挡住用户连续操作
+TOGGLE_DURATION = 160
 
 
 class Sidebar(QWidget):
@@ -42,6 +54,7 @@ class Sidebar(QWidget):
     create_space_requested = Signal()
     manage_team_requested = Signal()
     upgrade_requested = Signal()
+    collapsed_changed = Signal(bool)        # True = 已折叠成窄轨道
 
     def __init__(
         self,
@@ -57,12 +70,92 @@ class Sidebar(QWidget):
         self._spaces: list = []               # [Space]，与 combo index 对齐（0 号是个人空间占位）
         self._suppress_space_signal = False
         self._suppress_tag_signal = False
+        self._collapsed = self._read_saved_collapsed()
         self.setObjectName("sidebar")
-        self.setFixedWidth(200)
+        # 折叠靠动画改 min/maxWidth，这里先把策略放开，否则 QHBoxLayout 会把宽度钉死
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._setup_ui()
+        # 首帧直接落到目标宽度（不做动画），避免启动瞬间看到一次无意义的收缩
+        self.set_collapsed(self._collapsed, animate=False, persist=False)
         self.refresh_spaces()
         self.refresh_tags(None)
         self._refresh_entitlement_ui()
+
+    # ------------------------------------------------------------------
+    # 折叠状态
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _read_saved_collapsed() -> bool:
+        """读取上次的折叠状态；配置不可用时按展开处理。"""
+        try:
+            from config import settings as _settings
+            return bool(getattr(_settings(), "sidebar_collapsed", False))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"读取 sidebar_collapsed 失败: {exc}")
+            return False
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def toggle_collapsed(self) -> None:
+        """折叠 / 展开标签栏。"""
+        self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, collapsed: bool, *, animate: bool = True, persist: bool = True) -> None:
+        """切换折叠态。
+
+        animate=False 用于构造期首帧；persist=False 用于不希望回写配置的调用方。
+        """
+        collapsed = bool(collapsed)
+        changed = collapsed != self._collapsed
+        self._collapsed = collapsed
+
+        self._content.setVisible(not collapsed)
+        self.header_label.setVisible(not collapsed)
+        self.collapse_btn.setText("›" if collapsed else "‹")
+        self.collapse_btn.setToolTip("展开标签栏" if collapsed else "折叠标签栏")
+
+        target = COLLAPSED_WIDTH if collapsed else EXPANDED_WIDTH
+        if animate and changed:
+            self._animate_width(target)
+        else:
+            self._set_width_now(target)
+
+        if changed and persist:
+            self._persist_collapsed(collapsed)
+        if changed:
+            self.collapsed_changed.emit(collapsed)
+
+    @staticmethod
+    def _persist_collapsed(collapsed: bool) -> None:
+        try:
+            from config import update_settings
+            update_settings(sidebar_collapsed=collapsed)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"保存 sidebar_collapsed 失败: {exc}")
+
+    def _set_width_now(self, width: int) -> None:
+        self._width_group.stop()
+        self.setFixedWidth(width)
+
+    def _animate_width(self, target: int) -> None:
+        """对 min/maxWidth 同时做补间。
+
+        Why 不能只动 maximumWidth：折叠时内容已隐藏，sizeHint 会瞬间塌到几像素，
+        布局立刻把宽度钳到那么小 —— 看起来就是"啪"地闪一下。minimumWidth 一起补间
+        才能让宽度真正平滑地跟着动画走。
+        """
+        start = self.width()
+        if start == target:
+            self._set_width_now(target)
+            return
+        self._width_group.stop()
+        for idx in range(self._width_group.animationCount()):
+            anim = self._width_group.animationAt(idx)
+            anim.setStartValue(start)
+            anim.setEndValue(target)
+        self._width_group.start()
 
     # ------------------------------------------------------------------
     # UI 构造
@@ -71,17 +164,45 @@ class Sidebar(QWidget):
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
-        # --- 标签树（主路径，始终展示）---
-        tag_label = QLabel("标签")
-        tag_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
-        layout.addWidget(tag_label)
+        # --- 标题行：标题 + 折叠按钮（这一行始终可见，折叠后只剩按钮）---
+        # Why 包一层 QWidget 再 addWidget(..., Qt.AlignTop)：折叠时 _content 被隐藏，
+        # 外层 QVBoxLayout 没有任何可伸展的项，会把剩余高度均分给所有 item，
+        # 按钮就被推到面板正中。加上 AlignTop 后这一行严格按 sizeHint 贴顶。
+        self._header = QWidget()
+        self._header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        header = QHBoxLayout(self._header)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
 
+        self.header_label = QLabel("标签")
+        self.header_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        header.addWidget(self.header_label)
+        header.addStretch(1)
+
+        self.collapse_btn = QPushButton("‹")
+        self.collapse_btn.setObjectName("sidebarToggleBtn")
+        # 折叠态宽度 38 - 左右各 8 的外边距 = 22，正好是这个按钮 —— 再把命中区放大就放不下了
+        self.collapse_btn.setFixedSize(22, 22)
+        self.collapse_btn.setCursor(Qt.PointingHandCursor)
+        self.collapse_btn.setToolTip("折叠标签栏")
+        self.collapse_btn.clicked.connect(self.toggle_collapsed)
+        header.addWidget(self.collapse_btn)
+
+        layout.addWidget(self._header, 0, Qt.AlignTop)
+
+        # --- 可折叠内容：标签列表 / 空间 / 团队 / 升级入口 ---
+        self._content = QWidget()
+        content_layout = QVBoxLayout(self._content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+
+        # 标签树（主路径）
         self.tag_list = QListWidget()
         self.tag_list.setSelectionMode(QListWidget.SingleSelection)
         self.tag_list.itemSelectionChanged.connect(self._on_tag_selection_changed)
-        layout.addWidget(self.tag_list, 1)
+        content_layout.addWidget(self.tag_list, 1)
 
         # --- Space 切换（默认隐藏；登录且存在非个人 space 时再显示）---
         self.space_section = QWidget()
@@ -106,21 +227,31 @@ class Sidebar(QWidget):
         space_row.addWidget(self.create_space_btn)
 
         space_layout.addLayout(space_row)
-        layout.addWidget(self.space_section)
+        content_layout.addWidget(self.space_section)
         self.space_section.setVisible(False)
 
         # --- 团队（按权益显示）---
         self.manage_team_btn = QPushButton("管理团队")
         self.manage_team_btn.clicked.connect(self.manage_team_requested.emit)
-        layout.addWidget(self.manage_team_btn)
+        content_layout.addWidget(self.manage_team_btn)
         self.manage_team_btn.setVisible(False)
 
         # --- 升级 / 了解云端增强（默认隐藏；登录且非 Team 档位时再显示）---
         self.upgrade_btn = QPushButton("了解云端增强")
         self.upgrade_btn.setObjectName("okButton")
         self.upgrade_btn.clicked.connect(self.upgrade_requested.emit)
-        layout.addWidget(self.upgrade_btn)
+        content_layout.addWidget(self.upgrade_btn)
         self.upgrade_btn.setVisible(False)
+
+        layout.addWidget(self._content, 1)
+
+        # --- 宽度补间：min/maxWidth 一起动（见 _animate_width 注释）---
+        self._width_group = QParallelAnimationGroup(self)
+        for _prop in (b"minimumWidth", b"maximumWidth"):
+            anim = QPropertyAnimation(self, _prop, self)
+            anim.setDuration(TOGGLE_DURATION)
+            anim.setEasingCurve(QEasingCurve.InOutCubic)
+            self._width_group.addAnimation(anim)
 
     # ------------------------------------------------------------------
     # 刷新方法（给外部调用）
@@ -323,4 +454,4 @@ class _CreateSpaceDialog(QDialog):
         return self.type_combo.currentData() or "personal"
 
 
-__all__ = ["Sidebar"]
+__all__ = ["Sidebar", "EXPANDED_WIDTH", "COLLAPSED_WIDTH"]

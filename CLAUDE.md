@@ -24,6 +24,8 @@
 - 插件配置文件位于 `<config_dir>/plugins/<plugin_id>/config.json`。
 - `settings.json`、`clipboard.db` 和 `logs/` 都在系统配置目录下的 `SharedClipboard/` 子目录中。
 - 文件云同步（付费功能）由 `core/file_sync_service.py` + `core/file_repository.py` + `core/file_storage.py` 实现，付费闸在 `core/entitlement_service.py`。
+- 截图（区域/全屏/窗口）由 `core/screenshot_service.py` 取景：macOS 调 `/usr/sbin/screencapture`（需要「屏幕录制」权限，`has_screen_recording_permission()` 探测），其他平台走 Qt 抓屏 + `ui/screenshot_overlay.py` 遮罩框选。截图落库复用 `ClipboardMonitor.persist_image_bytes()`，不直接写库。
+- 截图热键是第二个全局热键（`settings.screenshot_hotkey`，默认 macOS `<cmd>+<shift>+a`、其他平台 `<ctrl>+<shift>+a`）；macOS 上两个热键各用一个 `MacOSGlobalHotkey` 实例，非 macOS 走 pynput 的 `GlobalHotKeys` dict。热键只在启动时注册，改了要重启。
 - 官网与后端 API 源码在 `website/` 子目录（部署到 `www.jlike.com`）。`website/CLAUDE.md` 有详细说明；客户端里的 `pricing.html` / `account.html` / `privacy.html` 外链都指向同一仓库的前端。
 - 团队邀请的字段约定（v3.5）：客户端 `invite_space_member` body 是 `{email, role}`，后端 `space_invitations` 表永远落库；响应有 `status=added` / `status=invite_pending` 两种，都带 `invitation_url`。客户端 UI 展示并复制此链接，不再发邮件。
 

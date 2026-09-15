@@ -140,6 +140,9 @@ class AppSettings:
     dock_edge: str = "right"
     hotkey: str = ""  # 空表示使用平台默认 — 用 get_effective_hotkey() 读取
     is_floating: bool = False
+    # 截图：热键留空表示用平台默认（get_effective_screenshot_hotkey()）
+    screenshot_hotkey: str = ""
+    screenshot_copy_to_clipboard: bool = True
     floating_position: Optional[Tuple[int, int]] = None
     language: str = "zh_CN"
 
@@ -177,6 +180,9 @@ class AppSettings:
 
     # 登录后"同步范围说明"是否已展示过（仅展示一次，避免重复打扰）
     cloud_scope_explainer_shown: bool = False
+
+    # 左侧标签栏是否折叠成窄轨道（用户手动切换，需跨重启保留）
+    sidebar_collapsed: bool = False
 
 
 # ============ 序列化 ============
@@ -224,6 +230,8 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         hotkey=data.get("hotkey", ""),
         is_floating=bool(data.get("is_floating", False)),
         floating_position=floating_pos,
+        screenshot_hotkey=data.get("screenshot_hotkey", ""),
+        screenshot_copy_to_clipboard=bool(data.get("screenshot_copy_to_clipboard", True)),
         language=data.get("language", "zh_CN"),
         save_text=bool(data.get("save_text", True)),
         save_images=bool(data.get("save_images", True)),
@@ -242,6 +250,7 @@ def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
         excluded_source_apps=tuple(data.get("excluded_source_apps", [])),
         onboarding_done=bool(data.get("onboarding_done", False)),
         cloud_scope_explainer_shown=bool(data.get("cloud_scope_explainer_shown", False)),
+        sidebar_collapsed=bool(data.get("sidebar_collapsed", False)),
     )
     return snapshot, extras
 
@@ -267,6 +276,8 @@ def _snapshot_to_dict(s: AppSettings, extras: dict) -> dict:
         "hotkey": s.hotkey,
         "is_floating": s.is_floating,
         "floating_position": list(s.floating_position) if s.floating_position else None,
+        "screenshot_hotkey": s.screenshot_hotkey,
+        "screenshot_copy_to_clipboard": s.screenshot_copy_to_clipboard,
         "language": s.language,
         "save_text": s.save_text,
         "save_images": s.save_images,
@@ -285,6 +296,7 @@ def _snapshot_to_dict(s: AppSettings, extras: dict) -> dict:
         "excluded_source_apps": list(s.excluded_source_apps),
         "onboarding_done": s.onboarding_done,
         "cloud_scope_explainer_shown": s.cloud_scope_explainer_shown,
+        "sidebar_collapsed": s.sidebar_collapsed,
     })
     return d
 
@@ -758,6 +770,22 @@ def get_default_hotkey() -> str:
 def get_effective_hotkey() -> str:
     """获取生效的 hotkey:用户设置 fallback 到平台默认。"""
     return settings().hotkey or get_default_hotkey()
+
+
+def get_default_screenshot_hotkey() -> str:
+    """截图默认热键。
+
+    macOS 上避开系统自带的 Cmd+Shift+3/4/5，改用 Cmd+Shift+A；
+    其他平台用 Ctrl+Shift+A（pynput 的 <ctrl> token）。
+    """
+    if IS_MACOS:
+        return "<cmd>+<shift>+a"
+    return "<ctrl>+<shift>+a"
+
+
+def get_effective_screenshot_hotkey() -> str:
+    """获取生效的截图热键:用户设置 fallback 到平台默认。"""
+    return settings().screenshot_hotkey or get_default_screenshot_hotkey()
 
 
 def get_effective_database_path() -> str:

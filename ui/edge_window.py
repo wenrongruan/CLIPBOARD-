@@ -35,6 +35,14 @@ class EdgeHiddenWindow(QWidget):
             self.setAttribute(Qt.WA_TranslucentBackground, False)
             # 切换 Space 时不抢焦点
             self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            # Why: Qt.Tool 在 macOS 上对应 NSPanel，而 NSPanel 默认
+            # hidesOnDeactivate=YES —— 只要共享剪贴板不是当前激活的 App
+            # (用户正在 Chrome / 编辑器里)，整个面板就被 macOS 隐藏。
+            # 此时鼠标怼到停靠边缘，Qt 侧的几何动画照跑、_is_visible 也置 True，
+            # 但屏幕上一个像素都不会出现；而全局热键能弹出来是因为它走了
+            # activateWindow() 把 App 激活了。边缘停靠窗口必须在后台也能显示，
+            # 因此显式要求工具窗口常显。该属性必须在创建原生窗口(show)之前设置。
+            self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
         else:
             self.setWindowFlags(
                 Qt.FramelessWindowHint
@@ -166,12 +174,32 @@ class EdgeHiddenWindow(QWidget):
         self._is_pinned = not self._is_pinned
         return self._is_pinned
 
+    def _get_trigger_zone_rect(self, screen: QScreen) -> QRect:
+        """计算触发区时使用的屏幕矩形。
+
+        macOS：availableGeometry 会剔掉菜单栏（顶部，本机 33px）和 Dock（底部，
+        本机 82px），直接拿它算会让上/下两条触发带落在离可见边缘几十像素的屏幕
+        中间，用户把鼠标怼到屏幕最上/最下沿反而进不去 →「设置了停靠位置，移过去
+        不显示」。所以 macOS 用 geometry()（物理边缘）。
+        其它平台沿用 availableGeometry，不改动 Windows/Linux 已有的手感。
+        """
+        if self._is_macos:
+            return screen.geometry()
+        return screen.availableGeometry()
+
     def _get_trigger_zone(self, screen_rect: QRect) -> QRect:
+        """把鼠标触发带铺在 screen_rect 的对应边缘上（入参用哪个矩形见
+        _get_trigger_zone_rect）。
+
+        右/下两端用 right() - zone + 1 收尾，让屏幕最外那一列/行像素也落在触发区内。
+        原先写成 right() - zone，整条带子内缩 1px，鼠标怼死在边缘最后一像素上会刚好
+        落在区外，表现为「时灵时不灵」。
+        """
         zone = self._trigger_zone
 
         if self._dock_edge == "right":
             return QRect(
-                screen_rect.right() - zone,
+                screen_rect.right() - zone + 1,
                 screen_rect.top(),
                 zone,
                 screen_rect.height(),
@@ -193,7 +221,7 @@ class EdgeHiddenWindow(QWidget):
         else:  # bottom
             return QRect(
                 screen_rect.left(),
-                screen_rect.bottom() - zone,
+                screen_rect.bottom() - zone + 1,
                 screen_rect.width(),
                 zone,
             )
@@ -291,7 +319,9 @@ class EdgeHiddenWindow(QWidget):
             return
         cursor_screen_rect = cursor_screen.availableGeometry()
 
-        trigger_zone = self._get_trigger_zone(cursor_screen_rect)
+        # 触发区按「物理」屏幕边缘算（鼠标真正能怼到的地方），
+        # 滑入/滑出位置仍按 availableGeometry 算（避开菜单栏 / Dock）。
+        trigger_zone = self._get_trigger_zone(self._get_trigger_zone_rect(cursor_screen))
 
         if trigger_zone.contains(cursor_pos):
             if not self._is_visible or not self.geometry().intersects(cursor_screen_rect):

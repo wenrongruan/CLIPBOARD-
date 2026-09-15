@@ -9,5 +9,9 @@ keyring>=25.0.0
 pywin32 >= 306; sys_platform == "win32"
 psutil >= 5.9; sys_platform == "win32" or sys_platform == "linux"
 pyobjc-framework-Cocoa >= 10.0; sys_platform == "darwin"
+# Quartz 单独列出：Cocoa 并不依赖它，但热键的「输入监控」探测
+# （CGPreflightListenEventAccess）和截图的「屏幕录制」探测
+# （CGPreflightScreenCaptureAccess）都要用。
+pyobjc-framework-Quartz >= 10.0; sys_platform == "darwin"
 python-xlib >= 0.33; sys_platform == "linux"
 jeepney >= 0.8; sys_platform == "linux"
