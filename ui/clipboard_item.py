@@ -2,6 +2,7 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPixmapCache
+import shiboken6
 from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
@@ -21,6 +22,12 @@ class ClipboardItemWidget(QWidget):
     save_clicked = Signal(ClipboardItem)
     cloud_delete_clicked = Signal(ClipboardItem)
     image_url_clicked = Signal(ClipboardItem)
+
+    # 行高常量：controller 计算行高时必须引用这里，三处各写一遍魔法数字曾造成
+    # "删除按钮被截一半"的 bug（改样式时三处不同步）。
+    MIN_H_TEXT = 76   # 纯文本条目最小行高
+    MIN_H_IMAGE = 92  # 图片条目最小行高
+    ROW_EXTRA = 8     # item 边框/边距附加高度
 
     def __init__(self, item: ClipboardItem, parent=None):
         super().__init__(parent)
@@ -83,7 +90,13 @@ class ClipboardItemWidget(QWidget):
                 image_label.setPixmap(QPixmap())
                 thumb_bytes = self.item.image_thumbnail
                 def _decode_and_set(lbl=image_label, key=cache_key, data=thumb_bytes):
-                    if lbl is None:
+                    # Why 校验有效性：singleShot 若不绑定 context 对象，行在下一
+                    # tick 前被销毁时闭包仍会执行，lbl.setPixmap 抛
+                    # "Internal C++ object already deleted" 污染事件循环。
+                    try:
+                        if lbl is None or not shiboken6.isValid(lbl):
+                            return
+                    except Exception:
                         return
                     pixmap = QPixmap()
                     pixmap.loadFromData(data)
@@ -95,7 +108,8 @@ class ClipboardItemWidget(QWidget):
                     if key:
                         QPixmapCache.insert(key, scaled)
                     lbl.setPixmap(scaled)
-                QTimer.singleShot(0, _decode_and_set)
+                # 绑定 context：image_label 销毁时定时器回调一并取消
+                QTimer.singleShot(0, image_label, _decode_and_set)
             layout.addWidget(image_label)
 
             # 图片信息

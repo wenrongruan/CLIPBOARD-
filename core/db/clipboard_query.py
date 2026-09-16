@@ -82,11 +82,14 @@ class ClipboardQuery:
                 SELECT {ClipboardDAO._SELECT_FIELDS_NO_IMAGE}
                 FROM clipboard_items
                 {where_clause}
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT ? OFFSET ?
             """
             rows = self._dao._fetchall(conn, sql, tuple(params_where) + (page_size, offset))
             items = [ClipboardItem.from_db_row(row) for row in rows]
+            # Why 回填 tag_ids：search/get_items_by_tag 都会回填，这里不回填的话
+            # 翻页路径拿到的条目标签列为空，UI 表现与搜索路径不一致。
+            self._fill_tag_ids(items)
             return items, total
 
         return self.db.execute_read(operation)
@@ -278,6 +281,23 @@ class ClipboardQuery:
 
         return clauses, params
 
+    # LIKE 通配符转义字符。选 '!' 而不是 '\'：反斜杠在 MySQL 里本身就是
+    # 字符串转义符，写进 SQL 文本还要二次转义，两个方言行为还不同。
+    _LIKE_ESC = "!"
+
+    @classmethod
+    def _escape_like(cls, text: str) -> str:
+        """转义用户输入里的 LIKE 通配符。
+
+        Why 必须转义：搜索 "100%" 时 % 会被当通配符（语义错误），输入 "_" 会
+        匹配任意单字符。参数化只能防注入，防不了通配符语义污染。
+        """
+        return (
+            text.replace(cls._LIKE_ESC, cls._LIKE_ESC * 2)
+            .replace("%", f"{cls._LIKE_ESC}%")
+            .replace("_", f"{cls._LIKE_ESC}_")
+        )
+
     def _run_query(
         self,
         query_spec: QuerySpec,
@@ -294,15 +314,21 @@ class ClipboardQuery:
         def op(conn):
             # SQLite + FTS5 可用：关键词走 FTS5 子查询
             if has_text and self._has_fts and not self._is_mysql:
-                fts_expr = query_spec.fts_match_expression()
-                where_sql = "id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)"
-                params: List = [fts_expr]
-                if filter_clauses:
-                    where_sql += " AND " + " AND ".join(filter_clauses)
-                    params.extend(filter_params)
-                return self._do_select(
-                    conn, where_sql, params, limit, offset, for_count
-                )
+                try:
+                    fts_expr = query_spec.fts_match_expression()
+                    where_sql = "id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)"
+                    params: List = [fts_expr]
+                    if filter_clauses:
+                        where_sql += " AND " + " AND ".join(filter_clauses)
+                        params.extend(filter_params)
+                    return self._do_select(
+                        conn, where_sql, params, limit, offset, for_count
+                    )
+                except Exception as exc:
+                    # Why 必须兜底：FTS5 的 MATCH 语法对普通输入极敏感（搜 "AND"、
+                    # "*"、"a**b" 都会抛 fts5: syntax error），异常冒泡后整个列表
+                    # 页直接报"加载失败"并清空。降级到 LIKE 语义正确性稍差但可用。
+                    logger.warning("FTS 查询失败，降级到 LIKE 搜索: %s", exc)
 
             # FTS 不可用或无关键词：LIKE 回退 + filter
             like_clauses: List[str] = []
@@ -310,14 +336,14 @@ class ClipboardQuery:
             if has_text:
                 for kw in query_spec.keywords:
                     like_clauses.append(
-                        "(text_content LIKE ? OR preview LIKE ?)"
+                        "(text_content LIKE ? ESCAPE '!' OR preview LIKE ? ESCAPE '!')"
                     )
-                    like_params.extend([f"%{kw}%", f"%{kw}%"])
+                    like_params.extend([self._escape_like(kw), self._escape_like(kw)])
                 for phrase in query_spec.exact_phrases:
                     like_clauses.append(
-                        "(text_content LIKE ? OR preview LIKE ?)"
+                        "(text_content LIKE ? ESCAPE '!' OR preview LIKE ? ESCAPE '!')"
                     )
-                    like_params.extend([f"%{phrase}%", f"%{phrase}%"])
+                    like_params.extend([self._escape_like(phrase), self._escape_like(phrase)])
 
             all_clauses = like_clauses + filter_clauses
             where_sql = " AND ".join(all_clauses) if all_clauses else ""
@@ -344,7 +370,10 @@ class ClipboardQuery:
         sql = f"SELECT {ClipboardDAO._SELECT_FIELDS_NO_IMAGE} FROM clipboard_items"
         if where_sql:
             sql += f" WHERE {where_sql}"
-        sql += " ORDER BY created_at DESC"
+        # Why 加 id DESC tiebreaker：touch_item 会改写 created_at，同一毫秒内两条
+        # 并列时，纯 created_at 排序在翻页之间不稳定 —— 同一行可能出现在两页，
+        # 另一行被挤掉，用户表现为"复制了却找不到"。
+        sql += " ORDER BY created_at DESC, id DESC"
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params = params + [limit, offset]
@@ -500,7 +529,7 @@ class ClipboardQuery:
         sql = (
             f"SELECT {ClipboardDAO._SELECT_FIELDS_NO_IMAGE} FROM clipboard_items "
             f"WHERE id IN (SELECT item_id FROM clipboard_tags WHERE tag_id = ?) "
-            f"ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            f"ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         )
 
         def op(conn):

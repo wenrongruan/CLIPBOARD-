@@ -11,6 +11,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -20,8 +21,22 @@ logger = logging.getLogger(__name__)
 
 _CHUNK = 1 << 20  # 1 MB
 
+# content_sha256 必须是 64 位小写/大写十六进制。
+# Why 入口强制校验：sandbox_path_for 直接把 sha 拼进路径（root / sha[:2] / f"{sha}.bin"），
+# 值来自云端返回的 content_sha256。若不校验，"../../x" 这类值配合
+# mkdir(parents=True) 可以穿越沙盒容器写任意文件。
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def validate_sha256(sha) -> str:
+    """校验并规范化 sha256（转小写）。非法值抛 ValueError。"""
+    if not isinstance(sha, str) or _SHA256_RE.fullmatch(sha) is None:
+        raise ValueError(f"非法 content_sha256: {sha!r}")
+    return sha.lower()
+
 
 def sandbox_path_for(sha: str) -> Path:
+    sha = validate_sha256(sha)
     from config import get_files_local_dir
     root = Path(get_files_local_dir())
     sub = root / sha[:2]
@@ -78,7 +93,15 @@ def materialize_for_open(local_path: str, display_name: str) -> str:
     返回可直接交给 `open` / `QDesktopServices` 的路径。
     """
     from config import get_files_local_dir
-    safe_name = os.path.basename(display_name or "").strip() or "file"
+    raw_name = os.path.basename(display_name or "").strip()
+    # Why 不能只靠 basename：basename("..") 返回 ".."，直接拼路径等于往上级目录写。
+    # display_name 来自云端返回的文件名，必须白名单化：剔除路径分隔符 / NUL /
+    # 控制字符，落到 "." / ".." 时回退为 "file"。
+    raw_name = re.sub(r"[\x00-\x1f\x7f]", "", raw_name)
+    raw_name = raw_name.replace("/", "_").replace("\\", "_").replace("\x00", "")
+    if raw_name in ("", ".", ".."):
+        raw_name = "file"
+    safe_name = raw_name
     sha_stem = Path(local_path).stem or "item"
     root = Path(get_files_local_dir()) / "open_view" / sha_stem
     root.mkdir(parents=True, exist_ok=True)

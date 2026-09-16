@@ -23,6 +23,7 @@ STRINGS = {
         "migrating": '正在迁移数据...',
         "migration_complete": '数据迁移完成，共迁移 {count} 条记录。',
         "migration_failed": '数据迁移失败: {error}',
+        "migration_in_progress": '数据迁移正在进行中，请稍候。',
 
         # 关于 About
         "about": '关于',
@@ -51,6 +52,7 @@ STRINGS = {
         "migrating": 'Migrating data...',
         "migration_complete": 'Migration complete. {count} items migrated.',
         "migration_failed": 'Migration failed: {error}',
+        "migration_in_progress": 'A data migration is already in progress.',
 
         # 关于 About
         "about": 'About',
@@ -79,6 +81,7 @@ STRINGS = {
         "migrating": 'データを移行中...',
         "migration_complete": '移行完了。{count} 件のアイテムを移行しました。',
         "migration_failed": '移行に失敗しました: {error}',
+        "migration_in_progress": 'データ移行が既に進行中です。',
 
         # 关于 About
         "about": 'について',
@@ -107,6 +110,7 @@ STRINGS = {
         "migrating": '데이터 마이그레이션 중...',
         "migration_complete": '마이그레이션 완료. {count}개 항목이 마이그레이션되었습니다.',
         "migration_failed": '마이그레이션 실패: {error}',
+        "migration_in_progress": '마이그레이션이 이미 진행 중입니다.',
 
         # 关于 About
         "about": '정보',
@@ -135,6 +139,7 @@ STRINGS = {
         "migrating": 'Migrando datos...',
         "migration_complete": 'Migración completada. {count} elementos migrados.',
         "migration_failed": 'Error en la migración: {error}',
+        "migration_in_progress": 'Ya hay una migración en curso.',
 
         # 关于 About
         "about": 'Acerca de',
@@ -163,6 +168,7 @@ STRINGS = {
         "migrating": 'Migration des données en cours...',
         "migration_complete": 'Migration terminée. {count} éléments migrés.',
         "migration_failed": 'Échec de la migration: {error}',
+        "migration_in_progress": 'Une migration est déjà en cours.',
 
         # 关于 About
         "about": 'À propos',
@@ -191,6 +197,7 @@ STRINGS = {
         "migrating": 'Daten werden migriert...',
         "migration_complete": 'Migration abgeschlossen. {count} Elemente migriert.',
         "migration_failed": 'Migration fehlgeschlagen: {error}',
+        "migration_in_progress": 'Eine Migration läuft bereits.',
 
         # 关于 About
         "about": 'Über',
@@ -219,6 +226,7 @@ STRINGS = {
         "migrating": 'Миграция данных...',
         "migration_complete": 'Миграция завершена. Перенесено элементов: {count}.',
         "migration_failed": 'Ошибка миграции: {error}',
+        "migration_in_progress": 'Миграция уже выполняется.',
 
         # 关于 About
         "about": 'О программе',

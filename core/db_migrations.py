@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -85,12 +86,43 @@ class DatabaseMigrator:
             return
         if not self.db_path.exists():
             return
-        bak = self.db_path.with_suffix(self.db_path.suffix + ".bak")
+        # Why 不能直接 shutil.copy2 主库文件：WAL 模式下最近提交的事务可能还在
+        # -wal 里没 checkpoint，只拷主库得到的备份是残缺快照。先 checkpoint 再拷，
+        # 保证备份完整；文件名带时间戳且不再覆盖旧备份，迁移失败时回滚点更可靠。
+        try:
+            cur = self.conn.cursor()
+            cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.commit()
+        except Exception as exc:
+            logger.warning("WAL checkpoint 失败（备份可能缺最近提交）: %s", exc)
+
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        bak = self.db_path.with_suffix(f"{self.db_path.suffix}.{ts}.bak")
         try:
             shutil.copy2(self.db_path, bak)
+            # checkpoint 后 -wal 应为空，但保险起见一并备份
+            wal = self.db_path.parent / (self.db_path.name + "-wal")
+            if wal.exists() and wal.stat().st_size > 0:
+                shutil.copy2(wal, bak.with_name(bak.name + "-wal"))
             logger.info("迁移前已备份 SQLite 库到 %s", bak)
+            self._prune_old_backups(self.db_path)
         except OSError as exc:
             logger.warning("备份 SQLite 库失败: %s", exc)
+
+    @staticmethod
+    def _prune_old_backups(db_path, keep: int = 5) -> None:
+        """只保留最近 keep 份备份，避免备份目录无限增长。"""
+        try:
+            # glob 用 .bak* 同时命中备份主文件与配套的 -wal 副本
+            backups = sorted(
+                db_path.parent.glob(db_path.name + ".*.bak*"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for stale in backups[keep * 2:]:  # 主文件 + wal 成对保留
+                stale.unlink()
+        except OSError:
+            pass
 
     def _apply_sqlite(self, sql_text: str) -> None:
         """SQLite 用 executescript，但为了容忍 duplicate column name 错误，

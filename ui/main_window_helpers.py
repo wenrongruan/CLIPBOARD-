@@ -36,6 +36,7 @@ from config import (
     apply_profile,
 )
 from i18n import t, set_language
+from ui.thread_utils import track_thread
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,21 @@ def run_database_migration(window):
         )
         return
 
+    # 重入保护：旧实现把 worker 挂在 window._migration_worker 单一槽位，
+    # 重复触发迁移时新 worker 覆盖旧 worker → 旧线程失去唯一 Python 引用，
+    # 仍在 isRunning() 时被 GC 析构 → Qt qFatal abort 整个进程。
+    running = getattr(window, "_migration_worker", None)
+    if running is not None:
+        try:
+            still_running = running.isRunning()
+        except RuntimeError:
+            # finished 回调里 deleteLater 已销毁 C++ 对象，残留的 Python 包装
+            # 调 isRunning() 会抛 RuntimeError —— 视为已结束
+            still_running = False
+        if still_running:
+            QMessageBox.information(window, t("migrate_data"), t("migration_in_progress"))
+            return
+
     class MigrationWorker(QThread):
         progress = QSignal(int, int)
         finished_ok = QSignal(int)
@@ -261,7 +277,17 @@ def run_database_migration(window):
     worker.progress.connect(on_progress)
     worker.finished_ok.connect(on_success)
     worker.finished_err.connect(on_error)
-    # 防止 worker 被 GC 回收(挂到 window 上)
+
+    def _clear_ref():
+        # Why：槽位留着已 deleteLater 的死包装，下次进来 isRunning() 会抛
+        # RuntimeError；结束时清掉，重入守卫走 None 分支即可。
+        window._migration_worker = None
+
+    worker.finished_ok.connect(_clear_ref)
+    worker.finished_err.connect(_clear_ref)
+    # 登记强引用直到 finished（见 ui/thread_utils 的说明），finished 后自动
+    # discard + deleteLater，不再依赖 window 上的单个槽位。
+    track_thread(worker)
     window._migration_worker = worker
     worker.start()
 
@@ -312,6 +338,13 @@ def show_settings_dialog(window, initial_tab: str = ""):
     if new_language != current_snapshot.language:
         batch["language"] = new_language
         set_language(new_language)
+        # 托盘菜单的 QAction 文本在启动时已固化，切语言后必须重建才能生效
+        tray_rebuild = getattr(window, "tray_rebuild_callback", None)
+        if callable(tray_rebuild):
+            try:
+                tray_rebuild()
+            except Exception as exc:
+                logger.warning(f"重建托盘菜单失败: {exc}")
         need_restart = True
 
     new_edge = dlg_settings["dock_edge"]

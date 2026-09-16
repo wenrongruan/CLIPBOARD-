@@ -89,7 +89,11 @@ class MainWindow(EdgeHiddenWindow):
             self.plugin_manager.set_cloud_client(self.cloud_api)
 
         # 共享线程池(controllers 通过 self._parent 访问)
+        # Why 拆出独立 IO 池：图片保存（读库+写盘）和图片加载共用 max_workers=1
+        # 的 _copy_executor 时，保存一张大图期间所有"点击图片条目复制"请求都会
+        # 排队，UI 表现为点了没反应。
         self._copy_executor = ThreadPoolExecutor(max_workers=1)
+        self._io_executor = ThreadPoolExecutor(max_workers=2)
         self._cloud_executor = ThreadPoolExecutor(max_workers=1)
         # 云同步连接标记(CloudLifecycleController 管理)
         self._cloud_sync_item_added_connected = False
@@ -115,7 +119,9 @@ class MainWindow(EdgeHiddenWindow):
         self.list_controller.load_items()
 
         # 首次启动 3 步引导(非阻塞,跳过即关闭)
-        if not getattr(settings, "onboarding_done", False):
+        # 注意 settings 是 config 里的函数，必须调用：写 getattr(settings, ...)
+        # 取到的是函数对象上的属性（永远不存在），引导框会每次启动都弹。
+        if not settings().onboarding_done:
             QTimer.singleShot(600, self._maybe_show_onboarding)
 
     # ========== UI 构造 ==========
@@ -307,12 +313,18 @@ class MainWindow(EdgeHiddenWindow):
         """惰性创建首启引导,避免阻塞启动。"""
         if self._onboarding_dialog is not None:
             return
-        if getattr(settings, "onboarding_done", False):
+        # settings 是函数,必须调用(见 __init__ 里的注释)
+        if settings().onboarding_done:
             return
         try:
+            from .dialog_utils import center_on_primary_screen
             from .onboarding_dialog import OnboardingDialog
+
             self._onboarding_dialog = OnboardingDialog(self)
             self._onboarding_dialog.finished_or_skipped.connect(self._on_onboarding_done)
+            # 父窗口（本窗口）停在屏幕外，子对话框跟着父窗口定位也会落在屏幕外，
+            # 引导框就等于没弹。show 之前显式摆到主屏正中。
+            center_on_primary_screen(self._onboarding_dialog)
             self._onboarding_dialog.show()
         except Exception as exc:
             logger.debug(f"显示首启引导失败: {exc}")

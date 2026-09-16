@@ -141,10 +141,10 @@ class ClipboardListController(QObject):
         if widget.hasHeightForWidth():
             target_w = self._target_row_width(hint.width())
             # +8: QListWidget::item 的 margin(3+3) + border(1+1) 占据的纵向空间
-            hint_h = widget.heightForWidth(target_w) + 8
+            hint_h = widget.heightForWidth(target_w) + ClipboardItemWidget.ROW_EXTRA
         else:
             hint_h = hint.height()
-        min_h = 92 if item.is_image else 76
+        min_h = ClipboardItemWidget.MIN_H_IMAGE if item.is_image else ClipboardItemWidget.MIN_H_TEXT
         # 宽度仍用 widget 的 sizeHint().width(),让 QListView 自行扩展到 viewport;
         # 若强行写 viewport 宽,纵向滚动条出现后 viewport 变窄,行会比 viewport 宽,
         # 导致右侧按钮被滚动条遮挡。
@@ -171,8 +171,8 @@ class ClipboardListController(QObject):
                 continue
             w = lw.itemWidget(li)
             if isinstance(w, ClipboardItemWidget) and w.hasHeightForWidth():
-                h = w.heightForWidth(target_w) + 8
-                min_h = 92 if w.item.is_image else 76
+                h = w.heightForWidth(target_w) + ClipboardItemWidget.ROW_EXTRA
+                min_h = ClipboardItemWidget.MIN_H_IMAGE if w.item.is_image else ClipboardItemWidget.MIN_H_TEXT
                 cur_w = li.sizeHint().width()
                 li.setSizeHint(QSize(cur_w, max(h, min_h)))
 
@@ -216,7 +216,7 @@ class ClipboardListController(QObject):
         if item.id is not None:
             for idx, existing in enumerate(self._items):
                 if existing.id == item.id:
-                    list_widget.takeItem(idx)
+                    self._remove_row(list_widget, idx)
                     self._items.pop(idx)
                     break
 
@@ -226,9 +226,26 @@ class ClipboardListController(QObject):
         self._items.insert(0, item)
 
         if list_widget.count() > self._page_size:
-            list_widget.takeItem(list_widget.count() - 1)
+            self._remove_row(list_widget, list_widget.count() - 1)
             if len(self._items) > self._page_size:
                 self._items.pop()
+
+    @staticmethod
+    def _remove_row(list_widget, row: int):
+        """摘掉一行并显式回收，避免孤儿对象累积。
+
+        Why 必须手动回收：Qt 文档明确 takeItem 的返回值"不再由 Qt 管理，
+        需要手动删除"。旧实现直接丢弃返回值，且未先 removeItemWidget ——
+        该函数每次剪贴板复制都会触发，长时间运行会稳定累积孤儿行对象
+        （每行含 4 个按钮 + 3 个标签），还可能残留可见控件。
+        """
+        victim = list_widget.takeItem(row)
+        if victim is None:
+            return
+        # 先把行控件从 item 上摘下来（removeItemWidget 会删除 widget）
+        list_widget.removeItemWidget(victim)
+        victim.setData(Qt.UserRole, None)
+        del victim
 
     def on_item_added(self, item: ClipboardItem):
         if self._current_page == 0 and not self._search_query and not self._starred_only:
@@ -291,8 +308,8 @@ class ClipboardListController(QObject):
             list_widget.setItemWidget(li, new_widget)
             if new_widget.hasHeightForWidth():
                 target_w = self._target_row_width(li.sizeHint().width())
-                h = new_widget.heightForWidth(target_w) + 8
-                min_h = 92 if self._items[idx].is_image else 76
+                h = new_widget.heightForWidth(target_w) + ClipboardItemWidget.ROW_EXTRA
+                min_h = ClipboardItemWidget.MIN_H_IMAGE if self._items[idx].is_image else ClipboardItemWidget.MIN_H_TEXT
                 li.setSizeHint(QSize(li.sizeHint().width(), max(h, min_h)))
 
     def on_new_items(self, items: List[ClipboardItem]):

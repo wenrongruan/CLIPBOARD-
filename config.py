@@ -200,54 +200,94 @@ def _normalize_cloud_api_url(url: str) -> str:
     return url
 
 
+def _as_int(value, default: int) -> int:
+    """宽容的整数转换。
+
+    Why: settings.json 是用户可编辑的，旧版本也可能写入 null / 字符串。
+    这里一旦用裸 int()，None 会抛 TypeError、非数字字符串抛 ValueError，
+    而 _load_locked 早期只兜底 JSONDecodeError/IOError，异常会一路穿透到
+    启动流程让应用闪退且无法自愈。所有整数字段一律走这里。
+    """
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_str(value, default: str) -> str:
+    if value is None:
+        return default
+    return value if isinstance(value, str) else default
+
+
+def _as_str_tuple(value) -> Tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(v for v in value if isinstance(v, str))
+
+
+def _as_str_map(value) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _snapshot_from_dict(data: dict) -> Tuple[AppSettings, dict]:
-    """返回 (AppSettings, raw_extras)。extras 包含未被 AppSettings schema 消费的键。"""
+    """返回 (AppSettings, raw_extras)。extras 包含未被 AppSettings schema 消费的键。
+
+    对 JSON 顶层不是 dict 的情况（例如被写成数组/字符串）由调用方兜底。
+    """
     extras = {k: v for k, v in data.items() if k not in _APP_FIELD_NAMES}
 
     floating = data.get("floating_position")
     if isinstance(floating, (list, tuple)) and len(floating) == 2:
-        floating_pos: Optional[Tuple[int, int]] = (int(floating[0]), int(floating[1]))
+        floating_pos: Optional[Tuple[int, int]] = (
+            _as_int(floating[0], 0),
+            _as_int(floating[1], 0),
+        )
     else:
         floating_pos = None
 
     snapshot = AppSettings(
-        device_id=data.get("device_id", ""),
-        device_name=data.get("device_name", ""),
-        database_path=data.get("database_path", ""),
-        db_type=data.get("db_type", "sqlite"),
+        device_id=_as_str(data.get("device_id"), ""),
+        device_name=_as_str(data.get("device_name"), ""),
+        database_path=_as_str(data.get("database_path"), ""),
+        db_type=_as_str(data.get("db_type"), "sqlite"),
         mysql=MysqlConnection(
-            host=data.get("mysql_host", "localhost"),
-            port=int(data.get("mysql_port", 3306)),
-            user=data.get("mysql_user", ""),
-            database=data.get("mysql_database", "clipboard"),
+            host=_as_str(data.get("mysql_host"), "localhost"),
+            port=_as_int(data.get("mysql_port"), 3306),
+            user=_as_str(data.get("mysql_user"), ""),
+            database=_as_str(data.get("mysql_database"), "clipboard"),
         ),
-        sync_mode=data.get("sync_mode", "local"),
-        last_sync_id=int(data.get("last_sync_id", 0)),
-        cloud_last_sync_id=int(data.get("cloud_last_sync_id", 0)),
-        cloud_api_url=_normalize_cloud_api_url(data.get("cloud_api_url", "https://www.jlike.com")),
-        cloud_user_email=data.get("cloud_user_email", ""),
-        dock_edge=data.get("dock_edge", "right"),
-        hotkey=data.get("hotkey", ""),
+        sync_mode=_as_str(data.get("sync_mode"), "local"),
+        last_sync_id=_as_int(data.get("last_sync_id"), 0),
+        cloud_last_sync_id=_as_int(data.get("cloud_last_sync_id"), 0),
+        cloud_api_url=_normalize_cloud_api_url(
+            _as_str(data.get("cloud_api_url"), "https://www.jlike.com")
+        ),
+        cloud_user_email=_as_str(data.get("cloud_user_email"), ""),
+        dock_edge=_as_str(data.get("dock_edge"), "right"),
+        hotkey=_as_str(data.get("hotkey"), ""),
         is_floating=bool(data.get("is_floating", False)),
         floating_position=floating_pos,
-        screenshot_hotkey=data.get("screenshot_hotkey", ""),
+        screenshot_hotkey=_as_str(data.get("screenshot_hotkey"), ""),
         screenshot_copy_to_clipboard=bool(data.get("screenshot_copy_to_clipboard", True)),
-        language=data.get("language", "zh_CN"),
+        language=_as_str(data.get("language"), "zh_CN"),
         save_text=bool(data.get("save_text", True)),
         save_images=bool(data.get("save_images", True)),
-        max_text_length=int(data.get("max_text_length", 0)),
-        max_image_size_kb=int(data.get("max_image_size_kb", 0)),
-        max_items=int(data.get("max_items", 10000)),
-        retention_days=int(data.get("retention_days", 0)),
-        poll_interval_ms=int(data.get("poll_interval_ms", 500)),
-        active_profile=data.get("active_profile", "Default"),
-        db_profiles=dict(data.get("db_profiles", {})),
-        disabled_plugins=tuple(data.get("disabled_plugins", [])),
+        max_text_length=_as_int(data.get("max_text_length"), 0),
+        max_image_size_kb=_as_int(data.get("max_image_size_kb"), 0),
+        max_items=_as_int(data.get("max_items"), 10000),
+        retention_days=_as_int(data.get("retention_days"), 0),
+        poll_interval_ms=_as_int(data.get("poll_interval_ms"), 500),
+        active_profile=_as_str(data.get("active_profile"), "Default"),
+        db_profiles=_as_str_map(data.get("db_profiles")),
+        disabled_plugins=_as_str_tuple(data.get("disabled_plugins")),
         files_sync_enabled=bool(data.get("files_sync_enabled", False)),
         files_auto_download=bool(data.get("files_auto_download", False)),
-        files_max_autodownload_mb=int(data.get("files_max_autodownload_mb", 200)),
+        files_max_autodownload_mb=_as_int(data.get("files_max_autodownload_mb"), 200),
         capture_source_title=bool(data.get("capture_source_title", False)),
-        excluded_source_apps=tuple(data.get("excluded_source_apps", [])),
+        excluded_source_apps=_as_str_tuple(data.get("excluded_source_apps")),
         onboarding_done=bool(data.get("onboarding_done", False)),
         cloud_scope_explainer_shown=bool(data.get("cloud_scope_explainer_shown", False)),
         sidebar_collapsed=bool(data.get("sidebar_collapsed", False)),
@@ -372,9 +412,13 @@ class SettingsStore:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError(f"配置文件顶层不是对象: {type(data).__name__}")
                 self._snapshot, self._extras = _snapshot_from_dict(data)
                 return
-            except (json.JSONDecodeError, IOError) as e:
+            except (json.JSONDecodeError, OSError, ValueError, TypeError, AttributeError) as e:
+                # Why: 兜底必须覆盖"结构合法但字段类型异常"。只兜 JSONDecodeError/IOError 时，
+                # 单个整数字段写成 null 就会让应用每次启动都崩，且没有任何自愈路径。
                 logger.error(f"配置文件损坏或无法读取 ({path}): {e}")
         self._snapshot = AppSettings()
         self._extras = {}

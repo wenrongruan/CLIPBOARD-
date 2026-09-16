@@ -162,8 +162,14 @@ class ItemActionController(QObject):
 
         def _do_delete():
             try:
-                api.delete_item(cloud_id)
-                signal.emit(True, item_id, "")
+                # Why 必须检查返回值：delete_item 在网络失败/4xx/5xx 时返回 False
+                # 而不是抛异常。旧实现忽略返回值直接 emit(True)，本地 cloud_id 被
+                # 清掉后用户以为云端已删，实际数据还在 —— 而且这条目随后会因
+                # cloud_id IS NULL 被重新推送，越删越多。
+                if api.delete_item(cloud_id):
+                    signal.emit(True, item_id, "")
+                else:
+                    signal.emit(False, item_id, "云端删除请求失败，请检查网络后重试")
             except Exception as e:
                 signal.emit(False, item_id, str(e))
 
@@ -174,7 +180,13 @@ class ItemActionController(QObject):
             self.repository.clear_cloud_id(item_id)
             self._parent.list_controller.load_items()
         else:
+            # Why 必须告知用户：失败时本地 cloud_id 未清，用户会误以为已删；
+            # 该条目之后还会被重新推送，静默失败会让"删了又出现"无从排查。
             logger.warning(f"删除云端副本失败: {error}")
+            QMessageBox.warning(
+                self._parent, t("error"),
+                "删除云端副本失败，请检查网络后重试。",
+            )
 
     # ========== 收藏 ==========
 
@@ -232,7 +244,9 @@ class ItemActionController(QObject):
                 logger.error(f"写入图片文件失败: {e}", exc_info=True)
                 signal.emit(False, path, str(e))
 
-        self._parent._copy_executor.submit(_do_save)
+        # Why 用独立 IO 池：图片保存（读库+写盘）可能耗时较长，走共享的
+        # _copy_executor 会把"点击图片条目复制"全部堵在队尾
+        self._parent._io_executor.submit(_do_save)
 
     def handle_save_image_done(self, success: bool, path: str, error: str):
         if success:

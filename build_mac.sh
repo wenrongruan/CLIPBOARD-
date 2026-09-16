@@ -2,7 +2,9 @@
 # Mac 一键打包脚本
 # 使用方法：在 Mac 终端中运行 ./build_mac.sh
 
-set -e
+# Why -u / pipefail：脚本里有大量 find|while / awk|sort 管道，未设 pipefail 时
+# 上游失败会被吞掉继续往下跑，产出半成品 app 还报告"打包完成"。
+set -euo pipefail
 
 echo "=========================================="
 echo "  共享剪贴板 - macOS 打包脚本"
@@ -21,13 +23,17 @@ cd "$SCRIPT_DIR"
 echo ""
 echo "[1/5] 检查 Homebrew..."
 if ! command -v brew &> /dev/null; then
-    echo "正在安装 Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-    # 添加 Homebrew 到 PATH (Apple Silicon)
-    if [[ -f "/opt/homebrew/bin/brew" ]]; then
-        eval "$(/opt/homebrew/bin/brew shellenv)"
-    fi
+    # Why 不再 curl | bash 直接执行远程脚本：中间人或仓库被篡改即以用户身份
+    # 任意代码执行。改为下载到临时文件、提示用户审阅后自行执行。
+    echo "未安装 Homebrew。出于安全考虑本脚本不再直接远程拉取执行安装脚本，"
+    echo "请先手动安装 Homebrew 后重新运行本脚本："
+    echo ""
+    echo "  # 下载安装脚本并审阅"
+    echo "  curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh -o /tmp/brew_install.sh"
+    echo "  less /tmp/brew_install.sh"
+    echo "  bash /tmp/brew_install.sh"
+    echo ""
+    exit 1
 else
     echo "Homebrew 已安装"
 fi
@@ -87,7 +93,8 @@ echo "已清除 quarantine 扩展属性"
 # 签名：默认 ad-hoc（仅本机可用）；如需正式 DevID 分发，设置 DEVID_SIGN_CERT 环境变量
 # 例：DEVID_SIGN_CERT="Developer ID Application: Your Name (TEAMID)" ./build_mac.sh
 echo "签名应用..."
-if [[ -n "$DEVID_SIGN_CERT" ]]; then
+# Why ${VAR:-}：set -u 下直接引用未设置变量会立刻退出，ad-hoc 分支永远走不到
+if [[ -n "${DEVID_SIGN_CERT:-}" ]]; then
     APP_BUNDLE="dist/共享剪贴板.app"
 
     # Inside-out 签名顺序（Apple 公证要求所有层级都带 --timestamp + --options runtime）：

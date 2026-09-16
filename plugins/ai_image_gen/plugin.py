@@ -22,31 +22,33 @@ from core.models import ContentType, TextClipboardItem, ImageClipboardItem
 # chat_image_gen 定位顺序：
 #   1. 环境变量 CHAT_IMAGE_GEN_DIR（用户/管理员显式覆盖）
 #   2. 应用配置目录下 plugin 专属 config.json (由 UI 设置)
-#   3. 相邻目录候选：仓库同级 ../chat_image_gen、父级 E:/python/chat_image_gen（开发机兜底）
-# Why: 旧版本硬编码 "E:\\python\\chat_image_gen" 分发给任何其他用户均 100% 不可用。
+#   3. 插件 config.json 指定目录（用户显式配置，见下）
+# Why 不再自动探测仓库相邻目录：repo_root.parent / "chat_image_gen" 这类路径
+# 不属于本应用，开发机上任何用户级进程都能往那里投放 chat_image_gen.py 劫持执行。
+# 现在只信任两条来源：用户显式设置的环境变量 / 插件配置文件。
 def _candidate_dirs():
     env = os.environ.get("CHAT_IMAGE_GEN_DIR")
     if env:
         yield Path(env)
 
-    # 插件 config.json
+    # 插件配置。两个位置都读：
+    #   1. <config_dir>/plugins/ai_image_gen/config.json —— PluginManager 的标准位置
+    #      （旧实现只读下面的扁平文件，UI 保存的配置插件永远读不到）
+    #   2. <config_dir>/plugins/ai_image_gen.json —— 历史扁平位置，向后兼容
+    import json
     try:
         from config import get_config_dir
-        cfg_path = Path(get_config_dir()) / "plugins" / "ai_image_gen.json"
-        if cfg_path.exists():
-            import json
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            custom = data.get("chat_image_gen_dir")
-            if custom:
-                yield Path(custom)
+        for cfg_path in (
+            Path(get_config_dir()) / "plugins" / "ai_image_gen" / "config.json",
+            Path(get_config_dir()) / "plugins" / "ai_image_gen.json",
+        ):
+            if cfg_path.exists():
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                custom = data.get("chat_image_gen_dir")
+                if custom:
+                    yield Path(custom)
     except Exception:
         logger.debug("读取 ai_image_gen 插件配置失败", exc_info=True)
-
-    here = Path(__file__).resolve()
-    # plugins/ai_image_gen/plugin.py -> 仓库根 == here.parents[2]
-    repo_root = here.parents[2]
-    yield repo_root.parent / "chat_image_gen"
-    yield repo_root.parent.parent / "chat_image_gen"
 
 
 def _locate_chat_image_gen():

@@ -134,10 +134,32 @@ class ClipboardDAO:
 
         return self.db.execute_read(operation)
 
-    def get_existing_hashes(self, hashes: list) -> dict:
-        """批量查询已存在的 content_hash，返回 {hash: ClipboardItem}"""
+    def get_existing_hashes(
+        self,
+        hashes: list,
+        space_id: Optional[str] = None,
+        space_scoped: bool = False,
+    ) -> dict:
+        """批量查询已存在的 content_hash，返回 {hash: ClipboardItem}
+
+        Args:
+            hashes: 待查的 content_hash 列表
+            space_id: 目标空间；None 表示个人空间。仅在 space_scoped=True 时生效。
+            space_scoped: 是否限定在同一空间内去重。
+
+        Why 需要 space 维度：同一份内容可能同时存在于个人空间和团队空间。若只按
+        content_hash 匹配，同步团队空间时会命中个人空间的同 hash 条目，导致团队
+        条目在本地不再新建，却把团队的 server_id 写到了个人条目上 —— 用户之后
+        点"删除云端副本"会删掉团队那条记录，波及所有成员。
+
+        Why space_scoped 要单独一个开关：space_id=None 既表示"个人空间"又表示
+        "调用方没传"，用 None 同时承担两种语义会让个人空间无法被限定。
+        """
         if not hashes:
             return {}
+
+        # space_id 为 None（个人空间）在库里可能是 NULL 或空串，统一归一化。
+        space_scope = space_id or ""
 
         def operation(conn) -> dict:
             result = {}
@@ -146,12 +168,22 @@ class ClipboardDAO:
             for i in range(0, len(hashes), batch_size):
                 batch = hashes[i:i + batch_size]
                 placeholders = ",".join("?" * len(batch))
-                sql = f"""
-                    SELECT {self._SELECT_FIELDS_NO_IMAGE}
-                    FROM clipboard_items
-                    WHERE content_hash IN ({placeholders})
-                """
-                rows = self._fetchall(conn, sql, tuple(batch))
+                if space_scoped:
+                    sql = f"""
+                        SELECT {self._SELECT_FIELDS_NO_IMAGE}
+                        FROM clipboard_items
+                        WHERE content_hash IN ({placeholders})
+                          AND COALESCE(space_id, '') = ?
+                    """
+                    params = tuple(batch) + (space_scope,)
+                else:
+                    sql = f"""
+                        SELECT {self._SELECT_FIELDS_NO_IMAGE}
+                        FROM clipboard_items
+                        WHERE content_hash IN ({placeholders})
+                    """
+                    params = tuple(batch)
+                rows = self._fetchall(conn, sql, params)
                 for row in rows:
                     item = ClipboardItem.from_db_row(row)
                     result[item.content_hash] = item

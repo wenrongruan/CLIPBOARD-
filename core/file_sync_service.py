@@ -64,95 +64,162 @@ class _FileSyncWorker(QObject):
         s = settings()
         self._device_id = s.device_id
         self._device_name = s.device_name
+        # cloud_id -> 连续处理失败次数（用于失败项的重试与最终放弃，见 _process_page）
+        self._pull_skip: dict = {}
 
     # ---------- pull ----------
+    # 单轮 do_pull 最多连续翻多少页（服务端一页 100 条）。防止 has_more 恒为真时
+    # 把 worker 线程占满。
+    _MAX_PULL_PAGES = 20
+    # 同一条云端记录连续解析失败达到该次数后放弃并推进游标，避免一条坏数据把
+    # 同步永久卡住（不推进则它会每轮都被重新拉取、反复失败）。
+    _MAX_PULL_SKIP = 5
+
     @Slot(int)
     def do_pull(self, last_sync_id: int):
+        parsed: list[CloudFile] = []
+        cursor = last_sync_id
+
         try:
-            data = self.cloud_api.files_list(last_sync_id, self._device_id)
-        except CloudAPIError as e:
-            self.pull_error.emit(str(e), e.status_code)
-            return
+            for _ in range(self._MAX_PULL_PAGES):
+                try:
+                    data = self.cloud_api.files_list(cursor, self._device_id)
+                except CloudAPIError as e:
+                    # 取舍说明：翻到第 N 页失败时，前 N-1 页已 add_file 落库但
+                    # 只发 pull_error，cursor 不动。下轮重拉靠 get_by_cloud_id
+                    # 幂等去重自愈，已落库条目不会重复入库，只是 UI 通知晚一轮。
+                    self.pull_error.emit(str(e), e.status_code)
+                    return
+                except Exception as e:
+                    logger.warning(f"文件拉取异常: {e}")
+                    self.pull_error.emit(str(e), 0)
+                    return
+
+                items = data.get("items", []) or []
+                page_parsed, cursor = self._process_page(items, cursor)
+                parsed.extend(page_parsed)
+
+                # Why: 旧实现从不读 has_more，首次全量同步/长离线恢复时每个同步
+                # 周期只推进 100 条，积压追赶极慢。
+                if not items or not data.get("has_more"):
+                    break
+                if cursor <= last_sync_id and not page_parsed:
+                    logger.warning("文件拉取本页无进展，停止翻页以免死循环")
+                    break
         except Exception as e:
-            logger.warning(f"文件拉取异常: {e}")
+            logger.exception("文件拉取处理异常")
             self.pull_error.emit(str(e), 0)
             return
 
-        items = data.get("items", []) or []
+        self.pull_done.emit(parsed, cursor)
+
+    def _process_page(self, items: list, last_sync_id: int):
+        """处理一页云端记录，返回 (parsed, new_cursor)。
+
+        游标只对「处理成功」或「已放弃重试」的条目推进。旧实现在解析/校验之前
+        就先 `max_id = cid`，一旦字段名对不上（后端返回 sha256，这里读
+        content_sha256）所有条目都会失败被跳过，而游标已经越过它们 —— 数据
+        永久丢失且不可恢复。
+        """
         parsed: list[CloudFile] = []
         max_id = last_sync_id
+
         for srv in items:
-            try:
-                cid = int(srv.get("id") or srv.get("cloud_id") or 0)
-                if cid <= 0:
-                    continue
-                if cid > max_id:
-                    max_id = cid
-                sha = srv.get("content_sha256", "") or ""
-                is_deleted = bool(srv.get("is_deleted", False))
-
-                # 删除事件只需 cloud_id 即可定位。服务端 tombstone 可能不再携带
-                # content_sha256，不能先做 SHA 校验，否则游标会越过删除事件但
-                # 本地记录永久残留。
-                if is_deleted:
-                    existing = self.repo.get_by_cloud_id(cid)
-                    if (
-                        existing is None
-                        and isinstance(sha, str)
-                        and re.fullmatch(r"[a-fA-F0-9]{64}", sha) is not None
-                    ):
-                        existing = self.repo.get_by_sha(sha.lower())
-                    if existing is not None and existing.id:
-                        # 服务端已确认删除，不再标成 pending 回推。
-                        self.repo.update_meta(
-                            existing.id,
-                            is_deleted=1,
-                            sync_state=FileSyncState.SYNCED.value,
-                            last_error=None,
-                        )
-                        # update_meta 只改 DB；同步翻 in-memory 对象的 is_deleted，
-                        # 否则 _on_pull_done 里 `if f.is_deleted` 为假，会错把删除事件发成 file_added。
-                        existing.is_deleted = True
-                        parsed.append(existing)
-                    continue
-
-                if not isinstance(sha, str) or re.fullmatch(r"[a-fA-F0-9]{64}", sha) is None:
-                    continue
-                # hashlib.hexdigest() 固定返回小写；入口统一规范化，避免合法的大写
-                # SHA-256 在下载完整性校验时被误判。
-                sha = sha.lower()
-                existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)
-                if existing is None:
-                    f = CloudFile(
-                        cloud_id=cid,
-                        name=srv.get("name", "unknown"),
-                        size_bytes=int(srv.get("size_bytes", 0)),
-                        mime_type=srv.get("mime_type", ""),
-                        content_sha256=sha,
-                        mtime=int(srv.get("mtime", 0)),
-                        device_id=srv.get("device_id", ""),
-                        device_name=srv.get("device_name", ""),
-                        created_at=int(srv.get("created_at", int(time.time() * 1000))),
-                        sync_state=FileSyncState.REMOTE_ONLY.value,
-                    )
-                    f.id = self.repo.add_file(f)
-                    parsed.append(f)
-                else:
-                    # 覆盖元数据（远端为准）
-                    changes = {
-                        "cloud_id": cid,
-                        "name": srv.get("name", existing.name),
-                        "size_bytes": int(srv.get("size_bytes", existing.size_bytes)),
-                        "mime_type": srv.get("mime_type", existing.mime_type),
-                        "mtime": int(srv.get("mtime", existing.mtime)),
-                    }
-                    self.repo.update_meta(existing.id, **changes)
-                    parsed.append(self.repo.get_by_id(existing.id) or existing)
-            except Exception as e:
-                logger.debug(f"处理云端文件条目失败: {e}")
+            cid = int(srv.get("id") or srv.get("cloud_id") or 0)
+            if cid <= 0:
                 continue
 
-        self.pull_done.emit(parsed, max_id)
+            # 后端 /files/sync 的 serializeFileRow() 返回的是 sha256，历史上这里读
+            # content_sha256 导致恒为空。两个键都接受，避免再次被契约变更打穿。
+            sha = srv.get("content_sha256") or srv.get("sha256") or ""
+            is_deleted = bool(srv.get("is_deleted", False))
+
+            ok = False
+            try:
+                ok = self._apply_remote_file(srv, cid, sha, is_deleted, parsed)
+            except Exception as e:
+                logger.debug(f"处理云端文件条目 {cid} 失败: {e}")
+
+            if ok:
+                if cid > max_id:
+                    max_id = cid
+                self._pull_skip.pop(cid, None)
+                continue
+
+            attempts = self._pull_skip.get(cid, 0) + 1
+            self._pull_skip[cid] = attempts
+            if attempts >= self._MAX_PULL_SKIP:
+                logger.error(
+                    f"云端文件 {cid} 连续 {attempts} 次处理失败，放弃并推进游标"
+                )
+                self._pull_skip.pop(cid, None)
+                if cid > max_id:
+                    max_id = cid
+
+        return parsed, max_id
+
+    def _apply_remote_file(self, srv: dict, cid: int, sha, is_deleted: bool, parsed: list) -> bool:
+        """落地单条云端记录，返回是否处理成功。"""
+        # 删除事件只需 cloud_id 即可定位。服务端 tombstone 可能不再携带
+        # sha，不能先做 SHA 校验，否则游标会越过删除事件但本地记录永久残留。
+        if is_deleted:
+            existing = self.repo.get_by_cloud_id(cid)
+            if (
+                existing is None
+                and isinstance(sha, str)
+                and re.fullmatch(r"[a-fA-F0-9]{64}", sha) is not None
+            ):
+                existing = self.repo.get_by_sha(sha.lower())
+            if existing is None:
+                # 本地本来就没有这条，无事可做，游标可以安全推进。
+                return True
+            if existing.id:
+                # 服务端已确认删除，不再标成 pending 回推。
+                self.repo.update_meta(
+                    existing.id,
+                    is_deleted=1,
+                    sync_state=FileSyncState.SYNCED.value,
+                    last_error=None,
+                )
+                # update_meta 只改 DB；同步翻 in-memory 对象的 is_deleted，
+                # 否则 _on_pull_done 里 `if f.is_deleted` 为假，会错把删除事件发成 file_added。
+                existing.is_deleted = True
+                parsed.append(existing)
+            return True
+
+        if not isinstance(sha, str) or re.fullmatch(r"[a-fA-F0-9]{64}", sha) is None:
+            return False
+        # hashlib.hexdigest() 固定返回小写；入口统一规范化，避免合法的大写
+        # SHA-256 在下载完整性校验时被误判。
+        sha = sha.lower()
+        existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)
+        if existing is None:
+            f = CloudFile(
+                cloud_id=cid,
+                name=srv.get("name", "unknown"),
+                size_bytes=int(srv.get("size_bytes", 0)),
+                mime_type=srv.get("mime_type", ""),
+                content_sha256=sha,
+                mtime=int(srv.get("mtime", 0)),
+                device_id=srv.get("device_id", ""),
+                device_name=srv.get("device_name", ""),
+                created_at=int(srv.get("created_at", int(time.time() * 1000))),
+                sync_state=FileSyncState.REMOTE_ONLY.value,
+            )
+            f.id = self.repo.add_file(f)
+            parsed.append(f)
+        else:
+            # 覆盖元数据（远端为准）
+            changes = {
+                "cloud_id": cid,
+                "name": srv.get("name", existing.name),
+                "size_bytes": int(srv.get("size_bytes", existing.size_bytes)),
+                "mime_type": srv.get("mime_type", existing.mime_type),
+                "mtime": int(srv.get("mtime", existing.mtime)),
+            }
+            self.repo.update_meta(existing.id, **changes)
+            parsed.append(self.repo.get_by_id(existing.id) or existing)
+        return True
 
     # ---------- delete ----------
     @Slot(int)
@@ -567,8 +634,11 @@ class FileCloudSyncService(QObject):
     def _drive_queues(self) -> None:
         if self._state != CloudSyncState.RUNNING:
             return
-        if self._uploading and self._downloading and self._deleting:
-            return
+        # Why 没有整体 early-return：三条管道（上传/下载/删除）各自有独立 busy
+        # 标志，逐条判断即可。旧实现写了一行
+        # `if self._uploading and self._downloading and self._deleting: return`，
+        # 只有三者全部在忙才返回 —— 对结果无任何影响（下面各分支本来就会跳过
+        # 忙的管道），纯冗余且误导读者以为需要整体互斥，已删除。
         if not self._uploading and self._upload_queue:
             lid = self._upload_queue.popleft()
             self._uploading = True

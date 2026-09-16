@@ -51,8 +51,13 @@ class ClipboardRepository:
     def get_by_hash(self, content_hash: str) -> Optional[ClipboardItem]:
         return self._dao.get_by_hash(content_hash)
 
-    def get_existing_hashes(self, hashes: list) -> dict:
-        return self._dao.get_existing_hashes(hashes)
+    def get_existing_hashes(
+        self,
+        hashes: list,
+        space_id: Optional[str] = None,
+        space_scoped: bool = False,
+    ) -> dict:
+        return self._dao.get_existing_hashes(hashes, space_id, space_scoped)
 
     def get_item_by_id(self, item_id: int) -> Optional[ClipboardItem]:
         # 保持旧行为：单条读取后回填 tag_ids。

@@ -1,5 +1,6 @@
 """可复用的云端登录表单组件"""
 
+import html
 import re
 import time
 import logging
@@ -30,6 +31,14 @@ _LOGIN_WATCHDOG_MS = 20_000
 
 # 模块级单例线程池，避免每次登录创建新的 Executor；max_workers=2 防止前一个任务卡死阻塞新任务
 _executor = ThreadPoolExecutor(max_workers=2)
+
+
+def _mask_email(email: str) -> str:
+    """邮箱脱敏（a***@domain），Why: 邮箱属个人信息，不应明文进持久化日志。"""
+    if not email or "@" not in email:
+        return "<redacted>"
+    local, _, domain = email.partition("@")
+    return f"{local[:1]}***@{domain}"
 
 
 class CloudLoginWidget(QWidget):
@@ -114,10 +123,13 @@ class CloudLoginWidget(QWidget):
 
     def _refresh_register_links(self, url: str):
         normalized = normalize_cloud_api_url(url) or "https://www.jlike.com"
-        style = self._link_style
+        # Why 必须 HTML 转义：url_edit 是用户输入，register_label 是富文本 QLabel，
+        # 未转义时输入 `x"><img src="file:///...` 之类内容即可注入标签。
+        safe = html.escape(normalized, quote=True)
+        style = html.escape(self._link_style, quote=True)
         self.register_label.setText(
-            f'还没有账号？<a href="{normalized}/account.html" style="{style}">去注册</a>'
-            f'　|　<a href="{normalized}/privacy.html" style="{style}">隐私协议</a>'
+            f'还没有账号？<a href="{safe}/account.html" style="{style}">去注册</a>'
+            f'　|　<a href="{safe}/privacy.html" style="{style}">隐私协议</a>'
         )
 
     def _set_loading(self, loading: bool):
@@ -174,10 +186,10 @@ class CloudLoginWidget(QWidget):
 
         def _login_task():
             t0 = time.time()
-            logger.warning(f"[Login#{request_id}] 开始请求云端登录 ({email})")
+            logger.debug(f"[Login#{request_id}] 开始请求云端登录 ({_mask_email(email)})")
             try:
                 result = api.login(email, password)
-                logger.warning(f"[Login#{request_id}] 登录成功，耗时 {time.time()-t0:.2f}s")
+                logger.debug(f"[Login#{request_id}] 登录成功，耗时 {time.time()-t0:.2f}s")
                 signal.emit(result or {}, "")
             except CloudAPIError as e:
                 logger.warning(f"[Login#{request_id}] 登录失败（API 错误）: {e}，耗时 {time.time()-t0:.2f}s")

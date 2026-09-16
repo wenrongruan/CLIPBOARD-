@@ -38,30 +38,81 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
-class _PluginCloudClientProxy:
-    """按 manifest.permissions 拦截 CloudAPIClient 调用。"""
+# 插件可直接读取的只读属性（不含任何凭据）。base_url 用于插件向子进程传递服务端地址。
+_PLUGIN_PUBLIC_ATTRS = frozenset({"base_url"})
 
-    def __init__(self, real_client, permissions: list):
-        object.__setattr__(self, "_real", real_client)
-        object.__setattr__(self, "_perms", set(permissions or []))
+# 权限代理只扫描 facade 的这 4 个 domain client。
+# Why 不扫 facade 本身：facade 上有 get_tokens()/set_tokens()/_access_token 等
+# 凭据入口，它们都没有 _plugin_permission 标注 —— 旧实现"带标注才拦、无标注放行"
+# 属于默认允许，插件一行 get_tokens() 就能拿走长期凭据。改为默认拒绝后，
+# 只有在 domain client 上显式标注了 @requires_plugin_permission 的方法才可被插件调用。
+_PLUGIN_CLIENT_ATTRS = ("auth", "sync_client", "files", "spaces")
 
-    def __getattr__(self, name):
-        # 私有属性一律拒绝：tokens/base_url/_client 都是内部状态，
-        # 插件即使声明了 network 也不应直接读取；__class__ 留给 isinstance 检查。
-        if name.startswith("_") and name != "__class__":
-            raise PermissionError(f"插件禁止访问 CloudAPIClient 私有属性: {name}")
 
-        attr = getattr(self._real, name)
-        required = getattr(attr, "_plugin_permission", None)
-        if required and required not in self._perms:
+def _collect_plugin_allowed_methods(real_client) -> dict:
+    """扫描 domain client，收集所有标注了 _plugin_permission 的方法。
+
+    返回 {方法名: (bound_method, 所需权限)}。跨 client 同名方法后者覆盖前者，
+    但所需权限一致（都由装饰器决定），不会产生权限缝隙。
+    """
+    allowed: dict = {}
+    for sub_name in _PLUGIN_CLIENT_ATTRS:
+        sub = getattr(real_client, sub_name, None)
+        if sub is None:
+            continue
+        for name in dir(sub):
+            if name.startswith("_"):
+                continue
+            try:
+                attr = getattr(sub, name)
+            except Exception:
+                continue
+            required = getattr(attr, "_plugin_permission", None)
+            if required:
+                allowed[name] = (attr, required)
+    return allowed
+
+
+def _make_plugin_cloud_client_proxy(real_client, permissions: list):
+    """构造默认拒绝的 CloudAPIClient 权限代理。
+
+    Why 闭包捕获而不是实例属性：旧实现把 real client 存在实例 __dict__ 里
+    （object.__setattr__(self, "_real", ...)），而 __getattr__ 只在常规查找
+    失败时才触发 —— `proxy._real` 直接绕过全部权限检查。现在 real client 与
+    白名单都捕获在闭包里，实例没有 __dict__（__slots__ = ()），插件访问任何
+    属性（包括 _real / __dict__）都只能落到 __getattr__ 的权限判定上。
+    """
+    perms = frozenset(permissions or ())
+    allowed = _collect_plugin_allowed_methods(real_client)
+
+    class _PluginCloudClientProxy:
+        """按 manifest.permissions 拦截 CloudAPIClient 调用（默认拒绝）。"""
+
+        __slots__ = ()
+
+        def __getattr__(self, name):
+            if name in _PLUGIN_PUBLIC_ATTRS:
+                return getattr(real_client, name)
+            entry = allowed.get(name)
+            if entry is not None:
+                attr, required = entry
+                if required and required not in perms:
+                    raise PermissionError(
+                        f"插件未声明 '{required}' 权限，禁止调用 CloudAPIClient.{name}"
+                    )
+                return attr
+            if name.startswith("_") and name != "__class__":
+                raise PermissionError(f"插件禁止访问 CloudAPIClient 私有属性: {name}")
             raise PermissionError(
-                f"插件未声明 '{required}' 权限，禁止调用 CloudAPIClient.{name}"
+                f"CloudAPIClient.{name} 未登记为插件可用 API（默认拒绝）。"
+                f"如确需开放，请在对应 domain client 方法上标注 @requires_plugin_permission"
             )
-        return attr
 
-    def __setattr__(self, name, value):
-        # 拒绝写入，防止插件改 token / 覆盖代理内部状态
-        raise PermissionError(f"插件禁止写入 CloudAPIClient 属性: {name}")
+        def __setattr__(self, name, value):
+            # 拒绝写入，防止插件改 token / 覆盖代理状态
+            raise PermissionError(f"插件禁止写入 CloudAPIClient 属性: {name}")
+
+    return _PluginCloudClientProxy()
 
 
 @contextlib.contextmanager
@@ -168,11 +219,47 @@ class PluginManager(QObject):
         for plugin_dir in plugin_dirs:
             if not plugin_dir.exists():
                 continue
+            # 内置目录（打包进 .app / exe）之外的用户目录：权限过宽就整体跳过。
+            # Why: exec_module 是以主程序全部权限执行的任意代码，目录若被
+            # group/other 可写，同机其他用户的进程即可投放插件拿到代码执行。
+            if not self._is_builtin_plugin_dir(plugin_dir) and self._is_unsafe_plugin_dir(plugin_dir):
+                logger.error(
+                    f"插件目录权限过宽（group/other 可写），已拒绝加载: {plugin_dir}"
+                )
+                continue
             for entry in sorted(plugin_dir.iterdir()):
                 if entry.is_dir() and (entry / "manifest.json").exists():
                     self._load_single_plugin(entry)
 
         self.plugins_changed.emit()
+
+    @staticmethod
+    def _is_builtin_plugin_dir(plugin_dir: Path) -> bool:
+        """内置插件目录：frozen 时在 _MEIPASS，源码运行时在项目根。"""
+        if getattr(sys, "frozen", False):
+            builtin = Path(getattr(sys, "_MEIPASS", ""))
+        else:
+            builtin = Path(__file__).parent.parent
+        try:
+            plugin_dir.resolve(strict=False).relative_to(builtin.resolve(strict=False))
+            return True
+        except (ValueError, OSError):
+            return False
+
+    @staticmethod
+    def _is_unsafe_plugin_dir(plugin_dir: Path) -> bool:
+        """目录被 group/other 可写视为不安全。
+
+        Windows 的 ACL 语义与 POSIX 不同（即使用户目录默认也带继承 ACL），
+        不在此判断范围。
+        """
+        if sys.platform == "win32":
+            return False
+        try:
+            st = plugin_dir.stat()
+        except OSError:
+            return True
+        return bool(st.st_mode & 0o022)
 
     def _load_single_plugin(self, plugin_path: Path):
         """加载单个插件"""
@@ -187,6 +274,19 @@ class PluginManager(QObject):
         plugin_id = manifest.get("id")
         if not plugin_id:
             logger.warning(f"Missing 'id' in manifest: {manifest_path}")
+            return
+
+        # 禁用的插件不执行任何代码。旧实现 load_plugins 不看 is_plugin_enabled，
+        # "禁用"只过滤了菜单 —— 用户在设置里关掉插件后，重启前其 on_load() 仍会
+        # 执行一次，禁用状态形同虚设（对恶意插件尤其危险）。
+        if not is_plugin_enabled(plugin_id):
+            logger.info(f"Plugin {plugin_id} is disabled by user, skipping load")
+            self._manifests[plugin_id] = manifest
+            self._plugin_paths[plugin_id] = plugin_path
+            self._plugin_status[plugin_id] = {
+                "status": "disabled",
+                "message": "已在设置中禁用",
+            }
             return
 
         # 校验 plugin_id 安全性（仅允许字母、数字、下划线、连字符）
@@ -357,7 +457,7 @@ class PluginManager(QObject):
         if self._cloud_client is None:
             return None
         permissions = self._manifests.get(plugin_id, {}).get("permissions", [])
-        return _PluginCloudClientProxy(self._cloud_client, permissions)
+        return _make_plugin_cloud_client_proxy(self._cloud_client, permissions)
 
     # ========== 查询 ==========
 

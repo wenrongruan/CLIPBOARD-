@@ -32,6 +32,9 @@ class _SyncWorker(QObject):
     pull_error = Signal(object, str, int)   # (space_key, message, status_code)
     push_done = Signal(object, int)         # (space_key, uploaded_count)
     push_error = Signal(object, str, int, list)  # (space_key, message, status_code, failed_batch)
+    # (space_key, [content_hash, ...])：服务端已收下但没回 id，无法确认 cloud_id 的条目。
+    # 主线程据此把它们加入"放弃重试"集合，避免每 10 秒重传同一批。
+    push_unconfirmed = Signal(object, list)
     quota_warning = Signal(int, int)
     device_registered = Signal()    # 设备注册成功
     spaces_pulled = Signal(list)    # list_spaces 成功后发射 [dict, ...]
@@ -76,7 +79,7 @@ class _SyncWorker(QObject):
             skipped_server_ids = []
             for item_data in items_data:
                 server_id = item_data.get("id", 0)
-                item = self._server_item_to_local(item_data)
+                item = self._server_item_to_local(item_data, space_key)
                 if item is None:
                     logger.warning(f"跳过服务端条目 id={server_id}（解析或图片下载失败，下次同步将重试）")
                     # 记录跳过的 server_id，用于限制 max_server_id 不越过它
@@ -89,9 +92,13 @@ class _SyncWorker(QObject):
                 tag_names = [str(t) for t in raw_tags if t]
                 parsed_items.append((server_id, item, tag_names))
 
-            # 批量查询已存在的 hash（替代逐条 get_by_hash，减少 N 次查询为 1 次）
+            # 批量查询已存在的 hash（替代逐条 get_by_hash，减少 N 次查询为 1 次）。
+            # 必须带 space 维度：否则团队空间同步会命中个人空间的同 hash 条目，
+            # 把团队的 server_id 绑到个人条目上，删除云端副本时会误删团队数据。
             all_hashes = [item.content_hash for _, item, _ in parsed_items]
-            existing_map = self.repository.get_existing_hashes(all_hashes)
+            existing_map = self.repository.get_existing_hashes(
+                all_hashes, space_id=space_key, space_scoped=True
+            )
 
             new_items = []
             cloud_id_pairs = []
@@ -235,7 +242,24 @@ class _SyncWorker(QObject):
 
             self.repository.set_cloud_ids_bulk(cloud_id_pairs)
 
-            uploaded_count = len(server_items) if server_items else len(batch)
+            # Why 不能用 len(server_items) 或 len(batch)：服务端对命中 content_hash
+            # 去重的条目（INSERT IGNORE）不会回传 id，此时 server_items 为空但数据
+            # 其实已入库。用这两个值会让 UI 谎报"上传成功 N 条"，同时本地 cloud_id
+            # 永远为 NULL，下一轮扫描又把同一批捞回来 —— 无限重传。
+            # 只有拿到 id 并成功回填的条目才算真正推送成功。
+            uploaded_count = len(cloud_id_pairs)
+            confirmed = {item.content_hash for item in batch if item.content_hash in hash_to_server_id}
+            unconfirmed = [
+                item.content_hash
+                for item in batch
+                if item.content_hash and item.content_hash not in confirmed
+            ]
+            if unconfirmed:
+                logger.warning(
+                    f"云端推送：{len(unconfirmed)} 条未返回 server id（可能命中服务端去重），"
+                    f"本地 cloud_id 无法回填 (space={space_key})"
+                )
+                self.push_unconfirmed.emit(space_key, unconfirmed)
             self.push_done.emit(space_key, uploaded_count)
 
         except CloudAPIError as e:
@@ -294,11 +318,16 @@ class _SyncWorker(QObject):
     # 超过 _MAX_IMAGE_RETRY 次后视为永久放弃，允许同步游标越过
     _MAX_IMAGE_RETRY = 5
 
-    def _server_item_to_local(self, data: dict) -> Optional[ClipboardItem]:
+    def _server_item_to_local(self, data: dict, space_key=None) -> Optional[ClipboardItem]:
         """将服务端返回的 item 数据转换为本地 ClipboardItem
 
         根据服务端 content_type 分派到 TextClipboardItem / ImageClipboardItem 子类。
         图片类型下载失败时返回 None（调用方会跳过该条目且不推进游标，下次重试）
+
+        space_key: 当前正在同步的空间（None=个人）。Why 必须落库 space_id：
+        get_existing_hashes 已按 (space_id, content_hash) 去重，若团队条目落库时
+        space_id 为 NULL，下次重拉既匹配不到旧记录（整批重复插入），push 分组时
+        还会被当成个人空间条目推回个人空间。
         """
         try:
             content_type_str = data.get("content_type", "text")
@@ -312,6 +341,8 @@ class _SyncWorker(QObject):
                 device_name=data.get("device_name", ""),
                 created_at=data.get("created_at", 0),
                 is_starred=data.get("is_starred", False),
+                # 以服务端值为准；服务端没带时用当前同步的 space_key 兜底
+                space_id=data.get("space_id") or space_key or None,
             )
 
             if content_type == ContentType.TEXT:
@@ -574,6 +605,13 @@ class CloudSyncService(QObject):
         # 失败重试队列 — 独立 maxlen，溢出时丢弃最旧重试项而非新数据
         self._retry_queue: deque = deque(maxlen=50)
         self._dropped_count = 0  # 累计被离线队列挤出的条目数，仅用于告警节流
+        # content_hash -> 连续"推送后拿不到 server id"的次数，达到上限即放弃重试。
+        # Why: 服务端对命中去重的条目不回传 id，本地 cloud_id 永远为 NULL，
+        # _load_unsynced_from_db 每轮都会把它们再捞回来，形成无限重传（图片条目
+        # 还会反复上传二进制）。达到阈值后加入 _push_gave_up 停止重传。
+        self._push_unconfirmed_counts: dict = {}
+        self._push_gave_up: set = set()
+        self._MAX_PUSH_UNCONFIRMED = 3
 
         # 工作线程 — HTTP 请求不再阻塞主线程
         self._worker_thread = QThread(self)
@@ -583,6 +621,7 @@ class CloudSyncService(QObject):
         self._worker.pull_error.connect(self._on_pull_error)
         self._worker.push_done.connect(self._on_push_done)
         self._worker.push_error.connect(self._on_push_error)
+        self._worker.push_unconfirmed.connect(self._on_push_unconfirmed, Qt.QueuedConnection)
         self._worker.quota_warning.connect(self.quota_warning)
         # 显式 QueuedConnection：信号发自 worker 线程，槽要在主线程写 _device_registered
         self._worker.device_registered.connect(
@@ -1032,12 +1071,44 @@ class CloudSyncService(QObject):
         self._last_db_scan_ts = now
         try:
             unsynced = self.repository.get_unsynced_items(limit=self._UPLOAD_BATCH_SIZE)
+            loaded = 0
             for item in unsynced:
+                # 已放弃重试的条目不再入队，否则会每轮重传（见 _on_push_unconfirmed）。
+                # 键带 space 维度，与放弃登记保持一致。
+                give_up_key = (getattr(item, "space_id", None) or "", getattr(item, "content_hash", None))
+                if give_up_key in self._push_gave_up:
+                    continue
                 self._pending_upload_queue.append(item)
-            if unsynced:
-                logger.warning(f"数据库扫描：加载了 {len(unsynced)} 条未同步条目到上传队列")
+                loaded += 1
+            if loaded:
+                logger.warning(f"数据库扫描：加载了 {loaded} 条未同步条目到上传队列")
         except Exception as e:
             logger.warning(f"数据库扫描未同步条目失败: {e}")
+
+    @Slot(object, list)
+    def _on_push_unconfirmed(self, space_key, hashes: list):
+        """服务端已收下但没回传 id 的条目：累计次数，超限后停止重传。
+
+        不这样做的话，这些条目 cloud_id 永远为 NULL，会被当作"未同步"反复推送，
+        而 /clipboard/sync 又用 `AND device_id != :device_id` 把本设备上传的记录
+        排除在拉取结果之外 —— 循环无法自愈。
+
+        Why 键带 space 维度：同一 content_hash 可能同时存在于个人和团队空间，
+        只按 hash 放弃会让另一个空间的同内容条目也永远不入上传队列。
+        """
+        scope = space_key or ""
+        for h in hashes or []:
+            if not h:
+                continue
+            key = (scope, h)
+            count = self._push_unconfirmed_counts.get(key, 0) + 1
+            self._push_unconfirmed_counts[key] = count
+            if count >= self._MAX_PUSH_UNCONFIRMED:
+                self._push_gave_up.add(key)
+                logger.error(
+                    f"条目 {h[:12]}…(space={scope or 'personal'}) 连续 {count} 次推送后"
+                    f"仍未拿到 server id，停止重传（数据应已入库，仅本地 cloud_id 无法回填）"
+                )
 
     @Slot(object, int)
     def _on_push_done(self, space_key, uploaded_count: int):

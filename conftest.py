@@ -22,11 +22,34 @@ import sys
 import pytest
 
 
+def _flush_all():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session, exitstatus):
-    sys.stdout.flush()
-    sys.stderr.flush()
+    """测试结论已定时结束进程，跳过 Qt 析构链。
+
+    行为分两条路：
+    - 全部通过：os._exit(0) 接管退出，规避 worker QThread 在解释器关闭阶段
+      的 qFatal abort（详见模块 docstring）。
+    - 有失败：正常返回，让 pytest 走标准退出流程，保证 FAILURES 详情完整
+      打印（os._exit 会丢弃缓冲区里的失败输出）。已知代价：此时 Qt teardown
+      abort 可能回来，进程以 SIGABRT(134) 而非 1 结束 —— 仍是失败信号，可接受。
+    """
+    _flush_all()
+    code = int(exitstatus)
+    if code != 0:
+        os.write(
+            2,
+            b"[conftest] sessionfinish: tests failed, exiting normally to preserve failure output\n",
+        )
+        return
     # 留痕：CI/本地日志可据此确认是本 hook 接管了退出，而非自然退出或 abort。
     os.write(2, b"[conftest] sessionfinish: exiting to skip Qt QThread teardown abort\n")
-    # exitstatus 为 pytest 的 ExitCode：0 表示全部通过，其余一律视为失败。
-    os._exit(0 if int(exitstatus) == 0 else 1)
+    _flush_all()
+    os._exit(0)

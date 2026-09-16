@@ -12,6 +12,8 @@ from typing import Optional, TYPE_CHECKING
 
 import httpx
 
+from urllib.parse import urlparse
+
 from core.cloud.http import CloudAPIError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -102,7 +104,12 @@ class FilesClient:
         返回响应 header 的 ETag（去引号）；非 2xx 抛 CloudAPIError。
         """
         if not self._http._validate_storage_url(url, self._http._ALLOWED_UPLOAD_DOMAINS):
-            raise CloudAPIError(f"上传域名被拒绝: {url}", 0)
+            # Why 只报 host：完整 presigned URL 的查询串里带签名与 AccessKeyId，
+            # 这个异常文本最终会被写进 cloud_files.last_error / 日志 / UI，
+            # 泄露后攻击者可在过期前直接 PUT。
+            host = urlparse(url).hostname or "<unknown>"
+            logger.error(f"上传域名被拒绝: host={host}")
+            raise CloudAPIError(f"上传域名被拒绝: {host}", 0)
 
         size = os.path.getsize(file_path) if part_size is None else int(part_size)
 
@@ -174,7 +181,9 @@ class FilesClient:
     ) -> int:
         """从 presigned URL 流式下载到本地文件；返回字节数。"""
         if not self._http._validate_storage_url(url, self._http._ALLOWED_DOWNLOAD_DOMAINS):
-            raise CloudAPIError(f"下载域名被拒绝: {url}", 0)
+            host = urlparse(url).hostname or "<unknown>"
+            logger.error(f"下载域名被拒绝: host={host}")
+            raise CloudAPIError(f"下载域名被拒绝: {host}", 0)
 
         import time as _time
         total_bytes = 0

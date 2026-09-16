@@ -7,9 +7,12 @@
 支持语言:zh_CN / en_US / ja_JP / ko_KR / es_ES / fr_FR / de_DE / ru_RU。
 """
 
+import logging
 from typing import Dict, Optional
 
 from i18n_strings import load_all
+
+logger = logging.getLogger(__name__)
 
 # 支持的语言列表
 SUPPORTED_LANGUAGES: Dict[str, str] = {
@@ -39,10 +42,32 @@ class I18n:
         return cls._instance
 
     @classmethod
-    def set_language(cls, language: str) -> None:
-        """设置当前语言。"""
+    def set_language(cls, language: str) -> bool:
+        """设置当前语言。
+
+        Returns:
+            是否成功。非法语言（配置里残留旧代码值如 zh-CN / en）会回退
+            zh_CN 并记日志 —— 旧实现静默忽略，用户表现为"选了没反应"。
+        """
         if language in SUPPORTED_LANGUAGES:
             cls._current_language = language
+            return True
+        # 常见历史别名归一化（旧版本用 '-' 分隔 / 只有语言段）
+        normalized = (language or "").replace("-", "_")
+        if normalized in SUPPORTED_LANGUAGES:
+            cls._current_language = normalized
+            return True
+        if normalized.split("_")[0] in {k.split("_")[0] for k in SUPPORTED_LANGUAGES}:
+            candidates = [
+                k for k in SUPPORTED_LANGUAGES
+                if k.split("_")[0] == normalized.split("_")[0]
+            ]
+            cls._current_language = candidates[0]
+            logger.warning(f"语言 '{language}' 未被支持，已回退到 '{candidates[0]}'")
+            return True
+        logger.warning(f"语言 '{language}' 未被支持，回退默认 zh_CN")
+        cls._current_language = "zh_CN"
+        return False
 
     @classmethod
     def get_language(cls) -> str:
@@ -75,9 +100,9 @@ def t(key: str, **kwargs) -> str:
     return I18n.t(key, **kwargs)
 
 
-def set_language(language: str) -> None:
-    """设置语言便捷函数。"""
-    I18n.set_language(language)
+def set_language(language: str) -> bool:
+    """设置语言便捷函数。返回是否成功。"""
+    return I18n.set_language(language)
 
 
 def get_language() -> str:

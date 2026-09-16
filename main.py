@@ -4,7 +4,6 @@ import os
 import time
 import logging
 import platform
-import threading
 from contextlib import nullcontext
 
 _STARTUP_T0 = time.time()
@@ -15,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QCursor
-from PySide6.QtCore import Qt, QMetaObject, Q_ARG, QUrl, QTimer
+from PySide6.QtCore import Qt, QMetaObject, QUrl, QTimer
 from PySide6.QtGui import QDesktopServices
 
 IS_MACOS = platform.system() == "Darwin"
@@ -29,9 +28,6 @@ from config import (
 )
 from i18n import t, set_language
 from core.app_context import AppContext
-from core.db_factory import create_database_manager
-from core.repository import ClipboardRepository
-from core.clipboard_monitor import ClipboardMonitor
 from core.screenshot_service import (
     ScreenshotService,
     REGION as SCREENSHOT_REGION,
@@ -207,6 +203,12 @@ class ClipboardApp:
         with self.startup_metrics.phase("init_hotkey"):
             self._init_hotkey()
 
+        # 启动 3 秒后探测热键监听是否真正在跑。
+        # Why: pynput 的 GlobalHotKeys.start() 在缺「输入监控」权限时会静默失败
+        # （线程起不来但不抛异常），不探测的话用户按热键没反应且拿不到任何提示。
+        # macOS 的 NSEvent 监听器没有 running/is_alive 时探测会自动跳过（恒 True）。
+        QTimer.singleShot(3000, self._check_hotkey_listener_alive)
+
         with self.startup_metrics.phase("startup_health_flush"):
             self._collect_degraded_store_health()
             self._collect_mysql_fallback_health()
@@ -223,6 +225,8 @@ class ClipboardApp:
         self.db_manager = self.ctx.db
         self.repository = self.ctx.repository
         logger.debug(f"[startup] AppContext.bootstrap 用时 {time.time()-_t:.3f}s")
+        # 当前打开的权限引导框（非模态，需要持有引用防 GC，见 _ask_permission_dialog）
+        self._permission_dialogs: list = []
         # 截图服务复用剪贴板监控的入库链路；在这里建是因为托盘菜单比主窗口先构造。
         self.screenshot_service = ScreenshotService(self.ctx.clipboard_monitor)
         self.screenshot_service.item_saved.connect(self._on_screenshot_saved)
@@ -240,10 +244,23 @@ class ClipboardApp:
         self.tray_icon.setIcon(create_fallback_icon() if IS_MACOS else get_app_icon())
         self.tray_icon.setToolTip(t("app_name"))
 
-        # 创建托盘菜单
+        self._build_tray_menu()
+
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _build_tray_menu(self):
+        """构建（或按当前语言重建）托盘菜单。
+
+        Why 需要独立出来：QAction 文本在创建时就把 t(...) 的结果固化了，
+        set_language() 之后不会自动更新 —— 不重建的话，用户切换语言后托盘菜单
+        会一直停留在旧语言，直到手动重启。
+        """
+        # 创建菜单
         menu = QMenu()
         # 持有引用：菜单里嵌了子菜单，父 QMenu 若是临时对象会被 GC 掉，
         # 表现为右键后子项失效。
+        old_menu = getattr(self, "tray_menu", None)
         self.tray_menu = menu
 
         show_action = QAction(t("show_window"), menu)
@@ -273,8 +290,17 @@ class ClipboardApp:
         menu.addAction(quit_action)
 
         self.tray_icon.setContextMenu(menu)
-        self.tray_icon.activated.connect(self._on_tray_activated)
-        self.tray_icon.show()
+
+        # 旧菜单延迟丢弃：立即 deleteLater 可能与正在显示的弹出菜单冲突
+        if old_menu is not None:
+            old_menu.deleteLater()
+
+    def _retranslate_tray(self):
+        """语言切换后重建托盘菜单（由设置对话框经回调触发）。"""
+        if getattr(self, "tray_icon", None) is None:
+            return
+        self.tray_icon.setToolTip(t("app_name"))
+        self._build_tray_menu()
 
     def _create_main_window(self):
         """创建主窗口（Phase 1: 所有 service 从 AppContext 获取）"""
@@ -315,6 +341,8 @@ class ClipboardApp:
 
         # 连接退出信号
         self.main_window.quit_requested.connect(self._quit)
+        # 设置对话框切换语言后通过此回调重建托盘菜单（QAction 文本是固化的）
+        self.main_window.tray_rebuild_callback = self._retranslate_tray
 
         # 启动服务
         self.clipboard_monitor.monitor_unhealthy.connect(
@@ -728,38 +756,117 @@ class ClipboardApp:
             )
             self._prompt_input_monitoring_permission()
 
-    def _prompt_input_monitoring_permission(self):
-        """macOS: 引导用户授权输入监控权限"""
+    # ========== 权限引导（macOS） ==========
+
+    def _ask_permission_dialog(
+        self,
+        *,
+        title: str,
+        text: str,
+        hint: str,
+        action_text: str,
+        on_accept,
+        reject_text: str = "暂时跳过",
+    ) -> None:
+        """弹一个「去授权 / 暂时跳过」的引导框，返回后立刻继续执行。
+
+        Why 不用 exec()：
+        1) `exec()` 会开一个嵌套事件循环把调用方**阻塞**住。输入监控这条引导是在
+           启动流程里弹的（_init_hotkey），用户不点就永远到不了 app.exec()：
+           实测托盘图标、剪贴板监听、主窗口全都还没就绪，App 看起来就是
+           "启动了但什么都没发生"。改用 show()，框照样摆在最前，启动流程继续走。
+        2) 它是启动期新建的、没有父窗口的对话框；Qt 拿屏幕外的停靠窗当锚点居中，
+           整个框落在屏幕外（实测 QRect(-546,303)，见 ui/dialog_utils 的说明），
+           用户根本看不到这个正在"卡住"他的框。
+        """
+        from ui.dialog_utils import center_on_primary_screen
+
         msg = QMessageBox()
-        msg.setWindowTitle("需要「输入监控」权限")
-        msg.setText(
-            "共享剪贴板需要「输入监控」权限才能使用全局快捷键唤出剪贴板面板。\n\n"
-            "请前往：系统设置 → 隐私与安全性 → 输入监控\n"
-            "将「共享剪贴板」添加到允许列表，然后重启应用。"
-        )
-        msg.setInformativeText("如果暂时跳过，仍可通过点击菜单栏图标使用。")
+        msg.setWindowTitle(title)
+        msg.setText(text)
+        msg.setInformativeText(hint)
         msg.setIcon(QMessageBox.Icon.Information)
-        open_btn = msg.addButton("打开系统设置", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton("暂时跳过", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        if msg.clickedButton() == open_btn:
-            # macOS 13+ 使用新格式 URL；12 及以下保留旧格式
-            mac_ver_str = platform.mac_ver()[0]  # 形如 "13.4.1"
+        # 显式非模态：QMessageBox 默认是 ApplicationModal，配合无父窗口的 show()
+        # 会让 Qt 抱怨 "Cannot run window modal dialog without parent window"，
+        # 而且真的锁住用户对托盘菜单的操作 —— 一个"可以稍后再说"的引导不该这样。
+        msg.setWindowModality(Qt.NonModal)
+        accept_btn = msg.addButton(action_text, QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(reject_text, QMessageBox.ButtonRole.RejectRole)
+
+        center_on_primary_screen(msg)
+
+        def _on_finished(_result: int) -> None:
             try:
-                mac_major = int(mac_ver_str.split(".")[0])
-            except (ValueError, IndexError):
-                mac_major = 12
-            if mac_major >= 13:
-                prefs_url = (
-                    "x-apple.systempreferences:com.apple.settings."
-                    "PrivacySecurity.extension?Privacy_ListenEvent"
-                )
-            else:
-                prefs_url = (
-                    "x-apple.systempreferences:com.apple.preference.security"
-                    "?Privacy_ListenEvent"
-                )
-            QDesktopServices.openUrl(QUrl(prefs_url))
+                self._permission_dialogs.remove(msg)
+            except (ValueError, AttributeError):
+                pass
+            if msg.clickedButton() is not accept_btn:
+                return
+            try:
+                on_accept()
+            except Exception:
+                logger.error("执行权限引导动作失败", exc_info=True)
+
+        msg.finished.connect(_on_finished)
+        # 持有引用：show() 之后本函数就返回了，局部变量一回收对话框就没了。
+        # Why 用列表：两个非模态引导（输入监控/屏幕录制）可能同时挂起，
+        # 单槽位会让先弹的那个失去引用被 GC、正在显示时凭空消失。
+        if not hasattr(self, "_permission_dialogs"):
+            self._permission_dialogs = []
+        self._permission_dialogs.append(msg)
+        msg.show()
+        msg.raise_()
+        msg.activateWindow()
+
+        # 摆位是否真的生效留一条可查证的日志（show 之后才是最终几何）
+        QTimer.singleShot(
+            0,
+            lambda: logger.debug("权限引导框已显示: %s", msg.geometry()),
+        )
+
+    def _prompt_input_monitoring_permission(self):
+        """macOS: 引导用户授权输入监控权限（非模态，见 _ask_permission_dialog）。"""
+        self._ask_permission_dialog(
+            title="需要「输入监控」权限",
+            text=(
+                "共享剪贴板需要「输入监控」权限才能使用全局快捷键唤出剪贴板面板。\n\n"
+                "请前往：系统设置 → 隐私与安全性 → 输入监控\n"
+                "将「共享剪贴板」添加到允许列表，然后重启应用。"
+            ),
+            hint="如果暂时跳过，仍可通过点击菜单栏图标使用。",
+            action_text="打开系统设置",
+            on_accept=self._open_input_monitoring_settings,
+        )
+
+    @staticmethod
+    def _open_input_monitoring_settings():
+        """打开「系统设置 → 隐私与安全性 → 输入监控」。"""
+        ClipboardApp._open_privacy_pane("Privacy_ListenEvent")
+
+    @staticmethod
+    def _open_privacy_pane(pane: str):
+        """打开「系统设置 → 隐私与安全性」的指定面板。
+
+        macOS 13+ 使用新格式 URL；12 及以下保留旧格式。
+        Why 抽出来：此前输入监控/屏幕录制两处各抄一份 20 行的版本判断，
+        只有 pane 名不同。
+        """
+        mac_ver_str = platform.mac_ver()[0]  # 形如 "13.4.1"
+        try:
+            mac_major = int(mac_ver_str.split(".")[0])
+        except (ValueError, IndexError):
+            mac_major = 12
+        if mac_major >= 13:
+            prefs_url = (
+                "x-apple.systempreferences:com.apple.settings."
+                f"PrivacySecurity.extension?{pane}"
+            )
+        else:
+            prefs_url = (
+                "x-apple.systempreferences:com.apple.preference.security"
+                f"?{pane}"
+            )
+        QDesktopServices.openUrl(QUrl(prefs_url))
 
     def _on_hotkey_pressed(self):
         """热键被按下时触发"""
@@ -836,43 +943,32 @@ class ClipboardApp:
             logger.debug("托盘提示发送失败", exc_info=True)
 
     def _prompt_screen_recording_permission(self):
-        """macOS: 引导用户授权「屏幕录制」权限（截图必需）。"""
+        """macOS: 引导用户授权「屏幕录制」权限（截图必需）。
+
+        非模态（见 _ask_permission_dialog）：这个引导是用户在截图时触发的，
+        用 exec() 会把截图服务所在的事件循环一起堵住。
+        """
+        self._ask_permission_dialog(
+            title=t("screenshot_permission_title"),
+            text=t("screenshot_permission_msg"),
+            hint=t("screenshot_permission_hint"),
+            action_text=t("open_system_settings"),
+            reject_text=t("cancel"),
+            on_accept=self._open_screen_recording_settings,
+        )
+
+    @staticmethod
+    def _open_screen_recording_settings():
+        """打开「系统设置 → 隐私与安全性 → 屏幕录制」。
+
+        先让系统弹一次 TCC 授权框（仅首次有效）；用户此前拒绝过就不会再弹，
+        此时仍把设置页打开，由用户手动勾选。
+        """
         from core.screenshot_service import request_screen_recording_permission
 
-        msg = QMessageBox()
-        msg.setWindowTitle(t("screenshot_permission_title"))
-        msg.setText(t("screenshot_permission_msg"))
-        msg.setInformativeText(t("screenshot_permission_hint"))
-        msg.setIcon(QMessageBox.Icon.Information)
-        open_btn = msg.addButton(
-            t("open_system_settings"), QMessageBox.ButtonRole.ActionRole
-        )
-        msg.addButton(t("cancel"), QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
-        if msg.clickedButton() != open_btn:
+        if request_screen_recording_permission():
             return
-
-        # 先让系统弹一次 TCC 授权框（首次有效）；用户此前拒绝过就不会再弹，
-        # 此时仍把设置页打开，由用户手动勾选。
-        granted = request_screen_recording_permission()
-        if granted:
-            return
-        mac_ver_str = platform.mac_ver()[0]  # 形如 "13.4.1"
-        try:
-            mac_major = int(mac_ver_str.split(".")[0])
-        except (ValueError, IndexError):
-            mac_major = 12
-        if mac_major >= 13:
-            prefs_url = (
-                "x-apple.systempreferences:com.apple.settings."
-                "PrivacySecurity.extension?Privacy_ScreenCapture"
-            )
-        else:
-            prefs_url = (
-                "x-apple.systempreferences:com.apple.preference.security"
-                "?Privacy_ScreenCapture"
-            )
-        QDesktopServices.openUrl(QUrl(prefs_url))
+        ClipboardApp._open_privacy_pane("Privacy_ScreenCapture")
 
     def _quit(self):
         """退出应用"""
@@ -894,6 +990,7 @@ class ClipboardApp:
 
         self.clipboard_monitor.stop()
         self.main_window._copy_executor.shutdown(wait=False)
+        self.main_window._io_executor.shutdown(wait=False)
         self.main_window._cloud_executor.shutdown(wait=False)
         self.sync_service.stop()
         if self.cloud_sync_service:
@@ -922,8 +1019,23 @@ class ClipboardApp:
         # Why: ThreadPoolExecutor 的 atexit 会 join 所有 worker；若有网络请求
         # 卡在 socket 上，进程就退不掉（托盘已 hide 但 Python 还活着）。
         # 给正常收尾 1.5s，超时直接 _exit 兜底。
-        QTimer.singleShot(1500, lambda: os._exit(0))
+        #
+        # Why 用可取消的成员定时器而不是 singleShot 闭包：app.quit() 只发退出
+        # 信号，正常路径若在 1.5s 内走完 app.exec() 返回、解释器开始收尾，
+        # singleShot 的回调已不再被事件循环驱动 —— 定时器本身无害。真正的风险
+        # 是兜底在任何线程仍在写盘/关库时硬杀。取消式写法 + 留痕日志，保证
+        # 超时强杀时现场可诊断。
+        self._quit_kill_timer = QTimer()
+        self._quit_kill_timer.setSingleShot(True)
+        self._quit_kill_timer.timeout.connect(self._force_kill)
+        self._quit_kill_timer.start(1500)
         self.app.quit()
+
+    @staticmethod
+    def _force_kill():
+        """正常退出超时后的最后手段。"""
+        logger.error("退出超时（1.5s 内未完成收尾），强制终止进程")
+        os._exit(0)
 
     def run(self) -> int:
         """运行应用"""

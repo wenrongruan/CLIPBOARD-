@@ -335,6 +335,18 @@ class HttpClient:
 
     # ========== 统一请求方法 ==========
 
+    # 401 重试白名单：token 临界过期时 refresh 后重发是安全的幂等/低风险操作。
+    # Why 只对 GET 放行：POST/PATCH/DELETE 重发会产生副作用 —— /ai/generate 会
+    # 重复创建任务（重复扣积分），/files/upload 会重复预扣配额。这类请求宁可
+    # 让调用方收到 401 由用户重试，也不能默默重放。
+    _401_RETRY_METHODS = frozenset({"GET", "HEAD"})
+
+    @classmethod
+    def _should_retry_on_401(cls, method: str, path: str) -> bool:
+        if (method or "").upper() not in cls._401_RETRY_METHODS:
+            return False
+        return True
+
     def _request(
         self,
         method: str,
@@ -367,7 +379,7 @@ class HttpClient:
             raise CloudAPIError(f"网络请求失败: {e}")
 
         # 401 自动刷新 token 重试
-        if response.status_code == 401 and auth_required and self._refresh_token_str:
+        if response.status_code == 401 and auth_required and self._refresh_token_str and self._should_retry_on_401(method, path):
             if self.refresh_token():
                 headers["Authorization"] = f"Bearer {self._access_token}"
                 try:
@@ -477,10 +489,20 @@ class HttpClient:
     # ========== 存储 URL 校验 ==========
 
     def _validate_storage_url(self, url: str, domains: set) -> bool:
-        """校验 presigned URL 的 scheme 与域名；与 get_image_url 一致但可自定义白名单。"""
+        """校验 presigned URL 的 scheme 与域名；与 get_image_url 一致但可自定义白名单。
+
+        Why 只放行 https：presigned URL 的查询串里带签名与 AccessKeyId，明文 http
+        等于把"有效期内的任意读写权限"交给链路上的任何人。本地自测如需 http，
+        应通过 SC_ALLOW_INSECURE_STORAGE=1 显式打开，而不是依赖生产默认。
+        """
         parsed = urlparse(url)
-        if parsed.scheme not in ("https", "http"):
-            logger.warning(f"不安全的存储 URL scheme: {url}")
+        scheme = (parsed.scheme or "").lower()
+        insecure_ok = os.environ.get("SC_ALLOW_INSECURE_STORAGE") == "1"
+        if scheme != "https" and not (insecure_ok and scheme == "http"):
+            # 不把完整 URL 打进日志：查询串里的签名参数会随日志外泄
+            logger.warning(
+                f"不安全的存储 URL scheme: {scheme or '<empty>'} (host={parsed.hostname})"
+            )
             return False
         host = (parsed.hostname or "").lower()
         if not host:

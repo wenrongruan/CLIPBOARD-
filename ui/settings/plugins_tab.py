@@ -21,15 +21,10 @@ from ui.plugin_config_dialog import PluginConfigDialog
 logger = logging.getLogger(__name__)
 
 
-# 与旧 settings_dialog.py 共享同一份线程引用集合，避免 GC abort。
-_ACTIVE_THREADS: set = set()
-
-
-def _track_thread(thread: QThread) -> None:
-    """保持 QThread 的 Python 强引用直到 finished, 避免 dialog 先销毁
-    导致 QThread 在 isRunning() 状态被 Python GC 析构触发 qFatal → abort。"""
-    _ACTIVE_THREADS.add(thread)
-    thread.finished.connect(lambda: _ACTIVE_THREADS.discard(thread))
+# 与 ui/thread_utils 共享同一份线程引用集合，避免 GC abort。
+# 旧代码在这里维护了一份私有 _ACTIVE_THREADS，与 main_window_helpers 的
+# window._migration_worker 互不共享；统一走 track_thread() 后两处行为一致。
+from ui.thread_utils import track_thread as _track_thread
 
 
 class _StoreLoadThread(QThread):

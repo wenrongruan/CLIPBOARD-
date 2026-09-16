@@ -26,6 +26,25 @@ def _set_active_backend(backend: str):
         _warn_degraded_once(backend)
 
 
+def can_use_keyring() -> bool:
+    """当前环境下 keyring 是否可用（能力探测，与"上次实际用了哪个"解耦）。
+
+    Why 需要：_active_backend 只有在真正发生过一次凭据读写后才会被设置。
+    未登录的新用户启动时读到空串直接返回，_active_backend 停留在 "unknown"，
+    is_degraded() 因此恒为 False —— "密钥未加密"的托盘警告永远不会在第一时间
+    弹出。健康检查应该用本函数判断能力，而不是等一次读写发生过。
+    """
+    if not _HAS_KEYRING:
+        return False
+    try:
+        # 用一个不存在的探针键做一次轻量读写探测
+        keyring.get_password(_SERVICE_NAME, "__sc_probe__")
+        return True
+    except Exception as exc:
+        _log_keyring_error("探测", "__sc_probe__", exc, fallback_level=logging.DEBUG)
+        return False
+
+
 def _make_warn_once():
     """闭包去重：首个降级后端打一次 warning，之后保持沉默。
     Why: 取代原 _backend_warned 全局布尔，把去重状态封闭在函数里。
@@ -150,6 +169,16 @@ def store_credential(key: str, value: str):
         try:
             keyring.set_password(_SERVICE_NAME, key, value)
             _set_active_backend("keyring")
+            # Why 必须清理回落副本：用户可能先在无 keyring 环境登录过，token 以
+            # 可逆 base64 留在配置文件里；升级到 keyring 后新 token 进钥匙串，
+            # 旧的那份会永久残留 —— 钥匙串一旦失效，读取还会静默回落到这份
+            # 过期/失效的旧 token（表现为"莫名其妙用旧身份同步、反复 401"）。
+            # _secure_ 前缀键与旧明文键（_read_from_config 的兼容回退）都要清。
+            try:
+                _write_to_config(key, "")
+                _clear_legacy_key(key)
+            except Exception as cleanup_exc:
+                logger.warning(f"清理配置文件中的旧凭据副本失败: {cleanup_exc}")
             return
         except Exception as e:
             _log_keyring_error("写入", key, e)
@@ -203,6 +232,11 @@ def retrieve_credential(key: str) -> str:
     if raw.startswith("b64:"):
         try:
             result = base64.b64decode(raw.removeprefix("b64:")).decode("utf-8")
+            logger.warning(
+                "凭据 '%s' 仅以 base64 混淆保存在配置文件中（keyring/DPAPI 均不可用），"
+                "请尽快在有可用钥匙串的环境下重新登录以完成加密迁移",
+                key,
+            )
             _set_active_backend("base64")
             return result
         except Exception as e:
@@ -226,6 +260,13 @@ def _write_to_config(key: str, value: str):
     """写入配置文件（用于 DPAPI/base64 回退）"""
     from config import set_raw_setting
     set_raw_setting(f"_secure_{key}", value)
+
+
+def _clear_legacy_key(key: str):
+    """清掉旧明文键。Why: _read_from_config 对无前缀旧键有兼容回退，
+    只清 _secure_ 键的话历史明文 token 仍会被读到并继续生效。"""
+    from config import set_raw_setting
+    set_raw_setting(key, "")
 
 
 def _read_from_config(key: str) -> str:
