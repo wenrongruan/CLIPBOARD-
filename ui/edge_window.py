@@ -1,7 +1,8 @@
+import logging
 import platform
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, QPoint, Slot
+from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, QPoint, Slot, QEvent
 from PySide6.QtGui import QCursor, QScreen, QMouseEvent
 from PySide6.QtWidgets import QWidget, QApplication
 
@@ -15,6 +16,8 @@ from config import (
     TRIGGER_ZONE,
     ANIMATION_DURATION,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class EdgeHiddenWindow(QWidget):
@@ -56,6 +59,9 @@ class EdgeHiddenWindow(QWidget):
         self._window_height = WINDOW_HEIGHT
         self._hidden_margin = HIDDEN_MARGIN
         self._trigger_zone = TRIGGER_ZONE
+        # 是否已经被布局过（首次 show 之后置 True）。见 _effective_size 的 Why：
+        # 在 __init__ 阶段 self.width() 还是 QWidget 的默认 640x480。
+        self._laid_out = False
 
         # 停靠边缘 / 悬浮态
         s = settings()
@@ -70,6 +76,7 @@ class EdgeHiddenWindow(QWidget):
         self._is_visible = False
         self._is_pinned = False  # 固定模式，不自动隐藏
         self._show_protection = False  # 显示保护期，防止立即隐藏
+        self._summoned = False  # 显式唤出（热键/托盘）标记，见 show_window()
 
         # 悬浮模式（脱离边缘吸附，自由定位）
         self._is_floating = s.is_floating
@@ -227,11 +234,66 @@ class EdgeHiddenWindow(QWidget):
             )
 
     def _effective_size(self) -> tuple[int, int]:
-        # 子控件（侧边栏等）的最小尺寸可能把窗口撑得比 WINDOW_WIDTH 大，
-        # 隐藏位置必须按真实宽度算，否则藏不干净会漏出一截。
-        width = max(self._window_width, self.width())
-        height = max(self._window_height, self.height())
-        return width, height
+        """窗口的"真实"尺寸，用于算隐藏位。
+
+        子控件（侧边栏等）的最小尺寸可能把窗口撑得比 WINDOW_WIDTH 大，
+        隐藏位置必须按真实宽度算，否则藏不干净会漏出一截。
+
+        但 `self.width()/height()` 只有在**布局跑过之后**才代表真实尺寸：
+        MainWindow 是先 `super().__init__()`（里面有 `_init_position()`）、
+        返回之后才 `_setup_ui()` 的，所以在 `_init_position()` 里 `self.width()`
+        读到的还是 QWidget 的默认 640x480，不是 380x650。
+        本机实测：左边缘隐藏位因此算成 0 - 640 + 3 = **-637**（正确值 -377），
+        Qt 报 "Window position QRect(-637,128 640x650) outside any known screen"；
+        更麻烦的是这个离屏坐标会变成"锚点"，把启动期弹的对话框一起拽出屏幕
+        （见 _prompt_input_monitoring_permission 的注释）。
+        所以没被布局过之前一律用配置尺寸，等首次 show 之后再用真实尺寸校正
+        （_correct_position_after_layout）。
+        """
+        if self._laid_out:
+            return (
+                max(self._window_width, self.width()),
+                max(self._window_height, self.height()),
+            )
+        hint = self.sizeHint()
+        return (
+            max(self._window_width, hint.width()),
+            max(self._window_height, hint.height()),
+        )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._laid_out:
+            return
+        # 首次显示后布局才算完，此刻 self.width()/height() 才是真实的控件尺寸。
+        self._laid_out = True
+        # 放到下一轮事件循环：showEvent 里布局可能还在收尾。
+        QTimer.singleShot(0, self._correct_position_after_layout)
+
+    def _correct_position_after_layout(self) -> None:
+        """按布局算出的真实尺寸校正一次停靠位置。
+
+        只在真实尺寸确实大于配置尺寸（子控件把窗口撑大了）时才动，避免无谓的
+        setGeometry 引发一次可见的跳动。悬浮态是用户自己摆的，不动。
+        """
+        if self._is_floating:
+            return
+        if self.width() <= self._window_width and self.height() <= self._window_height:
+            return
+        screen_rect = self._get_screen_rect()
+        if screen_rect.isEmpty():
+            return
+        logger.debug(
+            "窗口真实尺寸 %dx%d 大于配置 %dx%d，重算停靠位置",
+            self.width(),
+            self.height(),
+            self._window_width,
+            self._window_height,
+        )
+        if self._is_visible:
+            self._move_to_visible_position(screen_rect)
+        else:
+            self._move_to_hidden_position(screen_rect)
 
     def _get_hidden_geometry(self, screen_rect: QRect) -> QRect:
         margin = self._hidden_margin
@@ -331,6 +393,12 @@ class EdgeHiddenWindow(QWidget):
                 if not self.geometry().contains(cursor_pos):
                     if self.isActiveWindow():
                         return
+                    # 显式唤出后不因"鼠标不在窗口里"而滑出（activateWindow 在
+                    # 应用非前台时可能失败，所以不能只靠 isActiveWindow 兜底）。
+                    # 收回路径：用户进入过窗口（enterEvent 清标）或点击了别的
+                    # 应用（changeEvent 失焦清标），之后恢复常规自动隐藏。
+                    if self._summoned:
+                        return
                     self._slide_out()
 
     def _slide_in(self, screen_rect: Optional[QRect] = None, activate: bool = False):
@@ -383,11 +451,18 @@ class EdgeHiddenWindow(QWidget):
         # 启动显示保护期，防止立即隐藏
         self._show_protection = True
         self._protection_timer.start(1500)  # 1.5秒保护期
+        # Why: 热键/托盘显式唤出后，1.5s 保护期一到 _check_mouse_position 就会
+        # 判定光标不在窗口内而滑出 —— 用户手不在鼠标上时窗口 1.5s 必然消失，
+        # 与"唤出即固定"的直觉不符。打上 _summoned 标记后，自动隐藏只在
+        # 「用户点击了别处（窗口失焦）」或「用户进入过窗口又离开」后才生效，
+        # 用户仍可通过点击窗口外任意位置把它收回去，不会出现无法关闭的状态。
+        self._summoned = True
         self._slide_in(activate=True)
 
     def hide_window(self):
         self._is_pinned = False
         self._is_floating = False
+        self._summoned = False
         update_settings(is_floating=False)
         self._show_protection = False
         self._slide_out()
@@ -398,9 +473,18 @@ class EdgeHiddenWindow(QWidget):
     def enterEvent(self, event):
         # 鼠标进入窗口时确保显示
         self._show_protection = False  # 鼠标进入后取消保护期
+        self._summoned = False  # 用户已触碰窗口，恢复常规自动隐藏逻辑
         if not self._is_visible:
             self._slide_in(activate=False)
         super().enterEvent(event)
+
+    def changeEvent(self, event):
+        # Why：用户点击了别的应用 → 唤出的窗口失焦，此时应收回并恢复常规逻辑。
+        # 只监听"激活→非激活"，避免启动/最小化等其他状态变化误清标记。
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and self._summoned:
+            if not self.isActiveWindow():
+                self._summoned = False
 
     def leaveEvent(self, event):
         # 鼠标离开窗口时，延迟检查是否需要隐藏

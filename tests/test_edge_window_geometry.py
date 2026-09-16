@@ -195,3 +195,87 @@ def test_pinned_window_does_not_slide_out(env):
     env.pos_value = QPoint(PHYS.center().x(), PHYS.center().y())
     w._check_mouse_position()
     assert w._is_visible is True
+
+
+# ---------- 4. 窗口尺寸取真实值而不是 QWidget 默认值 ----------
+
+
+def test_effective_size_ignores_widget_default_before_layout(env):
+    """回归：__init__ 阶段不能拿 self.width()（QWidget 默认 640）当真实宽度。
+
+    本机实测的原始症状：MainWindow 是先 super().__init__()（里面有
+    _init_position → _get_hidden_geometry）返回之后才 _setup_ui() 的，
+    所以那一刻 self.width() 还是 640。左边缘隐藏位因此算成
+    0 - 640 + 3 = -637（正确 -377）：Qt 报
+    "Window position QRect(-637,128 640x650) outside any known screen"，
+    而且这个离屏坐标会被 Qt 当成锚点，把启动期弹的对话框一起拽到屏幕外。
+    """
+    w = _ProbeWindow()
+    w._dock_edge = "left"
+    assert w._laid_out is False
+    # 裸 QWidget（还没跑过布局）的 width() 就是 640
+    assert w.width() == 640
+
+    assert w._effective_size() == (ew.WINDOW_WIDTH, ew.WINDOW_HEIGHT)
+
+    hidden = w._get_hidden_geometry(AVAIL)
+    assert hidden.left() == AVAIL.left() - ew.WINDOW_WIDTH + ew.HIDDEN_MARGIN
+    assert hidden.left() == -377  # 本机实测的正确隐藏位（错值是 -637）
+    assert hidden.width() == ew.WINDOW_WIDTH
+
+    visible = w._get_visible_geometry(AVAIL)
+    assert visible.left() == AVAIL.left()
+    assert visible.width() == ew.WINDOW_WIDTH
+
+
+@pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
+def test_layout_done_uses_real_size(env, edge):
+    """布局跑完后真实尺寸大于配置值时，隐藏位必须按真实宽度算 ——
+    否则窗口藏不干净，会在边缘漏出一截（_effective_size 原本要解决的问题）。"""
+    w = _ProbeWindow()
+    w._dock_edge = edge
+    w._laid_out = True
+    w.setFixedWidth(480)  # 模拟子控件（侧栏等）把窗口撑大
+
+    width, _ = w._effective_size()
+    assert width == 480
+    assert w._get_hidden_geometry(AVAIL).width() == 480
+
+
+def test_correction_skipped_when_size_matches_config(env):
+    """尺寸没被撑大时不要重算位置，避免一次可见的跳动。"""
+    w = _ProbeWindow()
+    w._laid_out = True
+    w.setFixedWidth(ew.WINDOW_WIDTH)
+    before = QRect(w._get_hidden_geometry(AVAIL))
+    w.setGeometry(before)
+
+    w._correct_position_after_layout()
+    assert w.geometry() == before
+
+
+def test_correction_repositions_when_window_grew(env):
+    """尺寸被撑大时按真实宽度把隐藏位重算一遍，保证只有 HIDDEN_MARGIN 露出来。"""
+    w = _ProbeWindow()
+    w._dock_edge = "left"
+    w._laid_out = True
+    w._is_visible = False
+    w.setGeometry(w._get_hidden_geometry(AVAIL))
+    w.setFixedWidth(480)  # 模拟布局把窗口撑大
+
+    w._correct_position_after_layout()
+
+    assert w.geometry().width() == 480
+    assert w.geometry().right() == AVAIL.left() + ew.HIDDEN_MARGIN - 1
+
+
+def test_correction_leaves_floating_window_alone(env):
+    """悬浮态是用户自己摆的位置，校正逻辑不能碰。"""
+    w = _ProbeWindow()
+    w._is_floating = True
+    w._laid_out = True
+    w.setFixedWidth(480)
+    w.setGeometry(QRect(120, 200, 480, 480))
+
+    w._correct_position_after_layout()
+    assert w.geometry() == QRect(120, 200, 480, 480)

@@ -1,8 +1,20 @@
 import platform
 
-# 根据平台选择字体
+# 字体栈的平台差异
+# ----------------
+# macOS 上不能照搬 web 的字体栈写法：
+#   - "-apple-system" 是 CSS 关键字，Qt 的字体库里没有这个名字（实测
+#     QFontDatabase.families() 查不到）。Qt 会打一条
+#     『Populating font family aliases took 60ms. Replace uses of missing
+#     font family "-apple-system" ...』，并花几十毫秒现建一张别名表；
+#   - "SF Pro Display" / "SF Pro Text" 只随 Xcode、设计资源分发，普通机器上同样不存在；
+#   - "sans-serif" 也不是 Qt 认的通用名（Qt 用的是 "Sans Serif"）。
+# 于是整条列表里只有 "Helvetica Neue" 真的存在 —— macOS 上实际一直被渲染成
+# Helvetica Neue，而不是系统 UI 字体（SF Pro），中文还会掉到别的字体上。
+# macOS 的 QFont() 默认字体已经是 .AppleSystemUIFont，也就是 SF Pro，
+# 所以正确做法是这一项留空，让 Qt 直接用平台默认字体。
 if platform.system() == "Darwin":
-    _FONT_FAMILY = '-apple-system, "SF Pro Display", "Helvetica Neue", sans-serif'
+    _FONT_FAMILY = ""  # 空 = 不输出 font-family，用 Qt 的 macOS 默认字体
     _FONT_SIZE = "14px"  # macOS 上字体稍大一点更清晰
     _SCROLLBAR_WIDTH = "10px"  # macOS 滚动条稍宽
 else:
@@ -10,13 +22,18 @@ else:
     _FONT_SIZE = "13px"
     _SCROLLBAR_WIDTH = "8px"
 
+
+def _font_family_decl() -> str:
+    """拼出 `font-family` 声明（自带前导换行与缩进）；平台默认字体时返回空串。"""
+    return f"\n    font-family: {_FONT_FAMILY};" if _FONT_FAMILY else ""
+
+
 MAIN_STYLE = """
 * { outline: 0; }
 
 QWidget {
     background-color: #2b2b2b;
-    color: #ffffff;
-    font-family: """ + _FONT_FAMILY + """;
+    color: #ffffff;""" + _font_family_decl() + """
     font-size: """ + _FONT_SIZE + """;
 }
 
