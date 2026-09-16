@@ -242,11 +242,14 @@ class _SyncWorker(QObject):
 
             self.repository.set_cloud_ids_bulk(cloud_id_pairs)
 
-            # Why 不能用 len(server_items) 或 len(batch)：服务端对命中 content_hash
-            # 去重的条目（INSERT IGNORE）不会回传 id，此时 server_items 为空但数据
-            # 其实已入库。用这两个值会让 UI 谎报"上传成功 N 条"，同时本地 cloud_id
-            # 永远为 NULL，下一轮扫描又把同一批捞回来 —— 无限重传。
+            # Why 不能用 len(server_items) 或 len(batch)：没拿到 id 的条目本地 cloud_id
+            # 仍是 NULL，下一轮扫描会把同一批再捞回来；把它算作"上传成功"就是谎报。
             # 只有拿到 id 并成功回填的条目才算真正推送成功。
+            #
+            # 注：服务端命中 uk_user_hash 去重时会回填既有行的 id（2026-09-16 后端修复，
+            # 见 website/api/controllers/ClipboardController.php::findExistingItemByHash），
+            # 所以后端已部署的前提下稳态 unconfirmed 应为空。后端未部署时，这里靠
+            # push_unconfirmed + _push_gave_up（累计 3 次放弃）兜底打破重传循环。
             uploaded_count = len(cloud_id_pairs)
             confirmed = {item.content_hash for item in batch if item.content_hash in hash_to_server_id}
             unconfirmed = [
