@@ -140,6 +140,13 @@ def test_trigger_zone_covers_physical_edge(env, edge):
 @pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
 def test_mouse_at_physical_edge_slides_in(env, edge):
     w = _make_window(edge)
+    if not w._is_macos:
+        # 非 macOS 的触发区按 availableGeometry 计算，而 EDGE_PROBE 打的是**物理**
+        # 边缘（y = PHYS.top() / PHYS.bottom()）。上/下两条会落在 available 之外
+        # （合成屏顶部有 33px 菜单栏、底部 82px Dock），断言必然失败 ——
+        # 这是平台语义差异，不是缺陷。与同文件的
+        # test_trigger_zone_covers_physical_edge 保持一致的跳过条件。
+        pytest.skip("物理边缘触发仅 macOS 生效（非 macOS 触发区按 availableGeometry）")
     env.pos_value = EDGE_PROBE[edge]
     w._check_mouse_position()
     assert w._is_visible is True
@@ -219,8 +226,13 @@ def test_effective_size_ignores_widget_default_before_layout(env):
     assert w._effective_size() == (ew.WINDOW_WIDTH, ew.WINDOW_HEIGHT)
 
     hidden = w._get_hidden_geometry(AVAIL)
+    # 回归点：隐藏位必须按 WINDOW_WIDTH 算，而不是 QWidget 默认的 640。
+    #
+    # Why 不写死 -377：WINDOW_WIDTH 是**平台相关**的（config.py:88，
+    # macOS 380 / 其他平台 350），写死会让 linux/windows CI 算出 -347。
+    buggy_left = AVAIL.left() - 640 + ew.HIDDEN_MARGIN  # 拿 QWidget 默认 640 算出的错值
+    assert hidden.left() != buggy_left
     assert hidden.left() == AVAIL.left() - ew.WINDOW_WIDTH + ew.HIDDEN_MARGIN
-    assert hidden.left() == -377  # 本机实测的正确隐藏位（错值是 -637）
     assert hidden.width() == ew.WINDOW_WIDTH
 
     visible = w._get_visible_geometry(AVAIL)
