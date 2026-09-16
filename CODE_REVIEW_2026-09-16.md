@@ -368,3 +368,44 @@ worker.start()
 - 文件同步翻页中途失败：前 N-1 页已落库但 cursor 不动，下轮靠 `get_by_cloud_id` 幂等自愈（已加注释说明）
 - `_MAX_PULL_SKIP` 放弃推进游标：瞬时错误（如 DB 锁）重试 5 轮后数据跳过 —— 相比旧实现"立即跳过"已是改善，按错误类型分级属后续优化
 - conftest 失败路径可能以 SIGABRT(134) 结束 —— 仍是失败信号，CI 可区分
+
+---
+
+## 附三：线上兼容缺口修复（2026-09-16 傍晚，提交前专项核查）
+
+提交前按"线上有真实运营用户"这一前提，对全部行为变更做了一次发版前核查。**结论：除下面这一条外，其余变更对线上安全**（https 强校验已核对后端 `OSS.php` 四处签 URL 全为 `https://`；内置插件只用 `base_url`；迁移 SQL 改为探测目标库真实列后裁剪，缺列不会硬报错）。
+
+### 新发现并已修复：插件 domain 层调用写法被默认拒绝打挂
+
+**位置**：`core/plugin_manager.py`（P0-5 修复的自身副作用）
+
+P0-5 把权限代理从"默认允许"改成"默认拒绝"时，白名单只从 domain client 收集**方法名**并挂在 facade 上，于是 `client.auth` 这个属性本身落进了"未登记 → 拒绝"分支。
+
+但旧实现是 `attr = getattr(self._real, name)` **直通** —— `client.auth` 返回的是**未代理的真实 `AuthClient`**。也就是说：
+
+- `client.auth.ai_generate(...)` 是插件作者实际在用的写法（`core/plugin_api.py:147` 的文档只写"返回 CloudAPIClient 实例"，并没有约定只能走扁平方法名）；
+- 更糟的是旧写法下 `client.auth._http.get_tokens()` 可直达 `HttpClient` 上的凭据入口 —— 这条旁路在旧实现里**连权限检查都没有**。
+
+若只放行 facade 上的扁平方法名，按文档写的老插件升级后会立刻 `PermissionError`：
+
+```python
+proxy.auth          # 旧: 真实 AuthClient（直通、零检查）→ 新: PermissionError
+```
+
+**修复**：domain 名改为返回一个**同样默认拒绝的子代理**（而不是直通、也不是一律拒绝）。`_collect_plugin_allowed_methods` 返回值改为按 domain 分组的 `{domain: {方法: (bound, 权限)}}`，由 `_make_default_deny_proxy(label, methods, permissions)` 统一构造；facade 同时保留扁平方法名（`client.ai_generate()`）与 domain 子代理（`client.auth.ai_generate()`）两种写法。
+
+修复后的行为对照：
+
+| 调用 | 旧实现 | P0-5 初版（默认拒绝） | 现在 |
+|---|---|---|---|
+| `client.auth.ai_generate()` | ✅ 可用（零检查） | ❌ PermissionError | ✅ 可用（校验 network） |
+| `client.auth._http.get_tokens()` | ✅ **可直达凭据** | ❌ | ❌ 拒绝 |
+| `client.auth` | 真实对象 | ❌ | 子代理（不可绕过） |
+| `client.get_balance()` | ✅（无权限校验） | 按 credits 校验 | 按 credits 校验 |
+| `client._real` | ✅ 绕过全部 | ❌ | ❌ |
+
+**教训**：给"默认允许"改"默认拒绝"时，**属性名本身也是 API 面**。旧实现里凡是能被 `getattr` 直通拿到的东西，插件都可能在用 —— 收敛权限面必须逐个列举并显式决定"放行 / 换成受控代理 / 拒绝"，不能只盯着方法名。
+
+### 新增回归测试（`tests/test_review_fixes_20260916.py`，+7 条）
+
+`TestPluginDomainProxyCompat`：domain 访问返回代理而非真实客户端、`_http`/`_facade` 被拒、声明 network 后 `auth.ai_generate` 可用、credits 权限门控、未登记方法与 `sync_client.get_tokens` 被拒、domain 写入被拒、`base_url` 仍可读。全量 412 用例通过。

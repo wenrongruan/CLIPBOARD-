@@ -192,6 +192,75 @@ class TestPluginCloudProxyDefaultDeny:
             proxy.anything = 1
 
 
+class TestPluginDomainProxyCompat:
+    """client.<domain>.<method>() 这一老写法必须继续可用。
+
+    Why 单独回归：旧实现的 __getattr__ 是 `getattr(self._real, name)` 直通，
+    client.auth 返回的是**未代理的真实 AuthClient** —— 所以
+    client.auth.ai_generate() 是插件作者实际在用的写法
+    （core/plugin_api.py:get_cloud_client 的文档也只说"返回 CloudAPIClient 实例"）。
+    改成默认拒绝时若只放行 facade 上的扁平方法名，按文档写的老插件会立刻
+    PermissionError。domain 层必须是"同样默认拒绝的子代理"，而不是直接放行。
+    """
+
+    def _make_proxy(self, permissions=("network", "credits")):
+        from core.plugin_manager import _make_plugin_cloud_client_proxy
+        from core.cloud_api import CloudAPIClient
+
+        client = CloudAPIClient("https://example.invalid")
+        return _make_plugin_cloud_client_proxy(client, list(permissions)), client
+
+    def test_domain_access_returns_proxy_not_real_client(self):
+        """client.auth 不得再是真实 AuthClient，否则 _http.get_tokens() 可直达凭据。"""
+        proxy, client = self._make_proxy()
+        auth = proxy.auth
+        assert auth is not client.auth
+        with pytest.raises(PermissionError):
+            _ = auth._http
+        with pytest.raises(PermissionError):
+            _ = auth._facade
+
+    def test_domain_annotated_method_allowed_when_declared(self):
+        """老写法 client.auth.ai_generate(...)（network）声明后仍可用。"""
+        proxy, _ = self._make_proxy()
+        assert callable(proxy.auth.ai_generate)
+
+    def test_domain_credits_method_gated_by_permission(self):
+        from core.plugin_manager import _make_plugin_cloud_client_proxy
+        from core.cloud_api import CloudAPIClient
+
+        client = CloudAPIClient("https://example.invalid")
+        no_credits = _make_plugin_cloud_client_proxy(client, ["network"])
+        with pytest.raises(PermissionError):
+            _ = no_credits.auth.get_balance
+
+        with_credits = _make_plugin_cloud_client_proxy(client, ["credits"])
+        assert callable(with_credits.auth.get_balance)
+
+    def test_domain_unregistered_method_denied(self):
+        """domain 子代理同样默认拒绝：未标注权限的方法一律不可达。"""
+        proxy, _ = self._make_proxy()
+        with pytest.raises(PermissionError):
+            _ = proxy.auth.not_a_registered_api
+        with pytest.raises(PermissionError):
+            _ = proxy.sync_client.get_tokens
+
+    def test_domain_write_denied(self):
+        proxy, _ = self._make_proxy()
+        with pytest.raises(PermissionError):
+            proxy.auth.anything = 1
+
+    def test_public_attr_still_readable(self):
+        """内置插件 ai_image_gen 只用 base_url，必须继续可读。"""
+        proxy, _ = self._make_proxy()
+        assert proxy.base_url == "https://example.invalid"
+
+    def test_private_attr_still_denied_on_facade(self):
+        proxy, _ = self._make_proxy()
+        with pytest.raises(PermissionError):
+            _ = proxy._real
+
+
 # ---------------------------------------------------------------- 文件同步游标
 
 class TestFileSyncCursorSafety:

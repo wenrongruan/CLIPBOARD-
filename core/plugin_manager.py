@@ -50,16 +50,17 @@ _PLUGIN_CLIENT_ATTRS = ("auth", "sync_client", "files", "spaces")
 
 
 def _collect_plugin_allowed_methods(real_client) -> dict:
-    """扫描 domain client，收集所有标注了 _plugin_permission 的方法。
+    """按 domain 收集标注了 _plugin_permission 的方法。
 
-    返回 {方法名: (bound_method, 所需权限)}。跨 client 同名方法后者覆盖前者，
-    但所需权限一致（都由装饰器决定），不会产生权限缝隙。
+    返回 {domain: {方法名: (bound_method, 所需权限)}}。同名方法各自独立登记，
+    所需权限一律由装饰器决定，不会产生权限缝隙。
     """
-    allowed: dict = {}
+    per_domain: dict = {}
     for sub_name in _PLUGIN_CLIENT_ATTRS:
         sub = getattr(real_client, sub_name, None)
         if sub is None:
             continue
+        methods: dict = {}
         for name in dir(sub):
             if name.startswith("_"):
                 continue
@@ -69,8 +70,42 @@ def _collect_plugin_allowed_methods(real_client) -> dict:
                 continue
             required = getattr(attr, "_plugin_permission", None)
             if required:
-                allowed[name] = (attr, required)
-    return allowed
+                methods[name] = (attr, required)
+        per_domain[sub_name] = methods
+    return per_domain
+
+
+def _make_default_deny_proxy(label: str, methods: dict, permissions: frozenset):
+    """构造只放行 methods 中已登记方法的代理（默认拒绝）。
+
+    real client 的 bound method 与白名单都捕获在闭包里，实例 __slots__ = ()
+    没有任何 __dict__，所以插件访问 _real / __dict__ 也只能落到这里的权限判定上。
+    """
+
+    class _DefaultDenyProxy:
+        __slots__ = ()
+
+        def __getattr__(self, name):
+            entry = methods.get(name)
+            if entry is not None:
+                attr, required = entry
+                if required and required not in permissions:
+                    raise PermissionError(
+                        f"插件未声明 '{required}' 权限，禁止调用 {label}.{name}"
+                    )
+                return attr
+            if name.startswith("_") and name != "__class__":
+                raise PermissionError(f"插件禁止访问 {label} 私有属性: {name}")
+            raise PermissionError(
+                f"{label}.{name} 未登记为插件可用 API（默认拒绝）。"
+                f"如确需开放，请在对应 domain client 方法上标注 @requires_plugin_permission"
+            )
+
+        def __setattr__(self, name, value):
+            # 拒绝写入，防止插件改 token / 覆盖代理状态
+            raise PermissionError(f"插件禁止写入 {label} 属性: {name}")
+
+    return _DefaultDenyProxy()
 
 
 def _make_plugin_cloud_client_proxy(real_client, permissions: list):
@@ -81,9 +116,28 @@ def _make_plugin_cloud_client_proxy(real_client, permissions: list):
     失败时才触发 —— `proxy._real` 直接绕过全部权限检查。现在 real client 与
     白名单都捕获在闭包里，实例没有 __dict__（__slots__ = ()），插件访问任何
     属性（包括 _real / __dict__）都只能落到 __getattr__ 的权限判定上。
+
+    Why 还要保留 domain 这一层（client.auth.xxx）：旧实现的 __getattr__ 是
+    `getattr(self._real, name)` 直通，client.auth 返回的是**未代理的真实
+    AuthClient**，所以 client.auth.ai_generate() 是插件作者实际在用的写法
+    （plugin_api.get_cloud_client 的文档也只说"返回 CloudAPIClient 实例"）。
+    若只放行 facade 上的扁平方法名，按文档写的老插件会立刻 PermissionError。
+    因此 domain 名返回一个同样默认拒绝的子代理：
+    client.auth.ai_generate() 可用，client.auth.get_tokens() 仍然被拒。
     """
     perms = frozenset(permissions or ())
-    allowed = _collect_plugin_allowed_methods(real_client)
+    per_domain = _collect_plugin_allowed_methods(real_client)
+
+    # facade 上的扁平方法名（client.ai_generate()）与 domain 子代理
+    # （client.auth.ai_generate()）两种写法都要可用。
+    flat: dict = {}
+    domains: dict = {}
+    for domain, methods in per_domain.items():
+        domains[domain] = _make_default_deny_proxy(
+            f"CloudAPIClient.{domain}", methods, perms
+        )
+        for method_name, entry in methods.items():
+            flat[method_name] = entry
 
     class _PluginCloudClientProxy:
         """按 manifest.permissions 拦截 CloudAPIClient 调用（默认拒绝）。"""
@@ -93,7 +147,9 @@ def _make_plugin_cloud_client_proxy(real_client, permissions: list):
         def __getattr__(self, name):
             if name in _PLUGIN_PUBLIC_ATTRS:
                 return getattr(real_client, name)
-            entry = allowed.get(name)
+            if name in domains:
+                return domains[name]
+            entry = flat.get(name)
             if entry is not None:
                 attr, required = entry
                 if required and required not in perms:
