@@ -43,6 +43,16 @@ pip install -r requirements.txt
 python main.py
 ```
 
+## Windows `.exe` 打包
+
+请在 Windows 10/11 上、项目根目录中运行 `build_windows.bat`（双击或在命令提示符执行均可）。脚本会创建独立的 `.venv_windows` 环境，安装依赖，并生成单文件程序：
+
+```text
+dist\SharedClipboard.exe
+```
+
+需要 Python 3.11+；macOS 和 Linux 不能原生构建可运行的 Windows `.exe`，应在 Windows 主机或 Windows CI 中执行该脚本。
+
 ## 依赖
 - Python 3.11+
 - PySide6
