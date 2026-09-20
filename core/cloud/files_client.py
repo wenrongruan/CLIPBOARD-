@@ -29,11 +29,19 @@ class FilesClient:
         self._facade = facade
         self._http = facade._http
 
-    def files_list(self, since_id: int, device_id: str, limit: int = 100) -> dict:
-        """增量拉取文件列表，返回 {items: [...], has_more: bool}。"""
+    def files_list(
+        self, since_id: int = 0, device_id: str = "", limit: int = 100,
+        *, since_change_id: Optional[int] = None,
+    ) -> dict:
+        """增量拉取；新客户端用事件游标，保留旧 ID 游标调用契约。"""
+        params = {"device_id": device_id, "limit": limit}
+        if since_change_id is None:
+            params["since_id"] = since_id
+        else:
+            params["since_change_id"] = since_change_id
         response = self._facade._request(
             "GET", "/api/v1/files/sync",
-            params={"since_id": since_id, "device_id": device_id, "limit": limit},
+            params=params,
         )
         return response.json()
 

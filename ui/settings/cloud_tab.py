@@ -89,7 +89,10 @@ class CloudTab(QWidget):
         files_form = QFormLayout(files_group)
         files_form.setSpacing(8)
 
-        self.files_sync_enabled_check = QCheckBox("启用文件云同步")
+        self.files_sync_enabled_check = QCheckBox("启动时自动同步文件")
+        self.files_sync_enabled_check.setToolTip(
+            "关闭后，打开“我的文件”仍会启动文件同步，并在本次运行期间保持。"
+        )
         self.files_sync_enabled_check.setChecked(settings().files_sync_enabled)
         files_form.addRow(self.files_sync_enabled_check)
 

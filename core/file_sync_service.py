@@ -25,7 +25,8 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-_META_CURSOR_KEY = "files_last_sync_id"
+# v3.6 事件游标与旧文件 id 游标不是同一序列，必须用新 key 从 0 重拉。
+_META_CURSOR_KEY = "files_last_change_id"
 _UPLOAD_QUEUE_MAX = 500
 _DOWNLOAD_QUEUE_MAX = 500
 
@@ -64,7 +65,7 @@ class _FileSyncWorker(QObject):
         s = settings()
         self._device_id = s.device_id
         self._device_name = s.device_name
-        # cloud_id -> 连续处理失败次数（用于失败项的重试与最终放弃，见 _process_page）
+        # change_id -> 连续处理失败次数（用于失败事件的重试与最终放弃）
         self._pull_skip: dict = {}
 
     # ---------- pull ----------
@@ -82,8 +83,11 @@ class _FileSyncWorker(QObject):
 
         try:
             for _ in range(self._MAX_PULL_PAGES):
+                page_start_cursor = cursor
                 try:
-                    data = self.cloud_api.files_list(cursor, self._device_id)
+                    data = self.cloud_api.files_list(
+                        device_id=self._device_id, since_change_id=cursor
+                    )
                 except CloudAPIError as e:
                     # 取舍说明：翻到第 N 页失败时，前 N-1 页已 add_file 落库但
                     # 只发 pull_error，cursor 不动。下轮重拉靠 get_by_cloud_id
@@ -96,14 +100,24 @@ class _FileSyncWorker(QObject):
                     return
 
                 items = data.get("items", []) or []
+                if "next_since_change_id" not in data or any(
+                    not isinstance(item, dict) or "change_id" not in item
+                    for item in items
+                ):
+                    raise ValueError("文件同步服务端不支持 change_id 增量协议")
                 page_parsed, cursor = self._process_page(items, cursor)
                 parsed.extend(page_parsed)
+                if not items:
+                    cursor = max(cursor, int(data.get("next_since_change_id") or 0))
 
                 # Why: 旧实现从不读 has_more，首次全量同步/长离线恢复时每个同步
                 # 周期只推进 100 条，积压追赶极慢。
                 if not items or not data.get("has_more"):
                     break
-                if cursor <= last_sync_id and not page_parsed:
+                if cursor < int(data.get("next_since_change_id") or 0):
+                    # 本页有待重试事件；同一 tick 重拉只会快速耗尽 5 次重试额度。
+                    break
+                if cursor <= page_start_cursor:
                     logger.warning("文件拉取本页无进展，停止翻页以免死循环")
                     break
         except Exception as e:
@@ -116,18 +130,21 @@ class _FileSyncWorker(QObject):
     def _process_page(self, items: list, last_sync_id: int):
         """处理一页云端记录，返回 (parsed, new_cursor)。
 
-        游标只对「处理成功」或「已放弃重试」的条目推进。旧实现在解析/校验之前
+        游标使用 append-only 事件的 change_id，不使用文件 id；只对「处理成功」
+        或「已放弃重试」的事件推进。旧实现在解析/校验之前
         就先 `max_id = cid`，一旦字段名对不上（后端返回 sha256，这里读
         content_sha256）所有条目都会失败被跳过，而游标已经越过它们 —— 数据
         永久丢失且不可恢复。
         """
         parsed: list[CloudFile] = []
         max_id = last_sync_id
+        retryable_ids = []
 
         for srv in items:
+            change_id = int(srv.get("change_id") or srv.get("id") or 0)
             cid = int(srv.get("id") or srv.get("cloud_id") or 0)
-            if cid <= 0:
-                continue
+            if change_id <= 0:
+                raise ValueError("云端文件事件缺少有效 change_id")
 
             # 后端 /files/sync 的 serializeFileRow() 返回的是 sha256，历史上这里读
             # content_sha256 导致恒为空。两个键都接受，避免再次被契约变更打穿。
@@ -135,27 +152,33 @@ class _FileSyncWorker(QObject):
             is_deleted = bool(srv.get("is_deleted", False))
 
             ok = False
-            try:
-                ok = self._apply_remote_file(srv, cid, sha, is_deleted, parsed)
-            except Exception as e:
-                logger.debug(f"处理云端文件条目 {cid} 失败: {e}")
+            if cid > 0:
+                try:
+                    ok = self._apply_remote_file(srv, cid, sha, is_deleted, parsed)
+                except Exception as e:
+                    logger.debug(f"处理云端文件条目 {cid} 失败: {e}")
 
             if ok:
-                if cid > max_id:
-                    max_id = cid
-                self._pull_skip.pop(cid, None)
+                if change_id > max_id:
+                    max_id = change_id
+                self._pull_skip.pop(change_id, None)
                 continue
 
-            attempts = self._pull_skip.get(cid, 0) + 1
-            self._pull_skip[cid] = attempts
+            attempts = self._pull_skip.get(change_id, 0) + 1
+            self._pull_skip[change_id] = attempts
             if attempts >= self._MAX_PULL_SKIP:
                 logger.error(
-                    f"云端文件 {cid} 连续 {attempts} 次处理失败，放弃并推进游标"
+                    f"云端文件事件 {change_id} 连续 {attempts} 次处理失败，放弃并推进游标"
                 )
-                self._pull_skip.pop(cid, None)
-                if cid > max_id:
-                    max_id = cid
+                self._pull_skip.pop(change_id, None)
+                if change_id > max_id:
+                    max_id = change_id
+            else:
+                retryable_ids.append(change_id)
 
+        # 一页中后续条目成功，不能越过前面仍待重试的失败条目。
+        if retryable_ids:
+            max_id = max(last_sync_id, min(max_id, min(retryable_ids) - 1))
         return parsed, max_id
 
     def _apply_remote_file(self, srv: dict, cid: int, sha, is_deleted: bool, parsed: list) -> bool:
@@ -164,12 +187,6 @@ class _FileSyncWorker(QObject):
         # sha，不能先做 SHA 校验，否则游标会越过删除事件但本地记录永久残留。
         if is_deleted:
             existing = self.repo.get_by_cloud_id(cid)
-            if (
-                existing is None
-                and isinstance(sha, str)
-                and re.fullmatch(r"[a-fA-F0-9]{64}", sha) is not None
-            ):
-                existing = self.repo.get_by_sha(sha.lower())
             if existing is None:
                 # 本地本来就没有这条，无事可做，游标可以安全推进。
                 return True

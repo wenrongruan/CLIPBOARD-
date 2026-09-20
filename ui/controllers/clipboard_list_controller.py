@@ -423,6 +423,12 @@ class ClipboardListController(QObject):
     # ========== Tab 切换 ==========
 
     def on_tab_changed(self, index: int):
+        if index == 1 and getattr(self._parent, "file_list_widget", None) is None:
+            cloud_api = getattr(self._parent, "cloud_api", None)
+            if cloud_api is not None and cloud_api.is_authenticated:
+                self._parent.cloud_controller.bootstrap_files_stack_after_login(
+                    activate=True
+                )
         self._parent._stack.setCurrentIndex(index)
         file_list_widget = getattr(self._parent, "file_list_widget", None)
         if index == 1 and file_list_widget is not None:

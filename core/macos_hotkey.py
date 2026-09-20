@@ -143,16 +143,24 @@ class MacOSGlobalHotkey:
                 self._on_match()
             return event
 
-        self._global_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            NSEventMaskKeyDown, global_handler
-        )
-        self._local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
-            NSEventMaskKeyDown, local_handler
-        )
-        # macOS 在缺「输入监控」权限时 addGlobalMonitor 返回 None，但不抛异常。
-        # 这里把 global 没拿到当作"未真正生效"的信号，让上层走权限引导。
-        self.running = self._global_monitor is not None
-        return self.running
+        try:
+            self._global_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskKeyDown, global_handler
+            )
+            # macOS 缺「输入监控」权限时可能返回 None，不再留下孤立的本地监听器。
+            if self._global_monitor is None:
+                return False
+            self._local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskKeyDown, local_handler
+            )
+            if self._local_monitor is None:
+                self.stop()
+                return False
+        except Exception:
+            self.stop()
+            raise
+        self.running = True
+        return True
 
     def stop(self) -> None:
         try:

@@ -103,6 +103,8 @@ class EntitlementService(QObject):
         self._lock = threading.RLock()
         self._current: Entitlement = Entitlement()
         self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_in_progress = False
+        self._last_refresh_failed = False
         self._load_from_meta_locked()
 
     def set_cloud_api(self, cloud_api: Optional[CloudAPIClient]) -> None:
@@ -114,6 +116,11 @@ class EntitlementService(QObject):
     def current(self) -> Entitlement:
         with self._lock:
             return self._current
+
+    def refresh_state(self) -> Tuple[bool, bool]:
+        """返回（正在验证，最近一次验证失败），供文件页区分未知与免费。"""
+        with self._lock:
+            return self._refresh_in_progress, self._last_refresh_failed
 
     def can_use_files(self) -> Tuple[bool, str]:
         e = self.current()
@@ -157,6 +164,8 @@ class EntitlementService(QObject):
             if self._refresh_thread and self._refresh_thread.is_alive():
                 return
             if self._cloud_api is None or not self._cloud_api.is_authenticated:
+                self._refresh_in_progress = False
+                self._last_refresh_failed = False
                 # 未登录：置为 free；无后台请求。
                 # 注意：_apply_locked 返回是否变化，不在锁内 emit，用局部变量记录。
                 free_ent = Entitlement(
@@ -166,6 +175,8 @@ class EntitlementService(QObject):
                 if self._apply_locked(free_ent):
                     _emit_ent = free_ent
             else:
+                self._refresh_in_progress = True
+                self._last_refresh_failed = False
                 _thread = threading.Thread(
                     target=self._do_refresh, name="EntitlementRefresh", daemon=True,
                 )
@@ -180,6 +191,8 @@ class EntitlementService(QObject):
         """登出时调用：清空内存与持久化缓存。"""
         with self._lock:
             self._current = Entitlement()
+            self._refresh_in_progress = False
+            self._last_refresh_failed = False
             self._persist_locked(None)
         self.entitlement_changed.emit(self._current)
 
@@ -261,23 +274,23 @@ class EntitlementService(QObject):
         )
         _emit_needed = False
         with self._lock:
-            _emit_needed = self._apply_locked(ent)
+            was_refreshing = self._refresh_in_progress
+            self._refresh_in_progress = False
+            self._last_refresh_failed = False
+            _emit_needed = self._apply_locked(ent) or was_refreshing
         # 锁外 emit：_do_refresh 在后台线程执行，持锁时 emit 会从非主线程触发槽函数
         if _emit_needed:
             self.entitlement_changed.emit(ent)
 
     def _extend_grace_on_error(self) -> None:
-        """网络失败时不动 plan / status，仅重设 offline_grace_until（若从未联网过则置 0）。"""
-        emit_ent = None
+        """网络失败时保留现有订阅缓存，并通知 UI 验证失败。"""
         with self._lock:
-            cur = self._current
-            if cur.fetched_at == 0:
-                return
-            # grace 基于上次成功时间，不因失败延长；这里仅 emit 给 UI 刷一下显示
-            emit_ent = cur
+            self._refresh_in_progress = False
+            self._last_refresh_failed = True
+            # grace 基于上次成功时间，不因失败延长；emit 给 UI 更新验证状态。
+            emit_ent = self._current
         # 锁外 emit，避免持 RLock 期间从后台线程触发槽函数导致死锁
-        if emit_ent is not None:
-            self.entitlement_changed.emit(emit_ent)
+        self.entitlement_changed.emit(emit_ent)
 
     def _apply_locked(self, ent: Entitlement) -> bool:
         """更新内存 + 持久化；返回 True 表示值发生变化（调用方应在锁外 emit）。"""

@@ -137,7 +137,13 @@ def remove_from_container(sha: str) -> None:
 
 
 def guess_mime(name: str) -> str:
-    mt, _ = mimetypes.guess_type(name)
+    try:
+        mt, _ = mimetypes.guess_type(name)
+    except OSError:
+        # macOS App Sandbox may deny Python's first read of
+        # /etc/apache2/mime.types. The bundled mapping is sufficient for
+        # upload metadata; an unknown extension is sent as binary.
+        mt = mimetypes.types_map.get(Path(name).suffix.lower())
     return mt or "application/octet-stream"
 
 

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager(AbstractDatabaseManager):
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -148,6 +148,110 @@ class DatabaseManager(AbstractDatabaseManager):
         # 放在 _init_database 末尾保证主表与 app_meta 已就绪；MySQL 方言迁移目录
         # 尚未落地，本次仅在 SQLite 上生效。
         self._run_file_migrations()
+        self._migrate_space_hash_uniqueness()
+
+    def _migrate_space_hash_uniqueness(self) -> None:
+        """Replace the global hash constraint with one scoped to each space.
+
+        SQLite cannot drop an inline UNIQUE constraint, so rebuild the table in
+        one transaction and restore its indexes and FTS objects afterwards.
+        """
+        with self.get_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if row and int(row[0]) >= 5:
+                return
+
+            indexes = [r[0] for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'clipboard_items' AND sql IS NOT NULL"
+            )]
+            fts_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' "
+                "AND name = 'clipboard_fts'"
+            ).fetchone()
+            triggers = [r[0] for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND tbl_name = 'clipboard_items' AND sql IS NOT NULL"
+            )]
+            sequence_row = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'clipboard_items'"
+            ).fetchone()
+            old_sequence = int(sequence_row[0]) if sequence_row else 0
+
+            # DROP TABLE 在 foreign_keys=ON 时会对引用它的子表执行级联删除。
+            # 表和 id 随后会原样恢复，因此只在重建期间暂停 FK 检查。
+            foreign_keys_enabled = bool(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+            if foreign_keys_enabled:
+                conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for name in ("clipboard_ai", "clipboard_ad", "clipboard_au"):
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                if fts_row:
+                    conn.execute("DROP TABLE clipboard_fts")
+                conn.execute("""
+                    CREATE TABLE clipboard_items_v5_temp (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        content_type TEXT NOT NULL CHECK(content_type IN ('text', 'image')),
+                        text_content TEXT, image_data BLOB, image_thumbnail BLOB,
+                        content_hash TEXT NOT NULL, preview TEXT,
+                        device_id TEXT NOT NULL, device_name TEXT,
+                        created_at INTEGER NOT NULL, is_starred INTEGER DEFAULT 0,
+                        cloud_id INTEGER DEFAULT NULL, space_id TEXT DEFAULT NULL,
+                        source_app TEXT DEFAULT NULL, source_title TEXT DEFAULT NULL
+                    )
+                """)
+                columns = (
+                    "id, content_type, text_content, image_data, image_thumbnail, "
+                    "content_hash, preview, device_id, device_name, created_at, "
+                    "is_starred, cloud_id, space_id, source_app, source_title"
+                )
+                conn.execute(
+                    f"INSERT INTO clipboard_items_v5_temp ({columns}) "
+                    f"SELECT {columns} FROM clipboard_items"
+                )
+                conn.execute("DROP TABLE clipboard_items")
+                conn.execute(
+                    "ALTER TABLE clipboard_items_v5_temp RENAME TO clipboard_items"
+                )
+                if old_sequence:
+                    updated = conn.execute(
+                        "UPDATE sqlite_sequence SET seq = MAX(seq, ?) "
+                        "WHERE name = 'clipboard_items'",
+                        (old_sequence,),
+                    ).rowcount
+                    if not updated:
+                        conn.execute(
+                            "INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)",
+                            ("clipboard_items", old_sequence),
+                        )
+                for sql in indexes:
+                    conn.execute(sql)
+                conn.execute(
+                    "CREATE UNIQUE INDEX uq_clipboard_space_hash "
+                    "ON clipboard_items(COALESCE(space_id, ''), content_hash)"
+                )
+                if fts_row:
+                    conn.execute(fts_row[0])
+                for sql in triggers:
+                    conn.execute(sql)
+                if fts_row:
+                    conn.execute(
+                        "INSERT INTO clipboard_fts(clipboard_fts) VALUES ('rebuild')"
+                    )
+                conn.execute(
+                    "INSERT OR REPLACE INTO app_meta (key, value) "
+                    "VALUES ('schema_version', '5')"
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                if foreign_keys_enabled:
+                    conn.execute("PRAGMA foreign_keys=ON")
 
     def _run_file_migrations(self) -> None:
         """执行 sql/migrations 下的幂等迁移。失败则抛出异常，防止数据库结构不完整。"""

@@ -76,6 +76,7 @@ class ClipboardMonitor(QObject):
         self.clipboard = QApplication.clipboard()
         self._last_text: Optional[str] = None
         self._last_image_hash: Optional[str] = None
+        self._last_image_full_hash: Optional[str] = None
         self._monitoring = False
         self._add_counter = 0  # 计数器，每 50 次 add 才清理
         self._counter_lock = threading.Lock()  # 保护 _add_counter 在主线程和图片后台线程的并发访问
@@ -225,7 +226,9 @@ class ClipboardMonitor(QObject):
         now_ms = int(time.time() * 1000)
 
         # 检查是否已存在：重复内容刷新 created_at 并通知 UI 置顶
-        existing = self.repository.get_by_hash(content_hash)
+        existing = self.repository.get_existing_hashes(
+            [content_hash], space_id=None, space_scoped=True
+        ).get(content_hash)
         if existing and existing.id:
             try:
                 self.repository.touch_item(existing.id, now_ms)
@@ -285,28 +288,20 @@ class ClipboardMonitor(QObject):
         if image.isNull():
             return
 
-        # 快速 hash 检测变化，避免每次都做 PNG 编码
+        # 快速 hash 只用于预筛；缩图会丢像素，不能据此判定两张图相同。
         fast_hash = self._fast_image_hash(image)
-        if fast_hash == self._last_image_hash:
-            return
-
-        self._last_image_hash = fast_hash
 
         # 将 QImage 转为原始 RGBA 字节（主线程，快速无压缩）
         width, height = image.width(), image.height()
         image = image.convertToFormat(QImage.Format.Format_RGBA8888)
         bytes_per_line = image.bytesPerLine()
-        expected_bpl = width * 4
 
-        if bytes_per_line == expected_bpl:
-            raw_bytes = bytes(image.constBits())
-        else:
-            # 有行填充，逐行复制去除 padding
-            ptr = image.constBits()
-            raw_bytes = b"".join(
-                bytes(ptr[row * bytes_per_line: row * bytes_per_line + expected_bpl])
-                for row in range(height)
-            )
+        raw_bytes = self._rgba_bytes(image, width, height, bytes_per_line)
+        full_hash = compute_content_hash(raw_bytes)
+        if fast_hash == self._last_image_hash and full_hash == self._last_image_full_hash:
+            return
+        self._last_image_hash = fast_hash
+        self._last_image_full_hash = full_hash
 
         # Why: 在主线程（信号触发点）捕获来源 App，保证拿到的是"复制瞬间"的前台窗口，
         # 而不是后台线程真正处理到这张图时的前台窗口。
@@ -321,6 +316,16 @@ class ClipboardMonitor(QObject):
         self._image_executor.submit(
             self._process_image_background, raw_bytes, width, height, s,
             source_app_value, source_title_value,
+        )
+
+    @staticmethod
+    def _rgba_bytes(image: QImage, width: int, height: int, bytes_per_line: int) -> bytes:
+        if bytes_per_line == width * 4:
+            return bytes(image.constBits())
+        ptr = image.constBits()
+        return b"".join(
+            bytes(ptr[row * bytes_per_line: row * bytes_per_line + width * 4])
+            for row in range(height)
         )
 
     def _threadsafe_emit_item_added(self, item) -> None:
@@ -423,7 +428,9 @@ class ClipboardMonitor(QObject):
         now_ms = int(time.time() * 1000)
 
         # 检查是否已存在：重复图片刷新 created_at 并通知 UI 置顶
-        existing = self.repository.get_by_hash(content_hash)
+        existing = self.repository.get_existing_hashes(
+            [content_hash], space_id=None, space_scoped=True
+        ).get(content_hash)
         if existing and existing.id:
             try:
                 self.repository.touch_item(existing.id, now_ms)
@@ -480,6 +487,10 @@ class ClipboardMonitor(QObject):
             image.loadFromData(item.image_data)
             # 使用 _fast_image_hash 计算 hash 以匹配 _handle_image 的检测逻辑
             self._last_image_hash = self._fast_image_hash(image)
+            rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
+            self._last_image_full_hash = compute_content_hash(
+                self._rgba_bytes(rgba, rgba.width(), rgba.height(), rgba.bytesPerLine())
+            )
             self.clipboard.setImage(image)
             return True
         return False

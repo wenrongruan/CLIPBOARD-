@@ -106,7 +106,7 @@ fi
 
 section "C. Entitlements 合规（MAS 禁用键）"
 
-ENTITLEMENTS_DUMP=$(codesign -d --entitlements :- "$APP_BUNDLE" 2>/dev/null)
+ENTITLEMENTS_DUMP=$(codesign -d --entitlements - "$APP_BUNDLE" 2>/dev/null)
 if [ -z "$ENTITLEMENTS_DUMP" ]; then
     fail "无法导出 entitlements"
 else
@@ -161,16 +161,30 @@ fi
 # ════════════════════════════════════════════════════════════════════════════
 # D2. 关键第三方依赖是否打进包（自动）
 # ════════════════════════════════════════════════════════════════════════════
-# Why: build_appstore.sh 早期手写依赖清单漏掉 httpx/keyring，PyInstaller 只警告不报错，
-# 结果上架包一打开设置（CloudTab 导入 httpx）就崩。这里在包内静态搜这些模块，缺一即 fail，
-# 把"漏装依赖"从用户点击时的崩溃提前到冒烟阶段拦下。
+# 检查独立文件和 PyInstaller PYZ 中的 httpx/keyring，避免把已打包模块误判为缺失。
 section "D2. 关键 Python 依赖打包校验"
 
+PYI_VIEWER=""
+for candidate in "$SCRIPT_DIR/.venv_appstore/bin/pyi-archive_viewer" "$SCRIPT_DIR/venv/bin/pyi-archive_viewer"; do
+    if [ -x "$candidate" ]; then
+        PYI_VIEWER="$candidate"
+        break
+    fi
+done
+if [ -z "$PYI_VIEWER" ] && command -v pyi-archive_viewer >/dev/null 2>&1; then
+    PYI_VIEWER=$(command -v pyi-archive_viewer)
+fi
+bundle_executable=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$INFO_PLIST" 2>/dev/null)
+archive_listing=""
+if [ -n "$PYI_VIEWER" ] && [ -n "$bundle_executable" ]; then
+    archive_listing=$("$PYI_VIEWER" -r -b "$APP_BUNDLE/Contents/MacOS/$bundle_executable" 2>/dev/null)
+fi
 for dep in httpx keyring; do
-    if find "$APP_BUNDLE/Contents" \( -type d -name "$dep" -o -name "${dep}.py" -o -name "${dep}.pyc" \) 2>/dev/null | grep -q .; then
+    if find "$APP_BUNDLE/Contents" \( -type d -name "$dep" -o -name "${dep}.py" -o -name "${dep}.pyc" \) 2>/dev/null | grep -q . \
+        || printf '%s\n' "$archive_listing" | grep -Eq "^[[:space:]]+${dep}([.]|$)"; then
         pass "$dep 已打进包"
     else
-        fail "$dep 未打进包 — 检查 build_appstore.sh 依赖安装是否跟随 requirements.txt"
+        fail "$dep 未在文件或 PyInstaller PYZ 中找到 — 检查 build_appstore.sh 依赖安装"
     fi
 done
 

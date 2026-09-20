@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from config import settings
 from core.cloud.http import (
     CloudAPIError,
     CreditCheckResult,
@@ -38,7 +39,7 @@ class AuthClient:
     @requires_plugin_permission("network")
     def register(self, email: str, password: str, display_name: str = None) -> dict:
         """注册新用户，返回用户信息和 tokens"""
-        payload = {"email": email, "password": password}
+        payload = {"email": email, "password": password, "device_id": settings().device_id}
         if display_name:
             payload["name"] = display_name
 
@@ -50,7 +51,7 @@ class AuthClient:
     @requires_plugin_permission("network")
     def login(self, email: str, password: str) -> dict:
         """登录，返回 tokens"""
-        payload = {"email": email, "password": password}
+        payload = {"email": email, "password": password, "device_id": settings().device_id}
         response = self._facade._request("POST", "/api/v1/auth/login", auth_required=False, json=payload)
         data = response.json()
         self._http._handle_auth_response(data, email)

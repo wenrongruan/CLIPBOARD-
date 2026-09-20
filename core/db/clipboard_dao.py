@@ -108,13 +108,14 @@ class ClipboardDAO:
         try:
             return self.db.execute_with_retry(operation)
         except _INTEGRITY_ERRORS:
-            # content_hash UNIQUE 冲突视为"已存在"，降噪为 debug 并返回现有 id。
-            # Why: 剪贴板监控偶发重复写入（跨设备同步窗口期、连续轮询到同一内容），
-            # IntegrityError 冒泡会污染日志且打断调用链。
-            existing = self.get_by_hash(item.content_hash)
+            # 只允许把同一空间的 hash 冲突视为重复。若返回另一空间的 id，
+            # 云同步会把团队 cloud_id 回填到个人记录，随后可能误删团队条目。
+            existing = self.get_existing_hashes(
+                [item.content_hash], space_id=item.space_id, space_scoped=True
+            ).get(item.content_hash)
             if existing is not None and existing.id:
                 logger.debug(
-                    "add_item 遇到 content_hash 冲突，返回已有 id=%s", existing.id
+                    "add_item 遇到同空间 content_hash 冲突，返回已有 id=%s", existing.id
                 )
                 return existing.id
             # 极少见：冲突但又查不到（竞态/其它约束），继续冒泡让上层处理

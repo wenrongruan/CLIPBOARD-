@@ -343,12 +343,29 @@ class FileListWidget(QWidget):
             self._last_usage_pct = 0
 
         enabled, reason = self.entitlement.can_use_files()
+        refreshing, refresh_failed = getattr(
+            self.entitlement, "refresh_state", lambda: (False, False)
+        )()
+        authenticated = self.cloud_api is not None and getattr(
+            self.cloud_api, "is_authenticated", False
+        )
+        verifying = (
+            not enabled
+            and authenticated
+            and not refresh_failed
+            and (refreshing or getattr(ent, "fetched_at", 0) == 0)
+        )
+        verify_failed = not enabled and authenticated and refresh_failed
         self.add_btn.setEnabled(enabled)
         self.table.setEnabled(True)  # 仍允许查看本地记录
         self.gate_banner.setVisible(not enabled)
-        self.upgrade_btn.setVisible(not enabled)
+        self.upgrade_btn.setVisible(not enabled and not verifying and not verify_failed)
         if not enabled:
-            self.gate_banner_text.setText(reason or "文件云同步需要付费订阅")
+            self.gate_banner_text.setText(
+                "正在验证云端套餐..." if verifying else
+                "无法验证云端套餐，请检查网络后重新打开“我的文件”重试。"
+                if verify_failed else reason or "文件云同步需要付费订阅"
+            )
 
     def _open_pricing(self):
         QDesktopServices.openUrl(QUrl(PRICING_URL))

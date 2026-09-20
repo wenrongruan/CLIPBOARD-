@@ -142,11 +142,13 @@ class DatabaseMigrator:
                 break
 
             hashes = [it.content_hash for it in items]
-            existing = self._existing_hashes(hashes)
+            space_scoped = "space_id" in columns
+            existing = self._existing_hashes(hashes, space_scoped=space_scoped)
             pending = [
                 tuple(_row_dict(it)[c] for c in columns)
                 for it in items
-                if it.content_hash not in existing
+                if ((it.space_id or "") if space_scoped else "", it.content_hash)
+                not in existing
             ]
 
             if pending:
@@ -171,17 +173,23 @@ class DatabaseMigrator:
 
         return migrated
 
-    def _existing_hashes(self, hashes: list) -> set:
+    def _existing_hashes(self, hashes: list, space_scoped: bool = True) -> set:
         if not hashes:
             return set()
         placeholders = ",".join("?" * len(hashes))
-        sql = f"SELECT content_hash FROM clipboard_items WHERE content_hash IN ({placeholders})"
+        columns = "content_hash, space_id" if space_scoped else "content_hash"
+        sql = f"SELECT {columns} FROM clipboard_items WHERE content_hash IN ({placeholders})"
 
         def operation(conn):
-            return {row["content_hash"] for row in self.target.db.fetch_all(conn, sql, tuple(hashes))}
+            return {
+                ((row["space_id"] or "") if space_scoped else "", row["content_hash"])
+                for row in self.target.db.fetch_all(conn, sql, tuple(hashes))
+            }
 
         try:
             return self.target.db.execute_read(operation)
         except Exception as e:
             logger.debug(f"批量查重失败，回退逐条: {e}")
-            return {h for h in hashes if self.target.get_by_hash(h) is not None}
+            # 查询异常由写入阶段的冲突策略兜底；不能把别的空间条目
+            # 错认成已迁移。
+            return set()

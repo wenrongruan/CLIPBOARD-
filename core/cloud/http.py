@@ -35,6 +35,7 @@ from config import (
     IS_MACOS,
     set_cloud_access_token,
     set_cloud_refresh_token,
+    settings,
     update_settings,
 )
 
@@ -450,7 +451,7 @@ class HttpClient:
             try:
                 response = self._client.post(
                     "/api/v1/auth/refresh",
-                    json={"refresh_token": refresh_str},
+                    json={"refresh_token": refresh_str, "device_id": settings().device_id},
                     timeout=15.0,
                 )
             except httpx.HTTPError as e:

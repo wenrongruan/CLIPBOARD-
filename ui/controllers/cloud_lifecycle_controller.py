@@ -36,9 +36,12 @@ class CloudLifecycleController(QObject):
 
     # ========== 主入口 ==========
 
-    def bootstrap_files_stack_after_login(self):
+    def bootstrap_files_stack_after_login(self, activate: bool = False):
         """未登录启动后首次登录成功:补建 entitlement + 文件仓 + 文件同步,
-        并把"我的文件"的升级占位替换成真实的 FileListWidget。"""
+        并把"我的文件"的升级占位替换成真实的 FileListWidget。
+
+        用户主动打开文件页时，即使后台文件同步开关关闭，也启动本次文件管理。
+        """
         parent = self._parent
         if parent.cloud_api is None or not parent.cloud_api.is_authenticated:
             return
@@ -56,7 +59,7 @@ class CloudLifecycleController(QObject):
                 from core.file_repository import CloudFileRepository
                 parent.file_repository = CloudFileRepository(parent.repository.db)
 
-            if parent.file_sync_service is None and settings().files_sync_enabled:
+            if parent.file_sync_service is None and (settings().files_sync_enabled or activate):
                 from core.file_sync_service import FileCloudSyncService
                 parent.file_sync_service = FileCloudSyncService(
                     parent.file_repository,
@@ -64,6 +67,7 @@ class CloudLifecycleController(QObject):
                     parent.entitlement_service,
                     parent.repository,
                 )
+            if parent.file_sync_service is not None and (settings().files_sync_enabled or activate):
                 try:
                     parent.file_sync_service.start()
                 except Exception as e:

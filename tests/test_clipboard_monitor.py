@@ -43,7 +43,7 @@ def tmp_config_env(tmp_path, monkeypatch):
 
 
 class _FakeRepository:
-    """只实现 monitor 用到的三个方法：get_by_hash / add_item / touch_item /
+    """只实现 monitor 用到的方法：get_existing_hashes / add_item / touch_item /
     cleanup_*。保存 add_item 传入的 item，方便断言。
     """
 
@@ -51,8 +51,12 @@ class _FakeRepository:
         self.added: list = []
         self._next_id = 1
 
-    def get_by_hash(self, content_hash: str):
-        return None
+    def get_existing_hashes(self, hashes, space_id=None, space_scoped=False):
+        return {
+            item.content_hash: item for item in self.added
+            if item.content_hash in hashes
+            and (not space_scoped or (item.space_id or "") == (space_id or ""))
+        }
 
     def add_item(self, item) -> int:
         item_id = self._next_id

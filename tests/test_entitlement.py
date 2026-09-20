@@ -90,6 +90,29 @@ def test_basic_user_can_use_and_upload(repo):
     assert ok2
 
 
+def test_team_subscription_allows_files(repo):
+    svc = EntitlementService(
+        cloud_api=_FakeCloudAPI({
+            "plan": "team", "status": "active",
+            "files": {"enabled": True, "quota_bytes": 50 * (1 << 30)},
+        }),
+        repository=repo,
+    )
+    svc.refresh_async()
+    assert _wait_for(lambda: svc.current().plan == Plan.TEAM)
+    assert svc.can_use_files()[0]
+    assert svc.current().files_quota_bytes == 50 * (1 << 30)
+
+
+def test_initial_subscription_failure_is_not_left_refreshing(repo):
+    svc = EntitlementService(
+        cloud_api=_FakeCloudAPI(RuntimeError("offline")), repository=repo,
+    )
+    svc.refresh_async()
+    assert _wait_for(lambda: svc.refresh_state() == (False, True))
+    assert svc.current().fetched_at == 0
+
+
 def test_single_file_1gb_limit(repo):
     svc = EntitlementService(
         cloud_api=_FakeCloudAPI({

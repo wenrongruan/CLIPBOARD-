@@ -16,6 +16,7 @@ from core.database import DatabaseManager
 from core.file_models import CloudFile, FileSyncState
 from core.file_repository import CloudFileRepository
 from core.file_sync_service import _FileSyncWorker
+from core.file_storage import guess_mime
 
 
 class _FakeEntitlement:
@@ -27,6 +28,17 @@ class _FakeEntitlement:
 
     def record_local_upload(self, size: int) -> None:
         self.recorded_sizes.append(size)
+
+
+def test_mime_guess_survives_sandbox_denial(monkeypatch):
+    from core import file_storage
+
+    def denied(_name):
+        raise PermissionError(1, "Operation not permitted", "/etc/apache2/mime.types")
+
+    monkeypatch.setattr(file_storage.mimetypes, "guess_type", denied)
+    assert guess_mime("report.pdf") == "application/pdf"
+    assert guess_mime("archive.unknownsuffix") == "application/octet-stream"
 
 
 class _ExistsCloudAPI:
@@ -100,8 +112,18 @@ class _PullCloudAPI:
     def __init__(self, items: list[dict]):
         self.items = items
 
-    def files_list(self, since_id: int, device_id: str) -> dict:
-        return {"items": self.items}
+    def files_list(self, device_id: str, since_change_id: int = 0) -> dict:
+        items = [
+            {**item, "change_id": item.get("change_id", item["id"])}
+            for item in self.items
+        ]
+        return {
+            "items": items,
+            "has_more": False,
+            "next_since_change_id": max(
+                [since_change_id] + [item["change_id"] for item in items]
+            ),
+        }
 
 
 @pytest.fixture

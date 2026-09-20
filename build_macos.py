@@ -13,6 +13,7 @@ macOS 打包脚本
 from setuptools import setup
 import sys
 import platform
+from config import APP_VERSION
 
 print("[warn] build_macos.py 已弃用，建议改用 build_mac.sh / build_appstore.sh (PyInstaller)")
 
@@ -28,8 +29,8 @@ OPTIONS = {
         'CFBundleName': '共享剪贴板',
         'CFBundleDisplayName': '共享剪贴板',
         'CFBundleIdentifier': 'com.wenrongruan.sharedclipboard',
-        'CFBundleVersion': '3.3.6',
-        'CFBundleShortVersionString': '3.3.6',
+        'CFBundleVersion': APP_VERSION,
+        'CFBundleShortVersionString': APP_VERSION,
         'LSUIElement': True,  # 作为菜单栏应用运行，不显示在 Dock
         'NSHighResolutionCapable': True,  # 支持 Retina 显示
         'NSRequiresAquaSystemAppearance': False,  # 支持深色模式

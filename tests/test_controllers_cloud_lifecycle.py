@@ -9,7 +9,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QWidget, QStackedWidget
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -36,9 +36,26 @@ class _FakeFileSyncService(QObject):
     download_finished = Signal(int, bool, str)
     sync_error = Signal(str, int)
 
+    def __init__(self):
+        super().__init__()
+        self.started = False
+
+    def start(self):
+        self.started = True
+
 
 class _FakeEntitlement(QObject):
     entitlement_changed = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.failed = False
+
+    def refresh_async(self):
+        pass
+
+    def refresh_state(self):
+        return False, self.failed
 
     def current(self):
         return SimpleNamespace(
@@ -106,6 +123,53 @@ def test_existing_file_page_rebinds_after_login(qapp):
         parent.cloud_api,
     )
     assert ctx.file_sync_service is parent.file_sync_service
+    parent.close()
+    parent.deleteLater()
+
+
+def test_open_files_starts_manual_sync_with_background_switch_off(qapp, monkeypatch):
+    from ui.controllers import cloud_lifecycle_controller as cloud_module
+    from ui.controllers.clipboard_list_controller import ClipboardListController
+
+    parent = QWidget()
+    parent.cloud_api = SimpleNamespace(is_authenticated=True)
+    parent.repository = SimpleNamespace(db=object())
+    parent.entitlement_service = None
+    parent.file_repository = None
+    parent.file_sync_service = None
+    parent.file_list_widget = None
+    parent._stack = QStackedWidget(parent)
+    parent._stack.addWidget(QWidget())
+    parent._file_page_placeholder = QWidget()
+    parent._stack.addWidget(parent._file_page_placeholder)
+    ctx = SimpleNamespace(repository=parent.repository, entitlement_service=None)
+    entitlement = _FakeEntitlement()
+    sync_service = _FakeFileSyncService()
+    monkeypatch.setattr(cloud_module, "settings", lambda: SimpleNamespace(files_sync_enabled=False))
+    monkeypatch.setattr(
+        "core.entitlement_service.get_entitlement_service", lambda **_kw: entitlement
+    )
+    monkeypatch.setattr(
+        "core.file_repository.CloudFileRepository", lambda _db: _FakeFileRepository()
+    )
+    monkeypatch.setattr(
+        "core.file_sync_service.FileCloudSyncService", lambda *_args: sync_service
+    )
+    parent.cloud_controller = CloudLifecycleController(parent, ctx)
+
+    ClipboardListController.on_tab_changed(
+        SimpleNamespace(_parent=parent, ctx=ctx), 1
+    )
+
+    assert sync_service.started
+    assert isinstance(parent.file_list_widget, FileListWidget)
+    assert parent._file_page_placeholder is None
+    assert parent._stack.currentIndex() == 1
+    assert parent.file_list_widget.gate_banner_text.text() == "正在验证云端套餐..."
+    assert not parent.file_list_widget.upgrade_btn.isVisible()
+    entitlement.failed = True
+    parent.file_list_widget._refresh_gate_view()
+    assert "无法验证云端套餐" in parent.file_list_widget.gate_banner_text.text()
     parent.close()
     parent.deleteLater()
 

@@ -230,8 +230,13 @@ class CloudAPIClient:
 
     # ========== Files domain delegation ==========
 
-    def files_list(self, since_id: int, device_id: str, limit: int = 100) -> dict:
-        return self.files.files_list(since_id, device_id, limit=limit)
+    def files_list(
+        self, since_id: int = 0, device_id: str = "", limit: int = 100,
+        *, since_change_id: Optional[int] = None,
+    ) -> dict:
+        return self.files.files_list(
+            since_id, device_id, limit=limit, since_change_id=since_change_id,
+        )
 
     def files_get_quota(self) -> dict:
         return self.files.files_get_quota()

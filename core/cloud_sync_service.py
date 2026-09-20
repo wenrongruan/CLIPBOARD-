@@ -103,8 +103,24 @@ class _SyncWorker(QObject):
             new_items = []
             cloud_id_pairs = []
             max_server_id = last_sync_id
+            # 服务端历史数据可能在同一团队空间保存了不同作者的同 hash
+            # 条目。本地当前仅能表示 (space_id, hash) 一条，不能让后一条
+            # server_id 覆盖前一条，否则删除时会删错云端记录。
+            seen_server_ids = {
+                h: existing.cloud_id for h, existing in existing_map.items()
+                if existing.cloud_id
+            }
 
             for server_id, item, tag_names in parsed_items:
+                prior_server_id = seen_server_ids.get(item.content_hash)
+                if prior_server_id and server_id and prior_server_id != server_id:
+                    logger.warning(
+                        "同空间同 hash 的云端记录冲突，保留原 cloud_id: "
+                        "space=%s id=%s conflicting_id=%s",
+                        space_key, prior_server_id, server_id,
+                    )
+                    max_server_id = max(max_server_id, server_id)
+                    continue
                 # 记录来源 space：服务端会在 item 中回填 space_id（None=个人）。
                 # 以服务端值为准；fallback 到当前同步的 space_key 保持一致性。
                 existing = existing_map.get(item.content_hash)
@@ -145,6 +161,8 @@ class _SyncWorker(QObject):
 
                 if server_id > max_server_id:
                     max_server_id = server_id
+                if server_id:
+                    seen_server_ids[item.content_hash] = server_id
 
             # 若存在跳过的条目，游标只能推进到最小跳过 id - 1（避免越过重试目标）
             # 但若该条目已被标记为“永久放弃”（超过重试次数），则允许越过
@@ -226,7 +244,8 @@ class _SyncWorker(QObject):
                 for si in server_items:
                     h = si.get("content_hash", "")
                     sid = si.get("id")
-                    if h and sid:
+                    response_space = si.get("space_id", space_key) or None
+                    if h and sid and response_space == space_key:
                         hash_to_server_id[h] = sid
 
             cloud_id_pairs = [
@@ -376,7 +395,13 @@ class _SyncWorker(QObject):
 
             return item
         except Exception as e:
-            logger.error(f"转换服务端数据失败: {e}, data={data}")
+            # data 可能包含 text_content（密码、token 等剪贴板正文），不能写日志。
+            safe_id = data.get("id") if isinstance(data, dict) else None
+            logger.error(
+                "转换服务端数据失败: id=%r error_type=%s",
+                safe_id if isinstance(safe_id, int) else None,
+                type(e).__name__,
+            )
             return None
 
     def _download_image(self, item: ImageClipboardItem, server_id: int) -> bool:
@@ -470,55 +495,62 @@ class _SyncWorker(QObject):
             if not unsynced:
                 return
 
-            upload_items = []
-            image_items = []
+            # 单次 batch 的 hash→id 字典只能在同一空间内使用；个人与团队可
+            # 同时收藏相同内容，混在一批会把两个 id 都回填成最后一个 server id。
+            groups = {}
             for item in unsynced:
-                item_dict = {
-                    "content_type": item.content_type.value,
-                    "text_content": item.text_content if isinstance(item, TextClipboardItem) else None,
-                    "content_hash": item.content_hash,
-                    "preview": item.preview or "",
-                    "device_id": item.device_id,
-                    "device_name": item.device_name,
-                    "created_at": item.created_at,
-                    "is_starred": item.is_starred,
-                }
-                # v3.4：同样透传 space / source_app / source_title
-                if getattr(item, "space_id", None):
-                    item_dict["space_id"] = item.space_id
-                src_app = getattr(item, "source_app", "") or ""
-                if src_app:
-                    item_dict["source_app"] = src_app
-                src_title = getattr(item, "source_title", "") or ""
-                if src_title:
-                    item_dict["source_title"] = src_title
-                upload_items.append(item_dict)
-                if isinstance(item, ImageClipboardItem) and item.image_data:
-                    image_items.append(item)
+                groups.setdefault(getattr(item, "space_id", None) or None, []).append(item)
 
-            server_items = self.cloud_api.upload_items(upload_items)
+            confirmed_count = 0
+            for space_key, group in groups.items():
+                upload_items = []
+                image_items = []
+                for item in group:
+                    item_dict = {
+                        "content_type": item.content_type.value,
+                        "text_content": item.text_content if isinstance(item, TextClipboardItem) else None,
+                        "content_hash": item.content_hash,
+                        "preview": item.preview or "",
+                        "device_id": item.device_id,
+                        "device_name": item.device_name,
+                        "created_at": item.created_at,
+                        "is_starred": item.is_starred,
+                    }
+                    if space_key:
+                        item_dict["space_id"] = space_key
+                    src_app = getattr(item, "source_app", "") or ""
+                    if src_app:
+                        item_dict["source_app"] = src_app
+                    src_title = getattr(item, "source_title", "") or ""
+                    if src_title:
+                        item_dict["source_title"] = src_title
+                    upload_items.append(item_dict)
+                    if isinstance(item, ImageClipboardItem) and item.image_data:
+                        image_items.append(item)
 
-            hash_to_server_id = {}
-            if server_items:
-                for si in server_items:
+                server_items = self.cloud_api.upload_items(upload_items)
+                hash_to_server_id = {}
+                for si in server_items or []:
                     h = si.get("content_hash", "")
                     sid = si.get("id")
-                    if h and sid:
+                    response_space = si.get("space_id", space_key) or None
+                    if h and sid and response_space == space_key:
                         hash_to_server_id[h] = sid
 
-            cloud_id_pairs = [
-                (item.id, hash_to_server_id[item.content_hash])
-                for item in unsynced
-                if item.id and item.content_hash in hash_to_server_id
-            ]
-            self.repository.set_cloud_ids_bulk(cloud_id_pairs)
+                cloud_id_pairs = [
+                    (item.id, hash_to_server_id[item.content_hash])
+                    for item in group
+                    if item.id and item.content_hash in hash_to_server_id
+                ]
+                self.repository.set_cloud_ids_bulk(cloud_id_pairs)
+                confirmed_count += len(cloud_id_pairs)
 
-            for item in image_items:
-                server_id = hash_to_server_id.get(item.content_hash)
-                if server_id:
-                    self._upload_image_for_item(item, server_id)
+                for item in image_items:
+                    server_id = hash_to_server_id.get(item.content_hash)
+                    if server_id:
+                        self._upload_image_for_item(item, server_id)
 
-            logger.info(f"收藏同步：已推送 {len(unsynced)} 条收藏条目到云端")
+            logger.info("收藏同步：已确认 %s/%s 条收藏条目", confirmed_count, len(unsynced))
         except CloudAPIError as e:
             logger.warning(f"收藏同步推送失败: {e}")
         except Exception as e:

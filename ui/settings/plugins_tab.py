@@ -1,8 +1,12 @@
 """插件管理 Tab：已安装列表 + 插件商店（非 App Store 构建）。"""
 
 import logging
-import os
+import io
+import json
+import re
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -65,10 +69,10 @@ class _PluginInstallThread(QThread):
 
     def run(self):
         import httpx
-        import tempfile
-        import zipfile
 
         try:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", self._plugin_id):
+                raise ValueError("插件 ID 不合法")
             url = self._download_url if self._download_url.startswith("http") \
                 else f"{self._api_url}{self._download_url}"
             resp = httpx.get(
@@ -80,25 +84,54 @@ class _PluginInstallThread(QThread):
                 self.error.emit(self._plugin_id, f"HTTP {resp.status_code}")
                 return
 
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                tmp.write(resp.content)
-                tmp_path = tmp.name
-
-            try:
-                with zipfile.ZipFile(tmp_path) as zf:
-                    resolved_target = self._target_dir.resolve()
+            self._target_dir.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix=".plugin-install-", dir=self._target_dir.parent
+            ) as staging_name:
+                staging_dir = Path(staging_name).resolve()
+                staged_plugin = staging_dir / self._plugin_id
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                     for member in zf.namelist():
-                        member_path = (self._target_dir / member).resolve()
-                        if not member_path.is_relative_to(resolved_target):
-                            self.error.emit(self._plugin_id, f"安全检查失败: {member}")
-                            shutil.rmtree(self._target_dir, ignore_errors=True)
-                            return
-                    zf.extractall(self._target_dir)
-            except Exception:
-                shutil.rmtree(self._target_dir, ignore_errors=True)
-                raise
-            finally:
-                os.unlink(tmp_path)
+                        member_path = (staging_dir / member).resolve()
+                        if not member_path.is_relative_to(staged_plugin):
+                            raise ValueError(f"安全检查失败: {member}")
+                    zf.extractall(staging_dir)
+                manifest_path = staged_plugin / "manifest.json"
+                if not manifest_path.is_file():
+                    raise ValueError("插件包缺少 manifest.json")
+                with manifest_path.open("r", encoding="utf-8") as manifest_file:
+                    manifest = json.load(manifest_file)
+                if not isinstance(manifest, dict) or manifest.get("id") != self._plugin_id:
+                    raise ValueError("插件包 manifest ID 不匹配")
+                self._target_dir.mkdir(parents=True, exist_ok=True)
+                target_plugin = self._target_dir / self._plugin_id
+                if target_plugin.exists() or target_plugin.is_symlink():
+                    backup_dir = Path(tempfile.mkdtemp(
+                        prefix=".plugin-backup-", dir=self._target_dir.parent
+                    ))
+                    backup_plugin = backup_dir / self._plugin_id
+                    try:
+                        target_plugin.rename(backup_plugin)
+                        try:
+                            staged_plugin.rename(target_plugin)
+                        except Exception:
+                            try:
+                                backup_plugin.rename(target_plugin)
+                            except Exception as restore_error:
+                                raise RuntimeError(
+                                    f"安装失败且恢复失败，原插件保存在 {backup_plugin}"
+                                ) from restore_error
+                            raise
+                    finally:
+                        if not backup_plugin.exists() and not backup_plugin.is_symlink():
+                            backup_dir.rmdir()
+                    if backup_dir.exists():
+                        try:
+                            shutil.rmtree(backup_dir)
+                        except OSError:
+                            logger.warning("旧插件备份清理失败: %s", backup_dir, exc_info=True)
+                else:
+                    staged_plugin.rename(target_plugin)
 
             self.installed.emit(self._plugin_id)
         except Exception as e:

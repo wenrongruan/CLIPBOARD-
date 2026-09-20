@@ -39,7 +39,7 @@ class SyncMode(str, Enum):
 # ============ 模块级常量 ============
 
 APP_NAME = "SharedClipboard"
-APP_VERSION = "3.3.6"
+APP_VERSION = "3.3.7"
 
 PRICING_URL = "https://www.jlike.com/pricing.html"
 
@@ -389,6 +389,9 @@ class SettingsStore:
     def __init__(self, path: Optional[Path] = None):
         self._path = path  # 惰性解析,避免模块导入时就创建目录
         self._lock = threading.RLock()
+        # 不同线程可同时触发同步落盘。抓取快照与替换文件必须按顺序完成，
+        # 否则较早抓取的快照可能最后写入，覆盖较新的设置。
+        self._flush_lock = threading.Lock()
         self._snapshot: Optional[AppSettings] = None
         self._extras: dict = {}
         self._dirty = False
@@ -504,13 +507,14 @@ class SettingsStore:
 
     def import_dict(self, data: dict) -> AppSettings:
         """导入完整 dict 并立即落盘。供 settings_dialog 批量写入。"""
-        with self._lock:
-            self._snapshot, self._extras = _snapshot_from_dict(data)
-            self._dirty = False
-            path, payload = self._capture_flush_payload_locked()
-            snapshot = self._snapshot
-        if payload is not None:
-            self._write_payload(path, payload)
+        with self._flush_lock:
+            with self._lock:
+                self._snapshot, self._extras = _snapshot_from_dict(data)
+                self._dirty = False
+                path, payload = self._capture_flush_payload_locked()
+                snapshot = self._snapshot
+            if payload is not None:
+                self._write_payload(path, payload)
         return snapshot
 
     def flush(self) -> None:
@@ -521,13 +525,7 @@ class SettingsStore:
                 self._save_timer.stop()
             except RuntimeError:
                 pass  # Qt 对象已析构，忽略
-        with self._lock:
-            if not self._dirty:
-                return
-            self._dirty = False
-            path, payload = self._capture_flush_payload_locked()
-        if payload is not None:
-            self._write_payload(path, payload)
+        self._sync_flush()
 
     def _capture_flush_payload_locked(self):
         """锁内抓取 (path, serializable_dict) 快照。调用方持锁并负责写盘。"""
@@ -578,13 +576,14 @@ class SettingsStore:
             self._sync_flush()
 
     def _sync_flush(self) -> None:
-        with self._lock:
-            if not self._dirty:
-                return
-            self._dirty = False
-            path, payload = self._capture_flush_payload_locked()
-        if payload is not None:
-            self._write_payload(path, payload)
+        with self._flush_lock:
+            with self._lock:
+                if not self._dirty:
+                    return
+                self._dirty = False
+                path, payload = self._capture_flush_payload_locked()
+            if payload is not None:
+                self._write_payload(path, payload)
 
     def _deferred_flush(self) -> None:
         self._sync_flush()

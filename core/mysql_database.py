@@ -25,7 +25,7 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
     placeholder = "%s"
     is_mysql = True
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     CREATE_TABLE_SQL = """
     CREATE TABLE IF NOT EXISTS clipboard_items (
@@ -314,6 +314,42 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
                 )
                 conn.commit()
                 logger.info("MySQL Schema 已迁移到 v6（v3.4 团队 / 标签 / 分享表）")
+
+            if current_version < 7:
+                # MySQL 的 UNIQUE(space_id, content_hash) 对 NULL 不生效：个人
+                # 空间可写入多份同 hash。用生成列把 NULL 归一化为空字符串。
+                cursor.execute("SHOW INDEX FROM clipboard_items")
+                unique_columns = {}
+                for index in cursor.fetchall():
+                    if index["Non_unique"] == 0:
+                        unique_columns.setdefault(index["Key_name"], []).append(
+                            index["Column_name"]
+                        )
+                old_hash_keys = [
+                    name for name, columns in unique_columns.items()
+                    if columns == ["content_hash"]
+                ]
+                cursor.execute("SHOW COLUMNS FROM clipboard_items LIKE 'space_scope'")
+                has_space_scope = cursor.fetchone() is not None
+                clauses = [f"DROP INDEX `{name}`" for name in old_hash_keys]
+                if not has_space_scope:
+                    clauses.append(
+                        "ADD COLUMN space_scope VARCHAR(64) "
+                        "GENERATED ALWAYS AS (COALESCE(space_id, '')) STORED"
+                    )
+                if "uq_clipboard_space_hash" not in unique_columns:
+                    clauses.append(
+                        "ADD UNIQUE KEY uq_clipboard_space_hash "
+                        "(space_scope, content_hash)"
+                    )
+                if clauses:
+                    cursor.execute("ALTER TABLE clipboard_items " + ", ".join(clauses))
+                cursor.execute(
+                    "INSERT INTO app_meta (`key`, `value`) VALUES ('schema_version', '7') "
+                    "ON DUPLICATE KEY UPDATE `value` = '7'"
+                )
+                conn.commit()
+                logger.info("MySQL Schema 已迁移到 v7（content_hash 按空间唯一）")
 
     def _create_connection(self) -> "pymysql.connections.Connection":
         """创建新的 MySQL 连接"""
