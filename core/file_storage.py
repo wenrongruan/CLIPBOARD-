@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -20,12 +21,21 @@ logger = logging.getLogger(__name__)
 
 
 _CHUNK = 1 << 20  # 1 MB
+_OFFICE_MIME_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
 
 # content_sha256 必须是 64 位小写/大写十六进制。
 # Why 入口强制校验：sandbox_path_for 直接把 sha 拼进路径（root / sha[:2] / f"{sha}.bin"），
 # 值来自云端返回的 content_sha256。若不校验，"../../x" 这类值配合
 # mkdir(parents=True) 可以穿越沙盒容器写任意文件。
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+class FileCopyCancelledError(InterruptedError):
+    """用户取消文件导入；临时副本已清理。"""
 
 
 def validate_sha256(sha) -> str:
@@ -44,9 +54,180 @@ def sandbox_path_for(sha: str) -> Path:
     return sub / f"{sha}.bin"
 
 
+def cleanup_legacy_open_views() -> int:
+    """移除容器内全部旧打开视图硬链接，并隔离仍被旧 FD 持有的原件 inode。
+
+    只读取规范的 <sha[:2]>/<sha>.bin，绝不以编辑过的打开视图作为原件来源。
+    已损坏原件保留在隐藏隔离文件中；移除规范缓存路径供后续重新下载。
+    返回删除的旧视图数量。可重复执行，独立视图和无硬链接原件不受影响。
+    """
+    from config import get_files_local_dir
+    root = Path(get_files_local_dir())
+    try:
+        if not _is_plain_directory(root.lstat()):
+            return 0
+        if hasattr(os, "fwalk") and hasattr(os, "O_NOFOLLOW"):
+            return _cleanup_legacy_open_views_posix(root)
+        return _cleanup_legacy_open_views_portable(root)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        logger.warning("旧文件打开视图清理失败", exc_info=True)
+        return 0
+
+
+def _is_plain_directory(info) -> bool:
+    # Windows junction 也是 reparse point；lstat 为目录不表示可以安全遍历。
+    return (stat.S_ISDIR(info.st_mode)
+            and not (getattr(info, "st_file_attributes", 0)
+                     & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)))
+
+
+def _copy_original_stream(source, target) -> str:
+    digest = hashlib.sha256()
+    while chunk := source.read(_CHUNK):
+        target.write(chunk)
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cleanup_legacy_open_views_posix(root: Path) -> int:
+    # dir_fd + O_NOFOLLOW 使检查后被替换的目录 symlink 也无法逃离容器。
+    dir_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(root, dir_flags)
+    origins = {}
+    removed = 0
+    try:
+        for prefix in os.listdir(root_fd):
+            if re.fullmatch(r"[0-9a-f]{2}", prefix) is None:
+                continue
+            try:
+                prefix_fd = os.open(prefix, dir_flags, dir_fd=root_fd)
+            except OSError:
+                continue
+            try:
+                for name in os.listdir(prefix_fd):
+                    sha = name[:-4] if name.endswith(".bin") else ""
+                    if _SHA256_RE.fullmatch(sha) is None or sha[:2] != prefix:
+                        continue
+                    info = os.stat(name, dir_fd=prefix_fd, follow_symlinks=False)
+                    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                        inode = (info.st_dev, info.st_ino)
+                        origins.setdefault(inode, []).append((prefix, name, sha))
+            finally:
+                os.close(prefix_fd)
+
+        if not origins:
+            return 0
+        try:
+            view_fd = os.open("open_view", dir_flags, dir_fd=root_fd)
+        except OSError:
+            view_fd = None
+        if view_fd is not None:
+            try:
+                for _, _, names, directory_fd in os.fwalk(".", dir_fd=view_fd, follow_symlinks=False):
+                    for name in names:
+                        try:
+                            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                            if (stat.S_ISREG(info.st_mode)
+                                    and (info.st_dev, info.st_ino) in origins):
+                                os.unlink(name, dir_fd=directory_fd)
+                                removed += 1
+                        except OSError:
+                            logger.warning("旧打开视图硬链接删除失败", exc_info=True)
+            finally:
+                os.close(view_fd)
+
+        # unlink 后 st_nlink 可能已变成 1，但旧编辑器 FD 仍指向该 inode。
+        # 因而依据清理前快照原子替换，而非再次以当前链接数决定是否隔离。
+        for inode, entries in origins.items():
+            for prefix, name, sha in entries:
+                prefix_fd = None
+                tmp = f".detach-{os.urandom(8).hex()}.tmp"
+                try:
+                    prefix_fd = os.open(prefix, dir_flags, dir_fd=root_fd)
+                    source_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=prefix_fd)
+                    with os.fdopen(source_fd, "rb") as source:
+                        info = os.fstat(source.fileno())
+                        if (info.st_dev, info.st_ino) != inode or not stat.S_ISREG(info.st_mode):
+                            continue
+                        target_fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                            0o600, dir_fd=prefix_fd)
+                        with os.fdopen(target_fd, "wb") as target:
+                            digest = _copy_original_stream(source, target)
+                    info = os.stat(name, dir_fd=prefix_fd, follow_symlinks=False)
+                    if (info.st_dev, info.st_ino) != inode:
+                        continue
+                    if digest == sha.lower():
+                        os.replace(tmp, name, src_dir_fd=prefix_fd, dst_dir_fd=prefix_fd)
+                    else:
+                        quarantine = f".legacy-corrupt-{name}-{os.urandom(8).hex()}"
+                        os.replace(name, quarantine, src_dir_fd=prefix_fd, dst_dir_fd=prefix_fd)
+                        logger.warning("旧沙盒原件校验失败，已隔离缓存: %s", name)
+                except OSError:
+                    logger.warning("隔离旧沙盒原件 inode 失败: %s", name, exc_info=True)
+                finally:
+                    if prefix_fd is not None:
+                        try:
+                            os.unlink(tmp, dir_fd=prefix_fd)
+                        except FileNotFoundError:
+                            pass
+                        finally:
+                            os.close(prefix_fd)
+        return removed
+    finally:
+        os.close(root_fd)
+
+
+def _cleanup_legacy_open_views_portable(root: Path) -> int:
+    # Windows 没有目录 FD：只遍历经过 lstat 的容器子目录，不跟随 symlink。
+    origins = {}
+    for prefix in root.iterdir():
+        if re.fullmatch(r"[0-9a-f]{2}", prefix.name) is None or not _is_plain_directory(prefix.lstat()):
+            continue
+        for source in prefix.iterdir():
+            sha = source.stem if source.suffix == ".bin" else ""
+            if _SHA256_RE.fullmatch(sha) is None or sha[:2] != prefix.name:
+                continue
+            info = source.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                origins.setdefault((info.st_dev, info.st_ino), []).append((source, sha))
+    removed = 0
+    views = root / "open_view"
+    if views.exists() and _is_plain_directory(views.lstat()):
+        for directory, directories, names in os.walk(views, followlinks=False):
+            directories[:] = [name for name in directories
+                              if _is_plain_directory((Path(directory) / name).lstat())]
+            for name in names:
+                view = Path(directory) / name
+                info = view.lstat()
+                if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) in origins:
+                    view.unlink()
+                    removed += 1
+    for inode, entries in origins.items():
+        for source, sha in entries:
+            tmp = source.parent / f".detach-{os.urandom(8).hex()}.tmp"
+            try:
+                info = source.lstat()
+                if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != inode:
+                    continue
+                with source.open("rb") as original, tmp.open("xb") as target:
+                    digest = _copy_original_stream(original, target)
+                if digest == sha.lower():
+                    os.replace(tmp, source)
+                else:
+                    os.replace(source, source.parent / f".legacy-corrupt-{source.name}-{os.urandom(8).hex()}")
+                    logger.warning("旧沙盒原件校验失败，已隔离缓存: %s", source.name)
+            finally:
+                tmp.unlink(missing_ok=True)
+    return removed
+
+
 def hash_and_copy_into_container(
     src_path: str,
     progress_cb: Optional[Callable[[int, int], None]] = None,
+    *,
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, int, Path]:
     """一次 pass 同时计算 sha256 并写入沙盒副本，返回 (sha, size, dest_path)。
 
@@ -60,12 +241,19 @@ def hash_and_copy_into_container(
     tmp_root = Path(get_files_local_dir())
     tmp_root.mkdir(parents=True, exist_ok=True)
     tmp = tmp_root / f".import-{os.getpid()}-{os.urandom(8).hex()}.tmp"
+    def check_cancelled():
+        if is_cancelled is not None and is_cancelled():
+            raise FileCopyCancelledError("文件导入已取消")
+
     try:
+        check_cancelled()
         with open(src_path, "rb") as fsrc, open(tmp, "wb") as fdst:
             while True:
+                check_cancelled()
                 chunk = fsrc.read(_CHUNK)
                 if not chunk:
                     break
+                check_cancelled()
                 h.update(chunk)
                 fdst.write(chunk)
                 done += len(chunk)
@@ -76,6 +264,7 @@ def hash_and_copy_into_container(
                         pass
         sha = h.hexdigest()
         dest = sandbox_path_for(sha)
+        check_cancelled()
         os.replace(tmp, dest)
     except BaseException:
         try:
@@ -83,13 +272,14 @@ def hash_and_copy_into_container(
         except OSError:
             pass
         raise
-    return sha, total, dest
+    return sha, done, dest
 
 
 def materialize_for_open(local_path: str, display_name: str) -> str:
     """把 `<sha>.bin` 暴露成带原始扩展名的副本，供系统 Launch Services 识别。
 
-    在 `<files_local_dir>/open_view/<sha>/<原名>` 下创建硬链接（同卷），失败则复制。
+    在 `<files_local_dir>/open_view/<sha>/<原名>` 下创建独立副本。
+    每次重新复制，避免旧硬链接或同大小的已编辑副本污染内容寻址原件。
     返回可直接交给 `open` / `QDesktopServices` 的路径。
     """
     from config import get_files_local_dir
@@ -106,30 +296,26 @@ def materialize_for_open(local_path: str, display_name: str) -> str:
     root = Path(get_files_local_dir()) / "open_view" / sha_stem
     root.mkdir(parents=True, exist_ok=True)
     dst = root / safe_name
+    tmp = root / f".open-{os.urandom(8).hex()}.tmp"
     try:
-        src_size = os.path.getsize(local_path)
-    except OSError:
-        src_size = -1
-    if dst.exists():
-        try:
-            if dst.stat().st_size == src_size and src_size >= 0:
-                return str(dst)
-        except OSError:
-            pass
-        try:
-            dst.unlink()
-        except OSError:
-            pass
-    try:
-        os.link(local_path, dst)
-    except OSError:
-        shutil.copyfile(local_path, dst)
+        shutil.copyfile(local_path, tmp)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
     return str(dst)
 
 
-def remove_from_container(sha: str) -> None:
+def remove_from_container(sha: str, local_path: str | None = None) -> None:
     try:
-        sandbox_path_for(sha).unlink()
+        target = sandbox_path_for(sha)
+        if local_path is not None and (not local_path or Path(local_path) != target):
+            return
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        from config import get_files_local_dir
+        shutil.rmtree(Path(get_files_local_dir()) / "open_view" / target.stem, ignore_errors=True)
     except FileNotFoundError:
         pass
     except OSError:
@@ -137,14 +323,11 @@ def remove_from_container(sha: str) -> None:
 
 
 def guess_mime(name: str) -> str:
-    try:
-        mt, _ = mimetypes.guess_type(name)
-    except OSError:
-        # macOS App Sandbox may deny Python's first read of
-        # /etc/apache2/mime.types. The bundled mapping is sufficient for
-        # upload metadata; an unknown extension is sent as binary.
-        mt = mimetypes.types_map.get(Path(name).suffix.lower())
-    return mt or "application/octet-stream"
+    # guess_type() lazily reads system MIME tables on its first call, including
+    # /etc/apache2/mime.types on macOS. An App Store sandbox cannot read that
+    # file. Accessing the stdlib's bundled types_map does no filesystem I/O.
+    suffix = Path(name).suffix.lower()
+    return _OFFICE_MIME_TYPES.get(suffix) or mimetypes.types_map.get(suffix) or "application/octet-stream"
 
 
 # ========== macOS security-scoped bookmark ==========

@@ -19,6 +19,7 @@ from core.cloud_sync_service import CloudSyncState
 from core.entitlement_service import EntitlementService
 from core.file_models import CloudFile, FileSyncState
 from core.file_repository import CloudFileRepository
+from core.file_storage import remove_from_container
 from core.repository import ClipboardRepository
 from config import settings
 
@@ -51,6 +52,8 @@ class _FileSyncWorker(QObject):
     delete_finished = Signal(int, bool, str)
     pull_done = Signal(list, int)              # (list[CloudFile], max_server_id)
     pull_error = Signal(str, int)
+    inventory_done = Signal(list, int)         # (list[CloudFile], skipped)
+    inventory_error = Signal(str)
 
     def __init__(
         self,
@@ -67,6 +70,10 @@ class _FileSyncWorker(QObject):
         self._device_name = s.device_name
         # change_id -> 连续处理失败次数（用于失败事件的重试与最终放弃）
         self._pull_skip: dict = {}
+        # 线上旧服务只支持 since_id。运行期识别后使用独立的内存游标，绝不把
+        # 文件 id 写入 v2 事件游标，服务端升级并重启客户端后可安全从事件 0 重拉。
+        self._legacy_sync = False
+        self._legacy_since_id = 0
 
     # ---------- pull ----------
     # 单轮 do_pull 最多连续翻多少页（服务端一页 100 条）。防止 has_more 恒为真时
@@ -75,6 +82,40 @@ class _FileSyncWorker(QObject):
     # 同一条云端记录连续解析失败达到该次数后放弃并推进游标，避免一条坏数据把
     # 同步永久卡住（不推进则它会每轮都被重新拉取、反复失败）。
     _MAX_PULL_SKIP = 5
+
+    @Slot()
+    def do_inventory(self):
+        """从账号级分页接口重读完整文件目录，不依赖本地增量游标。"""
+        parsed: list[CloudFile] = []
+        skipped = 0
+        try:
+            for page in range(1, 1001):
+                data = self.cloud_api.files_list_page(page, 100)
+                items = data.get("items")
+                if not isinstance(items, list):
+                    raise ValueError("云端文件列表格式错误")
+                for srv in items:
+                    if not isinstance(srv, dict) or srv.get("is_deleted"):
+                        skipped += 1
+                        continue
+                    # 列表接口还会返回未完成的 multipart 记录；正文尚不可下载。
+                    if int(srv.get("upload_status", 2)) != 2:
+                        skipped += 1
+                        continue
+                    cid = int(srv.get("id") or srv.get("cloud_id") or 0)
+                    sha = srv.get("content_sha256") or srv.get("sha256") or ""
+                    if cid <= 0 or not self._apply_remote_file(srv, cid, sha, False, parsed):
+                        skipped += 1
+                total = int(data.get("total", 0) or 0)
+                if not items or len(items) < 100 or (total and page * 100 >= total):
+                    break
+            else:
+                raise ValueError("云端文件过多，请缩小文件数量后重试")
+        except Exception as e:
+            logger.warning("刷新云端文件目录失败: %s", e, exc_info=True)
+            self.inventory_error.emit(str(e))
+            return
+        self.inventory_done.emit(parsed, skipped)
 
     @Slot(int)
     def do_pull(self, last_sync_id: int):
@@ -85,9 +126,15 @@ class _FileSyncWorker(QObject):
             for _ in range(self._MAX_PULL_PAGES):
                 page_start_cursor = cursor
                 try:
-                    data = self.cloud_api.files_list(
-                        device_id=self._device_id, since_change_id=cursor
-                    )
+                    if self._legacy_sync:
+                        data = self.cloud_api.files_list(
+                            since_id=self._legacy_since_id,
+                            device_id=self._device_id,
+                        )
+                    else:
+                        data = self.cloud_api.files_list(
+                            device_id=self._device_id, since_change_id=cursor
+                        )
                 except CloudAPIError as e:
                     # 取舍说明：翻到第 N 页失败时，前 N-1 页已 add_file 落库但
                     # 只发 pull_error，cursor 不动。下轮重拉靠 get_by_cloud_id
@@ -100,11 +147,55 @@ class _FileSyncWorker(QObject):
                     return
 
                 items = data.get("items", []) or []
-                if "next_since_change_id" not in data or any(
+                if "next_since_change_id" in data and any(
                     not isinstance(item, dict) or "change_id" not in item
                     for item in items
                 ):
-                    raise ValueError("文件同步服务端不支持 change_id 增量协议")
+                    raise ValueError("文件同步服务端返回了无效的 change_id 事件")
+                event_contract = "next_since_change_id" in data and all(
+                    isinstance(item, dict) and "change_id" in item
+                    for item in items
+                )
+                if not event_contract:
+                    # 已部署的旧服务会忽略 since_change_id，并返回 next_since_id。
+                    # 兼容读取其 append-only 文件列表，同时保留 v2 事件游标为 0；
+                    # 这样服务端升级后，客户端重启即可完整收到改名和删除事件。
+                    if not self._legacy_sync:
+                        logger.info("文件同步服务端使用旧版 since_id 协议，已自动兼容")
+                    self._legacy_sync = True
+                    legacy_start = self._legacy_since_id
+                    for srv in items:
+                        if not isinstance(srv, dict):
+                            continue
+                        cid = int(srv.get("id") or srv.get("cloud_id") or 0)
+                        sha = srv.get("content_sha256") or srv.get("sha256") or ""
+                        if cid > 0:
+                            self._apply_remote_file(
+                                srv,
+                                cid,
+                                sha,
+                                bool(srv.get("is_deleted", False)),
+                                parsed,
+                            )
+                    self._legacy_since_id = int(
+                        data.get("next_since_id")
+                        or max(
+                            [legacy_start]
+                            + [
+                                int(item.get("id") or item.get("cloud_id") or 0)
+                                for item in items
+                                if isinstance(item, dict)
+                            ]
+                        )
+                    )
+                    if (
+                        not items
+                        or not data.get("has_more")
+                        or self._legacy_since_id <= legacy_start
+                    ):
+                        break
+                    continue
+
                 page_parsed, cursor = self._process_page(items, cursor)
                 parsed.extend(page_parsed)
                 if not items:
@@ -201,6 +292,7 @@ class _FileSyncWorker(QObject):
                 # update_meta 只改 DB；同步翻 in-memory 对象的 is_deleted，
                 # 否则 _on_pull_done 里 `if f.is_deleted` 为假，会错把删除事件发成 file_added。
                 existing.is_deleted = True
+                self._remove_deleted_copy(existing)
                 parsed.append(existing)
             return True
 
@@ -209,7 +301,13 @@ class _FileSyncWorker(QObject):
         # hashlib.hexdigest() 固定返回小写；入口统一规范化，避免合法的大写
         # SHA-256 在下载完整性校验时被误判。
         sha = sha.lower()
-        existing = self.repo.get_by_cloud_id(cid) or self.repo.get_by_sha(sha)
+        existing = self.repo.get_by_cloud_id(cid)
+        if existing is None:
+            existing = self.repo.get_by_sha(sha)
+            if existing is not None and existing.cloud_id and cid < existing.cloud_id:
+                # 上传重试会生成更大的新 cloud_id；旧代次 update 不能把新记录
+                # 回绑到旧 id，否则其后的旧 tombstone 将误删当前文件。
+                return True
         if existing is None:
             f = CloudFile(
                 cloud_id=cid,
@@ -239,6 +337,15 @@ class _FileSyncWorker(QObject):
         return True
 
     # ---------- delete ----------
+    def _remove_deleted_copy(self, f: CloudFile) -> None:
+        # 相同内容可能已重新导入，活跃记录仍依赖同一个 sha 路径。
+        if self.repo.get_by_sha(f.content_sha256) is not None:
+            return
+        try:
+            remove_from_container(f.content_sha256, f.local_path)
+        except ValueError:
+            logger.warning("文件 %s 的 SHA 无效，跳过清理本地副本", f.id)
+
     @Slot(int)
     def do_delete(self, local_id: int):
         f = self.repo.get_by_id(local_id)
@@ -251,6 +358,7 @@ class _FileSyncWorker(QObject):
                 sync_state=FileSyncState.SYNCED.value,
                 last_error=None,
             )
+            self._remove_deleted_copy(f)
             self.delete_finished.emit(local_id, True, "")
             return
 
@@ -263,6 +371,7 @@ class _FileSyncWorker(QObject):
                 sync_state=FileSyncState.SYNCED.value,
                 last_error=None,
             )
+            self._remove_deleted_copy(f)
             self.delete_finished.emit(local_id, True, "")
         except Exception as e:
             logger.warning(
@@ -318,6 +427,8 @@ class _FileSyncWorker(QObject):
             return
 
         cloud_id = int(plan.get("cloud_id") or plan.get("file_id") or 0)
+        # 每次 request-upload 都是新 session，所有模式均清除旧 ETag。
+        self.repo.clear_parts(local_id)
         # 一次 update：cloud_id + SYNCING，避免两次 round-trip
         self.repo.update_meta(
             local_id,
@@ -377,7 +488,6 @@ class _FileSyncWorker(QObject):
         parts_plan = plan.get("parts") or []
         if not parts_plan:
             raise CloudAPIError("服务端未返回 multipart parts", 0)
-        already = self.repo.get_parts(local_id)  # {part_number: etag}
         part_size = int(plan.get("part_size") or self.cloud_api.FILE_PART_SIZE)
         total = f.size_bytes
         # 签名头可能在 plan 顶层（各 part 共用）或每个 part 里，per-part 优先
@@ -385,13 +495,6 @@ class _FileSyncWorker(QObject):
         done_before_current = 0
         for p in parts_plan:
             pn = int(p["part_number"])
-            if pn in already:
-                done_before_current += part_size
-                continue
-        for p in parts_plan:
-            pn = int(p["part_number"])
-            if pn in already:
-                continue
             offset = (pn - 1) * part_size
             this_size = min(part_size, total - offset)
 
@@ -486,6 +589,7 @@ class FileCloudSyncService(QObject):
     upload_finished = Signal(int, bool, str)
     download_finished = Signal(int, bool, str)
     delete_finished = Signal(int, bool, str)
+    inventory_finished = Signal(int, bool, str)  # (loaded, success, message)
     sync_error = Signal(str, int)
     quota_warning = Signal(int, int)            # (used, total)
 
@@ -493,6 +597,7 @@ class FileCloudSyncService(QObject):
     _trigger_upload = Signal(int)
     _trigger_download = Signal(int)
     _trigger_delete = Signal(int)
+    _trigger_inventory = Signal()
 
     _PULL_INTERVAL_MS = 30_000
 
@@ -520,6 +625,7 @@ class FileCloudSyncService(QObject):
         self._uploading = False
         self._downloading = False
         self._deleting = False
+        self._inventory_refreshing = False
 
         self._last_sync_id = self._load_cursor()
 
@@ -534,11 +640,14 @@ class FileCloudSyncService(QObject):
         self._worker.upload_finished.connect(self._on_upload_finished)
         self._worker.download_finished.connect(self._on_download_finished)
         self._worker.delete_finished.connect(self._on_delete_finished)
+        self._worker.inventory_done.connect(self._on_inventory_done)
+        self._worker.inventory_error.connect(self._on_inventory_error)
 
         self._trigger_pull.connect(self._worker.do_pull, Qt.QueuedConnection)
         self._trigger_upload.connect(self._worker.do_upload, Qt.QueuedConnection)
         self._trigger_download.connect(self._worker.do_download, Qt.QueuedConnection)
         self._trigger_delete.connect(self._worker.do_delete, Qt.QueuedConnection)
+        self._trigger_inventory.connect(self._worker.do_inventory, Qt.QueuedConnection)
 
         self._worker_thread.start()
 
@@ -550,6 +659,18 @@ class FileCloudSyncService(QObject):
     def start(self) -> None:
         if self._state != CloudSyncState.STOPPED:
             return
+        if (self._worker_thread.isRunning()
+                and self._worker_thread.isInterruptionRequested()
+                and not self._worker_thread.wait(3000)):
+            logger.warning("文件云同步 worker 仍在停止中，稍后重试启动")
+            return
+        if not self._worker_thread.isRunning():
+            self._worker_thread.start()
+        self._pulling = self._uploading = self._downloading = False
+        self._deleting = self._inventory_refreshing = False
+        self._upload_queue.clear()
+        self._download_queue.clear()
+        self._delete_queue.clear()
         self._state = CloudSyncState.RUNNING
         # 启动时扫残留状态入队；删除失败会持久化为 error，下次启动继续重试。
         try:
@@ -561,14 +682,7 @@ class FileCloudSyncService(QObject):
                 if not f.id:
                     continue
                 if f.is_deleted:
-                    if f.cloud_id:
-                        self._delete_queue.append(f.id)
-                    else:
-                        self.repo.update_meta(
-                            f.id,
-                            sync_state=FileSyncState.SYNCED.value,
-                            last_error=None,
-                        )
+                    self._delete_queue.append(f.id)
                 elif (
                     f.sync_state != FileSyncState.ERROR.value
                     and f.local_path
@@ -582,23 +696,20 @@ class FileCloudSyncService(QObject):
         QTimer.singleShot(1000, self._drive_queues)
         logger.info("文件云同步服务已启动")
 
-    def stop(self) -> None:
-        if self._state == CloudSyncState.STOPPED:
-            return
+    def stop(self, timeout_ms: int = 3000) -> bool:
+        if self._state == CloudSyncState.STOPPED and not self._worker_thread.isRunning():
+            return True
         self._state = CloudSyncState.STOPPED
         self._pull_timer.stop()
         self.persist_sync_cursor()
         self._worker_thread.requestInterruption()
         self._worker_thread.quit()
-        # 同 cloud_sync_service.stop：3s 等待，避免退出时 OSS / httpx 阻塞导致卡死
-        if not self._worker_thread.wait(3000):
-            logger.warning("文件云同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
-            try:
-                self._worker_thread.terminate()
-                self._worker_thread.wait()
-            except Exception as e:
-                logger.debug(f"terminate file sync worker 失败（忽略）: {e}")
+        # 保留尚在请求/写库的 worker，由退出流程继续排空；不可 terminate 事务。
+        if not self._worker_thread.wait(max(0, timeout_ms)):
+            logger.warning("文件云同步 worker 线程仍在退出，等待当前任务完成")
+            return False
         logger.info("文件云同步服务已停止")
+        return True
 
     def __del__(self):
         """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。"""
@@ -606,9 +717,7 @@ class FileCloudSyncService(QObject):
             t = self.__dict__.get("_worker_thread")
             if t is not None and t.isRunning():
                 t.quit()
-                if not t.wait(2000):
-                    t.terminate()
-                    t.wait()
+                t.wait()
         except Exception:
             pass
 
@@ -639,6 +748,16 @@ class FileCloudSyncService(QObject):
         if self._state == CloudSyncState.RUNNING:
             self._tick_pull()
             self._drive_queues()
+
+    def refresh_inventory(self) -> bool:
+        """用户主动读取账号文件；用于修复本地数据库缺项或游标已越过的情况。"""
+        if self._state != CloudSyncState.RUNNING or self._inventory_refreshing:
+            return False
+        if self.cloud_api is None or not self.cloud_api.is_authenticated:
+            return False
+        self._inventory_refreshing = True
+        self._trigger_inventory.emit()
+        return True
 
     def persist_sync_cursor(self) -> None:
         try:
@@ -684,6 +803,8 @@ class FileCloudSyncService(QObject):
 
     @Slot(list, int)
     def _on_pull_done(self, items: list, max_id: int):
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._pulling = False
         if max_id > self._last_sync_id:
             self._last_sync_id = max_id
@@ -706,6 +827,8 @@ class FileCloudSyncService(QObject):
 
     @Slot(str, int)
     def _on_pull_error(self, msg: str, status: int):
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._pulling = False
         if status == 401:
             self._state = CloudSyncState.AUTH_FAILED
@@ -713,16 +836,38 @@ class FileCloudSyncService(QObject):
         else:
             logger.debug(f"文件拉取失败（不阻塞）: {msg}")
 
+    @Slot(list, int)
+    def _on_inventory_done(self, items: list, skipped: int) -> None:
+        self._inventory_refreshing = False
+        if self._state != CloudSyncState.RUNNING:
+            return
+        for f in items:
+            if not f.is_deleted:
+                self.file_added.emit(f)
+        warning = f"{skipped} 条未完成或无效记录未显示" if skipped else ""
+        self.inventory_finished.emit(len(items), True, warning)
+
+    @Slot(str)
+    def _on_inventory_error(self, message: str) -> None:
+        self._inventory_refreshing = False
+        if self._state != CloudSyncState.RUNNING:
+            return
+        self.inventory_finished.emit(0, False, message)
+
     # ---------- upload/download callbacks ----------
 
     @Slot(int)
     def _on_upload_started(self, local_id: int):
+        if self._state == CloudSyncState.STOPPED:
+            return
         f = self.repo.get_by_id(local_id)
         if f:
             self.file_updated.emit(f)
 
     @Slot(int, bool, str)
     def _on_upload_finished(self, local_id: int, ok: bool, err: str):
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._uploading = False
         # 不管成功失败，都把当前行刷一遍：失败时 worker 已把 sync_state 翻到 ERROR，
         # UI 靠这次 file_updated 才能把"同步中"的进度条换成"错误 + 原因"。
@@ -738,6 +883,8 @@ class FileCloudSyncService(QObject):
 
     @Slot(int, bool, str)
     def _on_download_finished(self, local_id: int, ok: bool, err: str):
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._downloading = False
         f = self.repo.get_by_id(local_id)
         if f:
@@ -749,6 +896,8 @@ class FileCloudSyncService(QObject):
 
     @Slot(int, bool, str)
     def _on_delete_finished(self, local_id: int, ok: bool, err: str):
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._deleting = False
         if not ok:
             self.sync_error.emit(err or "云端文件删除失败", 0)

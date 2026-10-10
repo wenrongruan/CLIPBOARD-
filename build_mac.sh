@@ -70,6 +70,7 @@ pyinstaller --onefile --windowed \
     --add-data "utils:utils" \
     --add-data "sql:sql" \
     --add-data "i18n_strings:i18n_strings" \
+    --add-data "plugins:plugins" \
     --add-data "Info.plist:." \
     --hidden-import "PySide6.QtCore" \
     --hidden-import "PySide6.QtGui" \
@@ -81,9 +82,9 @@ pyinstaller --onefile --windowed \
     --hidden-import "Quartz" \
     main.py
 
-# 替换 Info.plist 以隐藏 Dock 图标
+# 合并应用配置，保留打包器生成的可执行入口和图标元数据
 echo "配置应用为菜单栏模式（隐藏 Dock 图标）..."
-cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
+python scripts/merge_bundle_plist.py "dist/共享剪贴板.app" Info.plist
 
 # 清除 quarantine 扩展属性（必须在所有 codesign 命令之前执行；
 # 若在签名之后执行，xattr -cr 会擦除签名写入的扩展属性，导致公证失败）

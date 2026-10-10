@@ -2,10 +2,10 @@
 
 职责：
 - 调用 cloud_api（如可用）在云端创建/撤销共享链接；把关键字段缓存在本地 share_links 表。
-- 没有 cloud_api 时退化为本地模拟路径，仅用于单元测试。
+- 本地模拟必须显式启用，仅用于单元测试。
 
 依赖注入：
-- cloud_api_factory: 调用时返回一个 CloudAPIClient 实例；None 或调用失败 → 本地模拟。
+- cloud_api_factory: 调用时返回一个已登录的 CloudAPIClient 实例。
 """
 
 from __future__ import annotations
@@ -31,10 +31,13 @@ class ShareService:
         self,
         repository,
         cloud_api_factory: Optional[Callable[[], Any]] = None,
+        *,
+        allow_local_simulation: bool = False,
     ):
         self._repo = repository
         self._db = repository.db
         self._cloud_api_factory = cloud_api_factory
+        self._allow_local_simulation = allow_local_simulation
 
     # ========== 对外 API ==========
 
@@ -48,7 +51,7 @@ class ShareService:
 
         返回: {id, token, expires_at, share_url}
         - 若 cloud_api 可用：POST /api/v1/share-links，云端返回的字段直接写入本地缓存。
-        - 若不可用：生成本地 token，仅写本地（share_url 留空字符串）。
+        - 显式启用本地模拟时才生成本地 token（share_url 留空字符串）。
         """
         if not item_ids:
             raise ValueError("item_ids 不能为空")
@@ -64,18 +67,25 @@ class ShareService:
                     item_ids=item_ids,
                     expires_in_seconds=expires_in_seconds,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("云端创建 share link 失败，降级到本地模拟: %s", exc)
+            except Exception:
+                if not self._allow_local_simulation:
+                    raise
                 remote = None
         else:
+            if not self._allow_local_simulation:
+                raise RuntimeError("请先登录云端账户再创建分享链接")
             remote = None
 
         if remote is None:
+            if not self._allow_local_simulation:
+                raise ValueError("云端未返回有效分享链接")
             share_id = str(uuid.uuid4())
             token = secrets.token_urlsafe(24)
             expires_at = now + expires_in_seconds * 1000
             share_url = ""
         else:
+            if not remote.get("token") or not (remote.get("share_url") or remote.get("url")):
+                raise ValueError("云端未返回有效分享链接")
             share_id = str(remote.get("id") or uuid.uuid4())
             token = str(remote.get("token") or secrets.token_urlsafe(24))
             # 云端 expires_at 通常是秒；统一按 ms 存

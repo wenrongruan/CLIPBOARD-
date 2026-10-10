@@ -12,9 +12,9 @@ _STARTUP_PERF_T0 = time.perf_counter()
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
+from PySide6.QtWidgets import QApplication, QWidget, QSystemTrayIcon, QMenu, QMessageBox
 from PySide6.QtGui import QIcon, QAction, QPixmap, QPainter, QColor, QCursor
-from PySide6.QtCore import Qt, QMetaObject, QUrl, QTimer
+from PySide6.QtCore import Qt, QEvent, QMetaObject, QUrl, QTimer, Slot
 from PySide6.QtGui import QDesktopServices
 
 IS_MACOS = platform.system() == "Darwin"
@@ -79,6 +79,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 if _SC_DEBUG:
     logger.warning(f"[startup] SC_DEBUG 已启用，DEBUG 日志将写入 logs/debug.log  t=+{time.time()-_STARTUP_T0:.2f}s")
+
+
+class ClipboardApplication(QApplication):
+    """把原生退出和显式退出统一交给资源收尾流程。"""
+
+    def __init__(self, argv):
+        self._quit_handler = None
+        self._allow_quit = False
+        super().__init__(argv)
+
+    def event(self, event):
+        if (event.type() == QEvent.Type.Quit and self._quit_handler is not None
+                and not self._allow_quit):
+            self._quit_handler()
+            return True
+        return super().event(event)
+
+    @Slot()
+    def quit(self):
+        if self._quit_handler is not None and not self._allow_quit:
+            self._quit_handler()
+        else:
+            super().quit()
+
+    def complete_quit(self):
+        self._allow_quit = True
+        super().quit()
 
 
 def get_app_icon() -> QIcon:
@@ -168,7 +195,8 @@ class ClipboardApp:
     def __init__(self):
         self.startup_metrics = StartupMetrics(started_at=_STARTUP_PERF_T0)
         with self.startup_metrics.phase("qt_app_init"):
-            self.app = QApplication(sys.argv)
+            self.app = ClipboardApplication(sys.argv)
+        self.app._quit_handler = self._quit
         self.app.setQuitOnLastWindowClosed(False)  # 托盘模式
         # Why: update_settings 延迟 2s 合并落盘，Qt 正常退出路径（Cmd+Q、
         # SIGTERM 下的 aboutToQuit）若不兜底会丢失未 flush 的改动。
@@ -372,6 +400,8 @@ class ClipboardApp:
 
     def _load_plugins_deferred(self):
         """Load optional plugins after the core clipboard services are running."""
+        if getattr(self, "_quitting", False):
+            return
         if not getattr(self, "plugin_manager", None):
             return
         try:
@@ -394,6 +424,8 @@ class ClipboardApp:
 
     def _start_cloud_sync_deferred(self):
         """Start optional cloud sync after the local clipboard path is ready."""
+        if getattr(self, "_quitting", False):
+            return
         self._refresh_optional_services_from_context()
         if not getattr(self, "cloud_sync_service", None):
             return
@@ -412,6 +444,8 @@ class ClipboardApp:
 
     def _start_file_sync_deferred(self):
         """Start optional file sync after the local clipboard path is ready."""
+        if getattr(self, "_quitting", False):
+            return
         try:
             # 登录/登出可能发生在这个 20 秒延迟窗口内。以 AppContext 当前值
             # 为准，避免重启已停止的旧 service 或重复创建第二套同步线程。
@@ -467,7 +501,10 @@ class ClipboardApp:
 
         if getattr(self, "file_repository", None) is None:
             from core.file_repository import CloudFileRepository
-            self.file_repository = CloudFileRepository(self.db_manager)
+            self.file_repository = CloudFileRepository(
+                self.db_manager,
+                account_identifier=settings().cloud_user_email,
+            )
 
         if getattr(self, "file_sync_service", None) is None:
             from core.file_sync_service import FileCloudSyncService
@@ -971,9 +1008,14 @@ class ClipboardApp:
         ClipboardApp._open_privacy_pane("Privacy_ScreenCapture")
 
     def _quit(self):
-        """退出应用"""
+        """先停止接收任务，保持事件循环直到所有资源安全收尾。"""
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
+        self._quit_started_at = time.monotonic()
+        self._quit_wait_warned = False
         self._refresh_optional_services_from_context()
-        # 停止热键监听（唤出窗口 + 截图两个监听器）
+        self.main_window.setEnabled(False)
         for listener in (
             getattr(self, "hotkey_listener", None),
             getattr(self, "screenshot_hotkey_listener", None),
@@ -984,58 +1026,97 @@ class ClipboardApp:
                 except Exception:
                     logger.debug("停止热键监听失败", exc_info=True)
 
-        # 卸载插件
-        if hasattr(self, 'plugin_manager'):
-            self.plugin_manager.unload_all()
-
+        from ui.thread_utils import _ACTIVE_THREADS
+        self._shutdown_qthreads = list(_ACTIVE_THREADS)
+        self._shutdown_entitlements = []
+        controller = getattr(self.main_window, "cloud_controller", None)
+        retiring_services, retiring_entitlements, retiring_executors = (), (), ()
+        if controller is not None:
+            controller.begin_shutdown()
+            retiring_services, retiring_entitlements, retiring_executors = controller.retiring_resources()
+            self._shutdown_entitlements.extend(retiring_entitlements)
+            self._shutdown_qthreads.extend(
+                service._worker_thread for service in retiring_services
+            )
+        for owner, field in (
+            (self.cloud_sync_service, "_worker_thread"),
+            (self.file_sync_service, "_worker_thread"),
+            (getattr(self, "plugin_manager", None), "_active_worker"),
+            (self.main_window, "_migration_worker"),
+        ):
+            thread = getattr(owner, field, None)
+            if thread is not None:
+                self._shutdown_qthreads.append(thread)
+        manager = getattr(self, "plugin_manager", None)
+        if manager is not None:
+            manager.cancel_action()
+            self._shutdown_qthreads.extend(manager.active_workers())
+        self._shutdown_executors = [
+            self.main_window._copy_executor,
+            self.main_window._io_executor,
+            self.main_window._cloud_executor,
+        ] + list(retiring_executors)
+        self._shutdown_executors = [executor for executor in self._shutdown_executors if executor is not None]
+        for widget in self.main_window.findChildren(QWidget):
+            executor = getattr(widget, "_executor", None)
+            if executor is not None:
+                self._shutdown_executors.append(executor)
+        image_executor = getattr(self.clipboard_monitor, "_image_executor", None)
+        if image_executor is not None:
+            self._shutdown_executors.append(image_executor)
+        from ui.cloud_login_widget import _executor as login_executor
+        self._shutdown_executors.append(login_executor)
+        self._shutdown_executors = list(dict.fromkeys(self._shutdown_executors))
+        for executor in self._shutdown_executors:
+            executor.shutdown(wait=False, cancel_futures=True)
         self.clipboard_monitor.stop()
-        self.main_window._copy_executor.shutdown(wait=False)
-        self.main_window._io_executor.shutdown(wait=False)
-        self.main_window._cloud_executor.shutdown(wait=False)
         self.sync_service.stop()
         if self.cloud_sync_service:
-            self.cloud_sync_service.stop()
+            self.cloud_sync_service.stop(timeout_ms=0)
         if self.file_sync_service:
+            self.file_sync_service.stop(timeout_ms=0)
+        self._quit_drain_timer = QTimer(self.app)
+        self._quit_drain_timer.setInterval(50)
+        self._quit_drain_timer.timeout.connect(self._drain_quit)
+        self._quit_drain_timer.start()
+        self._drain_quit()
+
+    def _drain_quit(self):
+        from ui.thread_utils import _ACTIVE_THREADS
+        file_page = getattr(self.main_window, "file_list_widget", None)
+        ready = file_page is None or file_page.stop_imports(timeout_ms=0)
+        for thread in list(self._shutdown_qthreads) + list(_ACTIVE_THREADS):
             try:
-                self.file_sync_service.stop()
-            except Exception:
-                logger.debug("文件云同步停止失败", exc_info=True)
-        self.tray_icon.hide()
-        # 关闭云端 API 客户端（统一通过 reset_cloud_client 清理单例）
-        try:
+                ready = thread.wait(0) and ready
+            except RuntimeError:
+                pass
+        for executor in self._shutdown_executors:
+            ready = not any(thread.is_alive() for thread in executor._threads) and ready
+        entitlement = getattr(self, "entitlement_service", None)
+        for service in self._shutdown_entitlements + ([entitlement] if entitlement is not None else []):
+            for thread in service.active_refresh_threads():
+                ready = not thread.is_alive() and ready
+        screenshot_service = getattr(self, "screenshot_service", None)
+        if screenshot_service is not None:
+            ready = not screenshot_service.is_busy() and ready
+        if not ready:
+            if not self._quit_wait_warned and time.monotonic() - self._quit_started_at > 3:
+                self._quit_wait_warned = True
+                logger.warning("正在等待后台任务安全结束，暂缓关闭数据库")
+            return
+        self._quit_drain_timer.stop()
+        if getattr(self, "plugin_manager", None) is not None:
+            self.plugin_manager.unload_all()
+        flush_settings()
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None:
+            ctx.shutdown()
+        else:
             from core.cloud_api import reset_cloud_client
             reset_cloud_client()
-        except Exception:
-            logger.debug("reset_cloud_client failed", exc_info=True)
-        # 刷新延迟写入的配置
-        flush_settings()
-        # 关闭持久数据库连接。Why: close() 内部异常会被吞掉，若 SQLite WAL
-        # checkpoint 失败下次启动会触发磁盘恢复 I/O；记一行 warning 方便排查。
-        if hasattr(self.db_manager, 'close'):
-            try:
-                self.db_manager.close()
-            except Exception as e:
-                logger.warning(f"db_manager.close 失败（WAL 可能未 checkpoint）: {e}", exc_info=True)
-        # Why: ThreadPoolExecutor 的 atexit 会 join 所有 worker；若有网络请求
-        # 卡在 socket 上，进程就退不掉（托盘已 hide 但 Python 还活着）。
-        # 给正常收尾 1.5s，超时直接 _exit 兜底。
-        #
-        # Why 用可取消的成员定时器而不是 singleShot 闭包：app.quit() 只发退出
-        # 信号，正常路径若在 1.5s 内走完 app.exec() 返回、解释器开始收尾，
-        # singleShot 的回调已不再被事件循环驱动 —— 定时器本身无害。真正的风险
-        # 是兜底在任何线程仍在写盘/关库时硬杀。取消式写法 + 留痕日志，保证
-        # 超时强杀时现场可诊断。
-        self._quit_kill_timer = QTimer()
-        self._quit_kill_timer.setSingleShot(True)
-        self._quit_kill_timer.timeout.connect(self._force_kill)
-        self._quit_kill_timer.start(1500)
-        self.app.quit()
-
-    @staticmethod
-    def _force_kill():
-        """正常退出超时后的最后手段。"""
-        logger.error("退出超时（1.5s 内未完成收尾），强制终止进程")
-        os._exit(0)
+            self.db_manager.close()
+        self.tray_icon.hide()
+        self.app.complete_quit()
 
     def run(self) -> int:
         """运行应用"""

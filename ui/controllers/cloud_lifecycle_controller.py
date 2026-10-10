@@ -19,6 +19,20 @@ class CloudLifecycleController(QObject):
         super().__init__(parent)
         self._parent = parent
         self.ctx = ctx
+        self._services_account = (settings().cloud_user_email or "").strip().casefold()
+        self._services_api = getattr(parent, "cloud_api", None)
+        self._retiring_services = []
+        self._retiring_entitlements = []
+        self._retiring_executors = []
+        self._auth_callbacks = []
+        self._auth_changing = False
+        self._shutting_down = False
+        self._pending_files_bootstrap = False
+        self._pending_files_activate = False
+        self._pending_cloud_bootstrap = False
+        self._retire_timer = QTimer(self)
+        self._retire_timer.setInterval(50)
+        self._retire_timer.timeout.connect(self._poll_retiring)
 
     # ---------- 便捷访问 ----------
 
@@ -36,6 +50,127 @@ class CloudLifecycleController(QObject):
 
     # ========== 主入口 ==========
 
+    def retiring_resources(self):
+        return (tuple(self._retiring_services), tuple(self._retiring_entitlements),
+                tuple(self._retiring_executors))
+
+    def begin_shutdown(self):
+        self._shutting_down = True
+        self._auth_callbacks.clear()
+        self._retire_timer.stop()
+
+    def _stop_and_retain(self, service):
+        try:
+            stopped = service.stop(timeout_ms=0)
+        except Exception:
+            logger.warning("停止旧账号同步服务失败，将继续保留并等待", exc_info=True)
+            stopped = False
+        thread = getattr(service, "_worker_thread", None)
+        if (stopped is False or (thread is not None and not thread.wait(0))):
+            if service not in self._retiring_services:
+                self._retiring_services.append(service)
+
+    def prepare_auth_change(self, callback):
+        """等待旧账号后台任务收尾后才允许更换客户端或凭证。"""
+        if self._shutting_down:
+            return
+        self._auth_changing = True
+        self._auth_callbacks.append(callback)
+        self.teardown_cloud_sync_after_logout()
+        parent = self._parent
+        for widget in [parent] + parent.findChildren(QObject):
+            executor = getattr(widget, "_cloud_executor", None) if widget is parent else getattr(widget, "_executor", None)
+            if executor is not None and executor not in self._retiring_executors:
+                executor.shutdown(wait=False, cancel_futures=True)
+                self._retiring_executors.append(executor)
+                if widget is parent:
+                    parent._cloud_executor = None
+                else:
+                    widget._executor = None
+        manager = getattr(parent, "plugin_manager", None)
+        if manager is not None:
+            manager.cancel_action()
+            manager.set_cloud_client(None)
+        self._retire_timer.start()
+        self._poll_retiring()
+
+    def _poll_retiring(self):
+        if self._shutting_down:
+            return
+        for service in list(self._retiring_services):
+            thread = getattr(service, "_worker_thread", None)
+            if thread is not None and not thread.wait(0):
+                continue
+            if thread is None and service.stop(timeout_ms=0) is False:
+                continue
+            try:
+                service.persist_sync_cursor()
+            except Exception:
+                logger.warning("保存旧账号同步游标失败", exc_info=True)
+            self._retiring_services.remove(service)
+        for entitlement in list(self._retiring_entitlements):
+            if not any(thread.is_alive() for thread in entitlement.active_refresh_threads()):
+                self._retiring_entitlements.remove(entitlement)
+        self._retiring_executors[:] = [
+            executor for executor in self._retiring_executors
+            if any(thread.is_alive() for thread in executor._threads)
+        ]
+        page = getattr(self._parent, "file_list_widget", None)
+        imports_pending = bool(page is not None and page._import_threads)
+        manager = getattr(self._parent, "plugin_manager", None)
+        plugins_pending = bool(manager is not None and any(
+            not worker.wait(0) for worker in manager.active_workers()
+        ))
+        from ui.cloud_login_widget import active_login_futures
+        login_pending = any(not future.done() for future in active_login_futures())
+        if (self._retiring_services or self._retiring_entitlements or self._retiring_executors
+                or imports_pending or plugins_pending or login_pending):
+            return
+        if self._auth_callbacks:
+            callback = self._auth_callbacks.pop(0)
+            from concurrent.futures import ThreadPoolExecutor
+            if getattr(self._parent, "_cloud_executor", None) is None:
+                self._parent._cloud_executor = ThreadPoolExecutor(max_workers=1)
+            callback()
+            return
+        self._retire_timer.stop()
+        if self._pending_cloud_bootstrap:
+            self._pending_cloud_bootstrap = False
+            self.bootstrap_cloud_sync_after_login()
+        if self._pending_files_bootstrap:
+            activate = self._pending_files_activate
+            self._pending_files_bootstrap = self._pending_files_activate = False
+            self.bootstrap_files_stack_after_login(activate=activate)
+
+    def _prepare_bootstrap(self, files=False, activate=False):
+        if self._shutting_down:
+            return False
+        from ui.cloud_login_widget import active_login_futures
+        if self._auth_callbacks or any(not future.done() for future in active_login_futures()):
+            if files:
+                self._pending_files_bootstrap = True
+                self._pending_files_activate |= activate
+            else:
+                self._pending_cloud_bootstrap = True
+            self._retire_timer.start()
+            return False
+        account = (settings().cloud_user_email or "").strip().casefold()
+        if self._auth_changing:
+            self._auth_changing = False
+            self._services_account, self._services_api = account, self._parent.cloud_api
+        elif account != self._services_account or self._services_api is not self._parent.cloud_api:
+            self.teardown_cloud_sync_after_logout()
+            self._services_account, self._services_api = account, self._parent.cloud_api
+        if self._retiring_services or self._retiring_entitlements or self._retiring_executors:
+            if files:
+                self._pending_files_bootstrap = True
+                self._pending_files_activate |= activate
+            else:
+                self._pending_cloud_bootstrap = True
+            self._retire_timer.start()
+            return False
+        return True
+
     def bootstrap_files_stack_after_login(self, activate: bool = False):
         """未登录启动后首次登录成功:补建 entitlement + 文件仓 + 文件同步,
         并把"我的文件"的升级占位替换成真实的 FileListWidget。
@@ -44,6 +179,8 @@ class CloudLifecycleController(QObject):
         """
         parent = self._parent
         if parent.cloud_api is None or not parent.cloud_api.is_authenticated:
+            return
+        if not self._prepare_bootstrap(files=True, activate=activate):
             return
         try:
             if parent.entitlement_service is None:
@@ -57,7 +194,12 @@ class CloudLifecycleController(QObject):
 
             if parent.file_repository is None:
                 from core.file_repository import CloudFileRepository
-                parent.file_repository = CloudFileRepository(parent.repository.db)
+                parent.file_repository = CloudFileRepository(
+                    parent.repository.db,
+                    account_identifier=settings().cloud_user_email,
+                )
+            else:
+                parent.file_repository.bind_account(settings().cloud_user_email)
 
             if parent.file_sync_service is None and (settings().files_sync_enabled or activate):
                 from core.file_sync_service import FileCloudSyncService
@@ -127,6 +269,8 @@ class CloudLifecycleController(QObject):
         parent = self._parent
         if parent.cloud_api is None or not parent.cloud_api.is_authenticated:
             return
+        if not self._prepare_bootstrap():
+            return
         try:
             if parent.cloud_sync_service is None:
                 from core.cloud_sync_service import CloudSyncService
@@ -154,7 +298,14 @@ class CloudLifecycleController(QObject):
             if self.ctx is not None:
                 self.ctx.cloud_api = parent.cloud_api
                 self.ctx.cloud_sync_service = parent.cloud_sync_service
-            QTimer.singleShot(0, parent.cloud_sync_service.start)
+            service = parent.cloud_sync_service
+
+            def start_if_current():
+                if (not self._shutting_down and not self._auth_changing
+                        and parent.cloud_sync_service is service):
+                    service.start()
+
+            QTimer.singleShot(0, start_if_current)
         except Exception as e:
             logger.warning(f"登录后补建云端同步失败: {e}", exc_info=True)
 
@@ -170,6 +321,9 @@ class CloudLifecycleController(QObject):
         """
         parent = self._parent
         ctx = self.ctx
+        page = getattr(parent, "file_list_widget", None)
+        if page is not None:
+            page.suspend_services()
         if parent.cloud_sync_service is not None:
             cloud_sync_service = parent.cloud_sync_service
             try:
@@ -202,7 +356,7 @@ class CloudLifecycleController(QObject):
                             signal.disconnect(slot)
                         except (RuntimeError, TypeError):
                             pass
-                cloud_sync_service.stop()
+                self._stop_and_retain(cloud_sync_service)
             except Exception as e:
                 logger.warning(f"退出登录后停止云端同步失败: {e}", exc_info=True)
             finally:
@@ -216,7 +370,7 @@ class CloudLifecycleController(QObject):
         fss = getattr(parent, "file_sync_service", None)
         if fss is not None:
             try:
-                fss.stop()
+                self._stop_and_retain(fss)
             except Exception as e:
                 logger.warning(f"退出登录后停止文件同步失败: {e}", exc_info=True)
             finally:
@@ -225,9 +379,15 @@ class CloudLifecycleController(QObject):
                     ctx.file_sync_service = None
         
         # 清理 parent 与 AppContext 的其余凭证/文件服务缓存，防止旧实例残留
+        entitlement = getattr(parent, "entitlement_service", None)
+        if entitlement is not None and hasattr(entitlement, "active_refresh_threads"):
+            entitlement.set_cloud_api(None)
+            self._retiring_entitlements.append(entitlement)
         parent.entitlement_service = None
         parent.file_repository = None
         if ctx is not None:
             ctx.cloud_api = None
             ctx.entitlement_service = None
             ctx.file_repository = None
+        if self._retiring_services or self._retiring_entitlements:
+            self._retire_timer.start()

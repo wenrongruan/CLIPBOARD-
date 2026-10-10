@@ -20,7 +20,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt, SIGNAL
 
 from config import (
     APP_VERSION,
@@ -262,6 +262,7 @@ class PluginManager(QObject):
         self._plugin_status: Dict[str, dict] = {}  # {id: {status, message}}
         self._plugin_paths: Dict[str, Path] = {}   # {id: plugin_dir_path}
         self._active_worker: Optional[PluginWorker] = None
+        self._retiring_workers: set[PluginWorker] = set()
         self._timeout_timer: Optional[QTimer] = None
         self._cloud_client = None  # 共享的云端客户端实例
         # Phase 7: 可选的扩展点注册表，由 AppContext 注入；插件加载/卸载时同步。
@@ -585,7 +586,7 @@ class PluginManager(QObject):
 
     def run_action(self, plugin_id: str, action_id: str, item: ClipboardItem) -> bool:
         """在工作线程中执行插件动作。返回 True 表示已启动，False 表示被拒绝。"""
-        if self._active_worker is not None:
+        if self.active_workers():
             self.action_error.emit(t("plugin_busy"))
             return False
 
@@ -599,8 +600,14 @@ class PluginManager(QObject):
         worker.progress.connect(self._on_worker_progress)
         worker.finished.connect(lambda result: self._on_worker_finished(result, item))
         worker.error.connect(self._on_worker_error)
-        worker.finished.connect(self._cleanup_worker)
-        worker.error.connect(self._cleanup_worker)
+        worker.finished.connect(lambda _result, w=worker: self._cleanup_worker(w))
+        worker.error.connect(lambda _error, w=worker: self._cleanup_worker(w))
+        # PluginWorker.finished(PyObject) 是业务结果，不是 QThread.finished()。
+        # 使用原生零参数信号，run() 的 finally/栈清理完成后才释放引用。
+        QObject.connect(
+            worker, SIGNAL("finished()"),
+            lambda w=worker: self._on_thread_finished(w), Qt.QueuedConnection,
+        )
 
         self._active_worker = worker
 
@@ -616,11 +623,13 @@ class PluginManager(QObject):
 
     def cancel_action(self):
         """取消当前执行的插件动作"""
+        for worker in self.active_workers():
+            worker.cancel()
         if self._active_worker:
-            self._active_worker.cancel()
             # 不立即清理 _active_worker，等线程的 finished/error 信号自然触发 _cleanup_worker
             if self._timeout_timer:
                 self._timeout_timer.stop()
+                self._timeout_timer.deleteLater()
                 self._timeout_timer = None
 
     def _on_worker_progress(self, percent: int, message: str):
@@ -638,64 +647,39 @@ class PluginManager(QObject):
             self.action_error.emit(t("plugin_timeout"))
             # worker.cancel() 后 run() 会发射 finished 信号触发 _cleanup_worker
 
-    def _cleanup_worker(self):
-        if self._timeout_timer:
-            self._timeout_timer.stop()
-            self._timeout_timer = None
-        if not self._active_worker:
+    def active_workers(self) -> Tuple[PluginWorker, ...]:
+        """包括已发送结果、但 run() 仍在退出的 worker，供退出流程排空。"""
+        workers = set(self._retiring_workers)
+        if self._active_worker is not None:
+            workers.add(self._active_worker)
+        return tuple(workers)
+
+    def _cleanup_worker(self, worker=None):
+        worker = worker if worker is not None else self._active_worker
+        if worker is None:
             return
-        worker = self._active_worker
-        self._active_worker = None
-        # Why: finished/error 都 connect 到 _cleanup_worker，第一个触发时另一个
-        # 可能已在队列中；一次性断开全部信号-槽连接，消除重入竞态。
-        try:
-            QObject.disconnect(worker, None, None, None)
-        except (RuntimeError, TypeError):
-            pass
-
-        if worker.isFinished():
-            worker.deleteLater()
+        if worker is self._active_worker:
+            if self._timeout_timer:
+                self._timeout_timer.stop()
+                self._timeout_timer.deleteLater()
+                self._timeout_timer = None
+            self._active_worker = None
+            self._retiring_workers.add(worker)
+        elif worker not in self._retiring_workers:
+            # 忽略已经释放的旧 worker 的排队回调，不能清掉新 worker。
             return
-
-        # 5s 兜底：线程未结束则强制 terminate，避免泄漏。
-        cleanup_timer = QTimer(self)
-        cleanup_timer.setSingleShot(True)
-
-        def _on_finished():
-            if cleanup_timer.isActive():
-                cleanup_timer.stop()
+        if worker.isFinished() and worker.wait(0):
+            self._retiring_workers.discard(worker)
             worker.deleteLater()
-            # QTimer 以 self(plugin_manager) 为父不会被 GC，显式回收避免长期累积
-            cleanup_timer.deleteLater()
 
-        def _force_cleanup():
-            if not worker.isFinished():
-                logger.warning("plugin worker did not finish within 5s, terminating")
-                worker.terminate()
-                worker.wait(1000)
-            worker.deleteLater()
-            cleanup_timer.deleteLater()
-
-        cleanup_timer.timeout.connect(_force_cleanup)
-        # Why: SingleShotConnection 让 _on_finished 只响应一次就自动断开；
-        # PySide6 6.7+ 有，6.6.x（requirements 下限）需手动 disconnect 降级。
-        single_shot = getattr(Qt.ConnectionType, "SingleShotConnection", None)
-        if single_shot is not None:
-            worker.finished.connect(_on_finished, single_shot)
-        else:
-            def _once(*_args, _slot=_on_finished):
-                try:
-                    worker.finished.disconnect(_once)
-                except (RuntimeError, TypeError):
-                    pass
-                _slot()
-            worker.finished.connect(_once)
-
-        if worker.isFinished():
-            # disconnect 和 connect 之间线程已结束，手动触发清理
-            _on_finished()
-        else:
-            cleanup_timer.start(5000)
+    def _on_thread_finished(self, worker):
+        if worker is not self._active_worker and worker not in self._retiring_workers:
+            return
+        # 原生 finished 发射后还可能执行 thread-local 析构；wait(0) 确认退出。
+        if not worker.wait(0):
+            QTimer.singleShot(10, lambda: self._on_thread_finished(worker))
+            return
+        self._cleanup_worker(worker)
 
     # ========== 配置 ==========
 

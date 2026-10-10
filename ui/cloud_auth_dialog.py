@@ -48,13 +48,17 @@ class CloudAuthDialog(QDialog):
         layout.addSpacing(8)
 
         # 复用登录表单组件
-        self._login_widget = CloudLoginWidget(self.cloud_api)
+        controller = getattr(self.parentWidget(), "cloud_controller", None)
+        self._login_widget = CloudLoginWidget(
+            self.cloud_api, before_auth_change=getattr(controller, "prepare_auth_change", None),
+        )
         self._login_widget.login_succeeded.connect(self._on_login_succeeded)
         layout.addWidget(self._login_widget)
 
         layout.addStretch()
 
     def _on_login_succeeded(self, result: dict):
+        self.cloud_api = self._login_widget.cloud_api
         self._auth_result = result
         QTimer.singleShot(500, self.accept)
 

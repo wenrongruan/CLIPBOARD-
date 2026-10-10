@@ -1,55 +1,155 @@
-"""pytest 全局配置。
+"""Isolate user state and explicitly finish workers before natural pytest exit."""
 
-唯一职责：规避 PySide6 worker QThread 在解释器关闭阶段触发的 abort。
+from __future__ import annotations
 
-core.cloud_sync_service / core.file_sync_service 各自持有一个 worker QThread
-（`self._worker_thread = QThread(self)`）。测试用例创建这些 service 后，worker
-线程可能在用例结束时仍 isRunning()；而对象 __del__ 里的兜底停止并不可靠——解释器
-退出阶段 Python 不保证调用 __del__。于是进程在「所有测试已 PASSED」之后、解释器
-关闭执行 ~QThread 时，Qt 抛出
-    qFatal("QThread: Destroyed while thread is still running")
-直接 abort（SIGABRT，退出码 134），导致 CI 的 mac / linux job 在测试全部通过的
-情况下仍被判定失败（Windows 不 abort，所以此前只有它能通过）。
-
-到 pytest_sessionfinish 时测试结论已经确定，这里直接以「真实退出码」结束进程，
-跳过后续 Qt 析构链：既不再触发 abort，也保留对测试失败的检测（exitstatus 非 0
-仍以非 0 退出）。
-"""
-
+import functools
 import os
-import sys
+from pathlib import Path
+import socket
+import tempfile
 
 import pytest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-def _flush_all():
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.flush()
-        except Exception:
-            pass
+_session_patch = None
+_session_directory = None
+_active_directory = None
+_credentials = {}
 
 
-@pytest.hookimpl(trylast=True)
-def pytest_sessionfinish(session, exitstatus):
-    """测试结论已定时结束进程，跳过 Qt 析构链。
+def pytest_addoption(parser):
+    parser.addoption(
+        "--allow-network", action="store_true", default=False,
+        help="Allow explicitly configured integration tests to use real network services.",
+    )
 
-    行为分两条路：
-    - 全部通过：os._exit(0) 接管退出，规避 worker QThread 在解释器关闭阶段
-      的 qFatal abort（详见模块 docstring）。
-    - 有失败：正常返回，让 pytest 走标准退出流程，保证 FAILURES 详情完整
-      打印（os._exit 会丢弃缓冲区里的失败输出）。已知代价：此时 Qt teardown
-      abort 可能回来，进程以 SIGABRT(134) 而非 1 结束 —— 仍是失败信号，可接受。
-    """
-    _flush_all()
-    code = int(exitstatus)
-    if code != 0:
-        os.write(
-            2,
-            b"[conftest] sessionfinish: tests failed, exiting normally to preserve failure output\n",
-        )
+
+def pytest_configure(config):
+    # Install before collection: imported aliases also resolve to isolated state.
+    global _session_patch, _session_directory, _active_directory
+    import config as app_config
+    import keyring
+    from core.cloud.http import HttpClient
+
+    _session_directory = tempfile.TemporaryDirectory(prefix="sharedclipboard-pytest-")
+    _active_directory = Path(_session_directory.name)
+    _session_patch = pytest.MonkeyPatch()
+    _session_patch.setattr(app_config, "get_config_dir", lambda: _active_directory)
+    _session_patch.setattr(app_config, "_store", app_config.SettingsStore(_active_directory / "settings.json"))
+    _session_patch.setattr(app_config, "_read_auth_json_token", lambda field: "")
+    _session_patch.setattr(HttpClient, "_update_auth_json", lambda self, access, refresh: None)
+    _session_patch.setattr(keyring, "get_password", lambda service, key: _credentials.get((service, key)))
+    _session_patch.setattr(keyring, "set_password", lambda service, key, value: _credentials.__setitem__((service, key), value))
+    _session_patch.setattr(keyring, "delete_password", lambda service, key: _credentials.pop((service, key), None))
+    if not config.getoption("--allow-network"):
+        def deny_connection(*args, **kwargs):
+            raise OSError("Real network disabled in unit tests; use a mock transport")
+        _session_patch.setattr(socket.socket, "connect", deny_connection)
+        _session_patch.setattr(socket.socket, "connect_ex", deny_connection)
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--allow-network"):
         return
-    # 留痕：CI/本地日志可据此确认是本 hook 接管了退出，而非自然退出或 abort。
-    os.write(2, b"[conftest] sessionfinish: exiting to skip Qt QThread teardown abort\n")
-    _flush_all()
-    os._exit(0)
+    for item in items:
+        if item.path.name == "test_mysql_schema.py":
+            item.add_marker(pytest.mark.skip(reason="Real MySQL requires --allow-network and TEST_MYSQL_*"))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _qt_application():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture(autouse=True)
+def _isolated_user_state(tmp_path, monkeypatch, _qt_application):
+    global _active_directory
+    import config as app_config
+    import utils.secure_store as secure_store
+
+    _active_directory = tmp_path
+    _credentials.clear()
+    monkeypatch.setattr(app_config, "_store", app_config.SettingsStore(tmp_path / "settings.json"))
+    monkeypatch.setattr(secure_store, "_active_backend", "unknown")
+    yield
+    store = app_config.get_store()
+    if store._save_timer is not None:
+        store._save_timer.stop()
+    store.flush()
+    _credentials.clear()
+
+
+@pytest.fixture(autouse=True)
+def _finish_background_resources(monkeypatch, _isolated_user_state):
+    """Own resources created by a test until their workers are fully stopped."""
+    from concurrent.futures import ThreadPoolExecutor
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from core.clipboard_monitor import ClipboardMonitor
+    from core.cloud.http import HttpClient
+    from core.cloud_sync_service import CloudSyncService
+    from core.entitlement_service import EntitlementService
+    from core.file_sync_service import FileCloudSyncService
+    from ui.file_list_widget import _ImportWorker
+
+    resources = []
+    executors = []
+
+    def track_constructor(cls, target):
+        original = cls.__init__
+
+        @functools.wraps(original)
+        def construct(self, *args, **kwargs):
+            target.append(self)
+            original(self, *args, **kwargs)
+
+        monkeypatch.setattr(cls, "__init__", construct)
+
+    for cls in (ClipboardMonitor, CloudSyncService, FileCloudSyncService, EntitlementService, HttpClient, _ImportWorker):
+        track_constructor(cls, resources)
+    track_constructor(ThreadPoolExecutor, executors)
+
+    yield
+
+    failures = []
+    for resource in reversed(resources):
+        try:
+            if isinstance(resource, (ClipboardMonitor, CloudSyncService, FileCloudSyncService)):
+                resource.stop()
+            if isinstance(resource, _ImportWorker):
+                resource.requestInterruption()
+                resource.quit()
+                if not resource.wait(5000):
+                    failures.append("File import did not finish")
+            worker = getattr(resource, "_worker_thread", None)
+            if worker is not None:
+                worker.requestInterruption()
+                worker.quit()
+                if not worker.wait(5000):
+                    failures.append(f"{type(resource).__name__} worker did not finish")
+            if isinstance(resource, EntitlementService):
+                if not resource.wait_for_refresh(timeout=5):
+                    failures.append("Entitlement refresh did not finish")
+        except RuntimeError as exc:
+            if "already deleted" not in str(exc):
+                failures.append(str(exc))
+    for executor in executors:
+        executor.shutdown(wait=True, cancel_futures=True)
+    for resource in resources:
+        if isinstance(resource, HttpClient):
+            resource.close()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    if failures:
+        pytest.fail("Background teardown failed: " + "; ".join(failures))
+
+
+def pytest_unconfigure(config):
+    global _session_patch, _session_directory
+    if _session_patch is not None:
+        _session_patch.undo()
+        _session_patch = None
+    if _session_directory is not None:
+        _session_directory.cleanup()
+        _session_directory = None

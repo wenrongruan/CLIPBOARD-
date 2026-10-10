@@ -39,7 +39,7 @@ class SyncMode(str, Enum):
 # ============ 模块级常量 ============
 
 APP_NAME = "SharedClipboard"
-APP_VERSION = "3.3.7"
+APP_VERSION = "3.3.9"
 
 PRICING_URL = "https://www.jlike.com/pricing.html"
 

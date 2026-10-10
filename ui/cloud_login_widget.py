@@ -26,11 +26,16 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# 兜底超时：若 20 秒内 worker 线程没有发回结果，强制重置 UI 并提示
+# 请求超过 20 秒时提示仍在等待，保持串行登录。
 _LOGIN_WATCHDOG_MS = 20_000
 
-# 模块级单例线程池，避免每次登录创建新的 Executor；max_workers=2 防止前一个任务卡死阻塞新任务
-_executor = ThreadPoolExecutor(max_workers=2)
+# 登录请求串行执行，避免迟到结果覆盖另一账号的凭证。
+_executor = ThreadPoolExecutor(max_workers=1)
+_active_login_futures = set()
+
+
+def active_login_futures():
+    return tuple(_active_login_futures)
 
 
 def _mask_email(email: str) -> str:
@@ -47,16 +52,20 @@ class CloudLoginWidget(QWidget):
     login_succeeded = Signal(dict)   # 登录成功，携带 API 返回结果
     login_failed = Signal(str)       # 登录失败，携带错误消息
     # 内部信号：后台线程 -> 主线程，传 (result_dict_or_None, error_message_or_empty)
-    _login_done = Signal(object, str)
+    _login_done = Signal(int, object, str)
 
-    def __init__(self, cloud_api: CloudAPIClient, parent=None):
+    def __init__(self, cloud_api: CloudAPIClient, parent=None, before_auth_change=None):
         super().__init__(parent)
         self.cloud_api = cloud_api
+        self._before_auth_change = before_auth_change
+        self._login_in_flight = False
         self._login_done.connect(self._handle_login_result)
         self._current_request_id = 0
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
         self._watchdog.timeout.connect(self._on_login_timeout)
+        self._auth_wait_timer = QTimer(self)
+        self._auth_wait_timer.setInterval(50)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -137,6 +146,8 @@ class CloudLoginWidget(QWidget):
         self.login_btn.setText("请稍候..." if loading else "登录")
 
     def _do_login(self):
+        if self._login_in_flight:
+            return
         email = self.email_edit.text().strip()
         password = self.password_edit.text()
 
@@ -156,12 +167,43 @@ class CloudLoginWidget(QWidget):
         if not new_url:
             self.status_label.setText("请填写服务器地址")
             return
+        self._login_in_flight = True
+        self._current_request_id += 1
+        request_id = self._current_request_id
+        self._set_loading(True)
+        self.status_label.setText("正在等待上一账号的后台任务结束…")
+
+        def start():
+            from shiboken6 import isValid
+            if isValid(self):
+                try:
+                    self._start_login(email, password, new_url, request_id)
+                except Exception as exc:
+                    logger.warning("无法开始登录请求: %s", exc)
+                    self._handle_login_result(request_id, None, str(exc))
+
+        if self._before_auth_change is not None:
+            self._before_auth_change(start)
+        else:
+            def wait_turn():
+                if any(not future.done() for future in active_login_futures()):
+                    return
+                self._auth_wait_timer.stop()
+                self._auth_wait_timer.timeout.disconnect(wait_turn)
+                start()
+            self._auth_wait_timer.timeout.connect(wait_turn)
+            self._auth_wait_timer.start()
+            wait_turn()
+
+    def _start_login(self, email, password, new_url, request_id):
         current_url = settings().cloud_api_url
         if new_url != current_url:
             try:
                 set_cloud_api_url(new_url)
             except ValueError as e:
                 self.status_label.setText(f"服务器地址无效：{e}")
+                self._login_in_flight = False
+                self._set_loading(False)
                 return
             self.cloud_api = rebuild_cloud_client_for_url(new_url)
         else:
@@ -180,8 +222,6 @@ class CloudLoginWidget(QWidget):
         self.status_label.setText("")
 
         api = self.cloud_api
-        self._current_request_id += 1
-        request_id = self._current_request_id
         signal = self._login_done
 
         def _login_task():
@@ -190,30 +230,32 @@ class CloudLoginWidget(QWidget):
             try:
                 result = api.login(email, password)
                 logger.debug(f"[Login#{request_id}] 登录成功，耗时 {time.time()-t0:.2f}s")
-                signal.emit(result or {}, "")
+                signal.emit(request_id, result or {}, "")
             except CloudAPIError as e:
                 logger.warning(f"[Login#{request_id}] 登录失败（API 错误）: {e}，耗时 {time.time()-t0:.2f}s")
-                signal.emit(None, str(e))
+                signal.emit(request_id, None, str(e))
             except Exception as e:
                 logger.warning(f"[Login#{request_id}] 登录失败（未知错误）: {e!r}，耗时 {time.time()-t0:.2f}s", exc_info=True)
-                signal.emit(None, f"连接失败: {e}")
+                signal.emit(request_id, None, f"连接失败: {e}")
 
-        _executor.submit(_login_task)
+        future = _executor.submit(_login_task)
+        _active_login_futures.add(future)
+        future.add_done_callback(_active_login_futures.discard)
         self._watchdog.start(_LOGIN_WATCHDOG_MS)
 
     def _on_login_timeout(self):
-        """watchdog：worker 线程超时未返回，强制重置 UI"""
-        logger.warning(f"[Login#{self._current_request_id}] 登录超时未返回，重置 UI")
-        # 作废当前 request，避免迟到的结果覆盖
-        self._current_request_id += 1
+        """请求未结束时继续禁止重试，避免重叠请求写入不同账号的凭证。"""
+        logger.warning(f"[Login#{self._current_request_id}] 登录请求仍未结束")
         self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
-        self.status_label.setText("登录超时，请检查网络后重试")
-        self._set_loading(False)
-        self.login_failed.emit("登录超时")
+        self.status_label.setText("登录响应较慢，仍在等待当前请求结束，请暂勿重复登录。")
 
-    def _handle_login_result(self, result, error_msg: str):
+    def _handle_login_result(self, request_id, result, error_msg: str):
         """在主线程中处理登录结果"""
+        if request_id != self._current_request_id:
+            return
         self._watchdog.stop()
+        self._login_in_flight = False
+        self._set_loading(False)
         if error_msg:
             self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
             self.status_label.setText(error_msg)

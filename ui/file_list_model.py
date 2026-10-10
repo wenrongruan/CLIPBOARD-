@@ -134,12 +134,15 @@ class FileListModel(QAbstractTableModel):
             if col == self.COL_MTIME:
                 return _fmt_ts(f.mtime)
             if col == self.COL_STATE:
+                if f.is_deleted:
+                    return "删除失败" if f.sync_state == FileSyncState.ERROR.value else "删除中"
                 return _STATE_DISPLAY.get(f.sync_state, f.sync_state)
             if col == self.COL_DEVICE:
                 return f.device_name or f.device_id or ""
         elif role == Qt.ToolTipRole:
-            if col == self.COL_NAME and f.local_path:
-                return f.local_path
+            if col == self.COL_NAME:
+                name = f.name or "(未命名)"
+                return f"{name}\n{f.local_path}" if f.local_path else name
             if col == self.COL_STATE and f.last_error:
                 return f.last_error
         elif role == Qt.ForegroundRole and col == self.COL_STATE:
@@ -151,7 +154,7 @@ class FileListModel(QAbstractTableModel):
             return f
         elif role == Qt.UserRole + 1 and col == self.COL_STATE:
             # 返回 (is_syncing, done, total)
-            if f.sync_state == FileSyncState.SYNCING.value:
+            if not f.is_deleted and f.sync_state == FileSyncState.SYNCING.value:
                 done, total = self._progress.get(f.id or 0, (0, f.size_bytes))
                 return (True, done, total or f.size_bytes or 1)
             return (False, 0, 0)

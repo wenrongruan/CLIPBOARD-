@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl, QThread, Signal
@@ -33,6 +34,8 @@ from core.file_storage import (
     guess_mime,
     make_bookmark,
     materialize_for_open,
+    remove_from_container,
+    FileCopyCancelledError,
 )
 
 from .file_list_model import FileListModel, ProgressDelegate
@@ -51,11 +54,15 @@ class _ImportWorker(QThread):
 
     done = Signal(object, str)  # (CloudFile or None, error)
 
-    def __init__(self, path: str, device_id: str, device_name: str):
+    def __init__(self, path: str, device_id: str, device_name: str,
+                 *, generation: int = 0, account_identifier: str = ""):
         super().__init__()
         self._path = path
         self._device_id = device_id
         self._device_name = device_name
+        self.generation = generation
+        self.account_identifier = account_identifier
+        self.result: CloudFile | None = None
 
     def run(self):
         try:
@@ -64,7 +71,9 @@ class _ImportWorker(QThread):
             if size > MAX_SINGLE_FILE_BYTES:
                 self.done.emit(None, f"单文件不能超过 1 GB（当前 {_fmt_gb(size)}）")
                 return
-            sha, size, dest = hash_and_copy_into_container(self._path)
+            sha, size, dest = hash_and_copy_into_container(
+                self._path, is_cancelled=self.isInterruptionRequested,
+            )
             now = int(time.time() * 1000)
             name = os.path.basename(self._path)
             f = CloudFile(
@@ -81,7 +90,10 @@ class _ImportWorker(QThread):
                 sync_state=FileSyncState.PENDING.value,
                 bookmark=make_bookmark(self._path),
             )
+            self.result = f
             self.done.emit(f, "")
+        except FileCopyCancelledError:
+            self.done.emit(None, "")
         except Exception as e:
             logger.error(f"导入文件失败: {e}", exc_info=True)
             self.done.emit(None, str(e))
@@ -89,6 +101,8 @@ class _ImportWorker(QThread):
 
 class FileListWidget(QWidget):
     """主 widget。外部注入 CloudFileRepository + FileCloudSyncService + EntitlementService。"""
+
+    _open_done = Signal(str, str)
 
     def __init__(
         self,
@@ -104,8 +118,22 @@ class FileListWidget(QWidget):
         self.entitlement = entitlement
         self.cloud_api = cloud_api
         self._import_threads: list[_ImportWorker] = []
+        self._orphan_imports: dict[str, CloudFile] = {}
+        self._import_generation = 0
+        self._account_identifier = self._current_account()
+        self._closing = False
+        self._services_connected = False
+        self._executor: ThreadPoolExecutor | None = None
+        self._open_done.connect(self._on_open_ready)
         self._last_usage_pct: int = -1
+        self._initial_cloud_refresh = False
         self._setup_ui()
+        self._status_hide_timer = QTimer(self)
+        self._status_hide_timer.setSingleShot(True)
+        self._status_hide_timer.timeout.connect(self.sync_status_label.hide)
+        self._inventory_timer = QTimer(self)
+        self._inventory_timer.setSingleShot(True)
+        self._inventory_timer.timeout.connect(self._refresh_inventory)
         self._connect_signals()
         self.reload()
         self._refresh_gate_view()
@@ -136,6 +164,20 @@ class FileListWidget(QWidget):
         quota_row.addWidget(self.upgrade_btn)
         root.addLayout(quota_row)
 
+        manage_row = QHBoxLayout()
+        self.scope_label = QLabel("当前账号的文件")
+        self.scope_label.setStyleSheet("color:#aaa;font-size:11px;")
+        manage_row.addWidget(self.scope_label)
+        manage_row.addStretch()
+        self.refresh_btn = QPushButton("刷新云端")
+        self.refresh_btn.clicked.connect(self._refresh_inventory)
+        manage_row.addWidget(self.refresh_btn)
+        self.delete_btn = QPushButton("删除所选")
+        self.delete_btn.setEnabled(False)
+        self.delete_btn.clicked.connect(self._delete_selected)
+        manage_row.addWidget(self.delete_btn)
+        root.addLayout(manage_row)
+
         self.usage_bar = QProgressBar()
         self.usage_bar.setRange(0, 100)
         self.usage_bar.setTextVisible(False)
@@ -153,7 +195,9 @@ class FileListWidget(QWidget):
         )
         gb_layout = QHBoxLayout(self.gate_banner)
         gb_layout.setContentsMargins(10, 6, 10, 6)
-        self.gate_banner_text = QLabel("文件云同步需要付费订阅（Basic / Super / Ultimate）")
+        self.gate_banner_text = QLabel(
+            "文件云同步需要付费订阅（Basic / Super / Ultimate / Team）"
+        )
         self.gate_banner_text.setStyleSheet("color: #fbbf24; background: transparent; border: none;")
         gb_layout.addWidget(self.gate_banner_text, 1)
         go = QPushButton("去升级")
@@ -177,8 +221,9 @@ class FileListWidget(QWidget):
         self.model = FileListModel(self)
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setTextElideMode(Qt.ElideMiddle)
         self.table.setAcceptDrops(True)
         self.table.setDragDropMode(QAbstractItemView.DropOnly)
         self.table.viewport().setAcceptDrops(True)
@@ -186,9 +231,14 @@ class FileListWidget(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_menu)
         self.table.doubleClicked.connect(self._on_double_click)
+        self.table.selectionModel().selectionChanged.connect(self._update_delete_button)
         header = self.table.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        header.setSectionResizeMode(FileListModel.COL_NAME, QHeaderView.Stretch)
+        # Stretch only gets space left over by the metadata columns, which can
+        # reduce filenames to a few pixels in a narrow window. Keep a readable,
+        # user-resizable name column and let the table scroll horizontally.
+        header.setSectionResizeMode(FileListModel.COL_NAME, QHeaderView.Interactive)
+        header.resizeSection(FileListModel.COL_NAME, 260)
         header.setSectionResizeMode(FileListModel.COL_SIZE, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(FileListModel.COL_MTIME, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(FileListModel.COL_STATE, QHeaderView.ResizeToContents)
@@ -209,10 +259,15 @@ class FileListWidget(QWidget):
         self.sync_service.download_progress.connect(self.model.set_progress)
         self.sync_service.upload_finished.connect(self._on_upload_finished)
         self.sync_service.download_finished.connect(self._on_upload_finished)
+        self.sync_service.delete_finished.connect(self._on_delete_finished)
+        self.sync_service.inventory_finished.connect(self._on_inventory_finished)
         self.sync_service.sync_error.connect(self._on_sync_error)
         self.entitlement.entitlement_changed.connect(self._on_entitlement_changed)
+        self._services_connected = True
 
     def _disconnect_signals(self):
+        if not self._services_connected:
+            return
         connections = (
             (self.sync_service.file_added, self._on_file_added_or_updated),
             (self.sync_service.file_updated, self._on_file_added_or_updated),
@@ -221,6 +276,8 @@ class FileListWidget(QWidget):
             (self.sync_service.download_progress, self.model.set_progress),
             (self.sync_service.upload_finished, self._on_upload_finished),
             (self.sync_service.download_finished, self._on_upload_finished),
+            (self.sync_service.delete_finished, self._on_delete_finished),
+            (self.sync_service.inventory_finished, self._on_inventory_finished),
             (self.sync_service.sync_error, self._on_sync_error),
             (self.entitlement.entitlement_changed, self._on_entitlement_changed),
         )
@@ -229,6 +286,14 @@ class FileListWidget(QWidget):
                 signal.disconnect(slot)
             except (RuntimeError, TypeError):
                 pass
+        self._services_connected = False
+
+    def suspend_services(self) -> None:
+        """账号切换前取消导入并停止接收旧服务结果。"""
+        self._cancel_imports()
+        self._disconnect_signals()
+        self.model.load([])
+        self.setEnabled(False)
 
     def rebind_services(
         self,
@@ -244,28 +309,43 @@ class FileListWidget(QWidget):
             and self.entitlement is entitlement
             and self.cloud_api is cloud_api
         )
+        account_identifier = self._current_account()
+        if not unchanged or account_identifier != self._account_identifier:
+            self._cancel_imports()
+            self._account_identifier = account_identifier
         if not unchanged:
             self._disconnect_signals()
             self.repo = repository
             self.sync_service = sync_service
             self.entitlement = entitlement
             self.cloud_api = cloud_api
+        if not self._services_connected:
             self._connect_signals()
+        self.setEnabled(True)
         self.reload()
         self._refresh_gate_view()
+        self._initial_cloud_refresh = False
+        self.refresh_btn.setEnabled(True)
 
     # ---------- data ----------
 
     def reload(self):
         try:
-            files = self.repo.list_files(include_deleted=False)
+            files = [
+                f for f in self.repo.list_files(include_deleted=True)
+                if not f.is_deleted or f.sync_state != FileSyncState.SYNCED.value
+            ]
         except Exception as e:
             logger.warning(f"加载文件列表失败: {e}")
             files = []
         self.model.load(files)
+        self._update_delete_button()
 
     def _on_file_added_or_updated(self, f: CloudFile):
-        self.model.upsert(f)
+        if f.is_deleted and f.sync_state == FileSyncState.SYNCED.value:
+            self.model.remove_by_local_id(f.id)
+        else:
+            self.model.upsert(f)
 
     def _on_upload_finished(self, local_id: int, ok: bool, err: str):
         # 状态由 Worker 已落盘；这里只需刷新一行
@@ -287,19 +367,81 @@ class FileListWidget(QWidget):
         try:
             self.sync_status_label.setText(text)
             self.sync_status_label.setVisible(True)
-            QTimer.singleShot(8000, lambda: self.sync_status_label.setVisible(False))
+            self._status_hide_timer.start(8000)
         except Exception:
             pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._initial_cloud_refresh:
+            self._initial_cloud_refresh = True
+            self._inventory_timer.start(0)
+
+    def _refresh_inventory(self):
+        if not self.sync_service.refresh_inventory():
+            self._show_sync_status("云端文件刷新暂不可用，请确认已登录且文件同步已启动。")
+            return
+        self.refresh_btn.setEnabled(False)
+        self._show_sync_status("正在读取当前账号的云端文件…")
+
+    def _on_inventory_finished(self, count: int, success: bool, message: str):
+        self.refresh_btn.setEnabled(True)
+        self.reload()
+        if success:
+            suffix = f"；{message}" if message else ""
+            self._show_sync_status(f"已读取 {count} 个云端文件{suffix}")
+        else:
+            self._show_sync_status(f"读取云端文件失败：{message}")
+
+    def _selected_files(self) -> list[CloudFile]:
+        return [
+            f for index in self.table.selectionModel().selectedRows()
+            if (f := self.model.file_at(index.row())) is not None
+        ]
+
+    def _update_delete_button(self, *_):
+        files = self._selected_files()
+        actionable = [
+            f for f in files
+            if not f.is_deleted or f.sync_state == FileSyncState.ERROR.value
+        ]
+        self.delete_btn.setEnabled(bool(actionable))
+        self.delete_btn.setText(f"删除所选（{len(actionable)}）" if len(actionable) > 1 else "删除所选")
+
+    def _on_delete_finished(self, local_id: int, ok: bool, err: str):
+        f = self.repo.get_by_id(local_id)
+        if not f:
+            return
+        if ok:
+            self.model.remove_by_local_id(local_id)
+            # 同一内容可能在删除过程中重新导入，不能删掉新记录共用的沙盒副本。
+            if not self.repo.get_by_sha(f.content_sha256):
+                try:
+                    remove_from_container(f.content_sha256, f.local_path)
+                except ValueError:
+                    logger.warning("文件 %s 的 SHA 无效，跳过清理本地副本", local_id)
+            self.entitlement.refresh_async()
+            self._show_sync_status(f"已删除 {f.name}；云端用量正在更新。")
+        else:
+            self.model.upsert(f)
+            self._show_sync_status(f"删除 {f.name} 失败：{err or '请稍后重试'}")
+        self._update_delete_button()
 
     # ---------- entitlement / gate ----------
 
     def _refresh_gate_view(self):
         ent = self.entitlement.current()
+        self.scope_label.setText(
+            "当前账号的文件 · 团队成员文件不在此列表"
+            if ent.plan == Plan.TEAM or getattr(ent, "team_spaces", 0) > 0
+            else "当前账号的文件"
+        )
         self.plan_label.setText({
             Plan.FREE: "套餐: 免费版",
             Plan.BASIC: "套餐: Basic",
             Plan.SUPER: "套餐: Super",
             Plan.ULTIMATE: "套餐: Ultimate",
+            Plan.TEAM: "套餐: Team",
         }.get(ent.plan, f"套餐: {ent.plan.value}"))
 
         quota = ent.files_quota_bytes
@@ -397,6 +539,11 @@ class FileListWidget(QWidget):
                 self._start_import(p)
 
     def _start_import(self, path: str):
+        if self._closing:
+            return
+        if self._current_account() != self._account_identifier:
+            self._show_sync_status("账号已切换，请重新打开文件页后导入。")
+            return
         # 预检：单文件 1 GB
         try:
             size = os.path.getsize(path)
@@ -409,24 +556,87 @@ class FileListWidget(QWidget):
             return
 
         s = settings()
-        w = _ImportWorker(path, s.device_id, s.device_name)
+        w = _ImportWorker(
+            path, s.device_id, s.device_name,
+            generation=self._import_generation,
+            account_identifier=self._current_account(),
+        )
         w.done.connect(lambda f, err, thr=w: self._after_import(f, err, thr))
         # thread 结束后统一清理 Python 引用 + Qt 对象
-        w.finished.connect(lambda thr=w: self._import_threads.remove(thr)
-                           if thr in self._import_threads else None)
+        w.finished.connect(lambda thr=w: self._finish_import_thread(thr))
         w.finished.connect(w.deleteLater)
         self._import_threads.append(w)
         w.start()
 
+    @staticmethod
+    def _current_account() -> str:
+        return (settings().cloud_user_email or "").strip().casefold()
+
+    def _cancel_imports(self) -> None:
+        self._import_generation += 1
+        for thread in self._import_threads:
+            thread.requestInterruption()
+
+    def _finish_import_thread(self, thread: _ImportWorker) -> None:
+        if thread in self._import_threads:
+            self._import_threads.remove(thread)
+        self._drain_orphan_imports()
+
+    def stop_imports(self, timeout_ms: int = 1500) -> bool:
+        """取消导入并在总时间预算内等待，未结束的线程继续保留引用。"""
+        if not self._closing:
+            self._closing = True
+            self._cancel_imports()
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000
+        stopped = True
+        for thread in list(self._import_threads):
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            if thread.isRunning() and not thread.wait(remaining):
+                stopped = False
+            elif thread.result is not None:
+                self._cleanup_import_result(thread.result)
+        self._drain_orphan_imports()
+        return stopped
+
     def closeEvent(self, event):
-        for thr in list(self._import_threads):
-            thr.requestInterruption()
-            thr.quit()
-            thr.wait(1500)
-        self._import_threads.clear()
+        if not self.stop_imports():
+            event.ignore()
+            return
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
         super().closeEvent(event)
 
+    def _cleanup_import_result(self, f: CloudFile) -> None:
+        self._orphan_imports[f.content_sha256] = f
+        self._drain_orphan_imports()
+
+    def _drain_orphan_imports(self) -> None:
+        # 等导入结果全部入库或取消后清理，避免删掉同内容并发导入的新副本。
+        if self._import_threads and (not self._closing
+                or any(thread.isRunning() for thread in self._import_threads)):
+            return
+        for sha, f in list(self._orphan_imports.items()):
+            try:
+                existing = self.repo.get_by_sha(sha, include_deleted=True)
+                if existing is None or (existing.is_deleted
+                        and existing.sync_state == FileSyncState.SYNCED.value):
+                    remove_from_container(sha, f.local_path)
+                self._orphan_imports.pop(sha, None)
+            except Exception:
+                logger.warning("清理过期导入副本失败", exc_info=True)
+
     def _after_import(self, f, err: str, thread: _ImportWorker):
+        if (self._closing or thread.generation != self._import_generation
+                or thread.account_identifier != self._current_account()
+                or thread.account_identifier != self._account_identifier
+                or not getattr(self.cloud_api, "is_authenticated", False)):
+            if f is not None:
+                self._cleanup_import_result(f)
+            return
+        if thread.isInterruptionRequested():
+            if f is not None:
+                self._cleanup_import_result(f)
+            return
         if err or f is None:
             QMessageBox.warning(self, "导入失败", err or "未知错误")
             return
@@ -438,6 +648,7 @@ class FileListWidget(QWidget):
         try:
             f.id = self.repo.add_file(f)
         except Exception as e:
+            self._cleanup_import_result(f)
             QMessageBox.critical(self, "保存失败", str(e))
             return
         self.model.upsert(f)
@@ -450,19 +661,32 @@ class FileListWidget(QWidget):
 
     def _can_download(self, f: CloudFile) -> bool:
         """云端有副本且本地没有——无论 state 是 REMOTE_ONLY 还是 SYNCED 但沙盒文件丢了。"""
-        return bool(f.cloud_id) and not self._has_local_copy(f)
+        return not f.is_deleted and bool(f.cloud_id) and not self._has_local_copy(f)
 
     def _on_double_click(self, index):
         f = self.model.file_at(index.row())
-        if not f:
+        if not f or f.is_deleted:
             return
         if self._has_local_copy(f):
-            try:
-                open_path = materialize_for_open(f.local_path, f.name)
-            except Exception as e:
-                logger.warning(f"准备打开路径失败，退回沙盒副本: {e}")
-                open_path = f.local_path
-            QDesktopServices.openUrl(QUrl.fromLocalFile(open_path))
+            if self._closing:
+                return
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=1)
+            local_path, name, signal = f.local_path, f.name, self._open_done
+
+            def prepare():
+                try:
+                    open_path = materialize_for_open(local_path, name)
+                    error = ""
+                except Exception as exc:
+                    logger.warning("准备打开副本失败: %s", exc)
+                    open_path, error = "", str(exc)
+                try:
+                    signal.emit(open_path, error)
+                except RuntimeError:
+                    pass
+
+            self._executor.submit(prepare)
             return
         if self._can_download(f):
             self.sync_service.enqueue_download(f.id)
@@ -473,6 +697,14 @@ class FileListWidget(QWidget):
             return
         QMessageBox.information(self, "无法打开", "本地副本缺失且云端没有可用副本。")
 
+    def _on_open_ready(self, path: str, error: str):
+        if self._closing:
+            return
+        if error or not path:
+            QMessageBox.warning(self, "无法打开", f"无法创建可编辑的临时副本：{error or '未知错误'}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
     def _on_menu(self, pos):
         idx = self.table.indexAt(pos)
         if not idx.isValid():
@@ -481,6 +713,12 @@ class FileListWidget(QWidget):
         if not f:
             return
         menu = QMenu(self)
+        if f.is_deleted:
+            if f.sync_state == FileSyncState.ERROR.value:
+                retry_act = menu.addAction("重试删除")
+                retry_act.triggered.connect(lambda: self._retry_delete(f))
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+            return
         open_act = menu.addAction("打开")
         open_act.triggered.connect(lambda: self._on_double_click(idx))
         if self._has_local_copy(f):
@@ -497,28 +735,52 @@ class FileListWidget(QWidget):
             retry_act = menu.addAction("重新上传")
             retry_act.triggered.connect(lambda: self.sync_service.enqueue_upload(f.id))
         menu.addSeparator()
-        del_act = menu.addAction("删除（本地 + 云端）")
+        del_act = menu.addAction("删除此文件（本地 + 云端）")
         del_act.triggered.connect(lambda: self._delete_file(f))
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _delete_file(self, f: CloudFile):
+        self._delete_files([f])
+
+    def _delete_selected(self):
+        files = self._selected_files()
+        for f in files:
+            if f.is_deleted and f.sync_state == FileSyncState.ERROR.value:
+                self._retry_delete(f)
+        self._delete_files([f for f in files if not f.is_deleted])
+
+    def _delete_files(self, files: list[CloudFile]):
+        if not files:
+            return
+        names = "、".join(f.name for f in files[:3])
+        if len(files) > 3:
+            names += f" 等 {len(files)} 个文件"
         reply = QMessageBox.question(
             self, "确认删除",
-            f"删除 '{f.name}'？\n本地副本和云端副本都会被清除。",
+            f"删除 {names}？\n当前账号的云端文件及本地副本都会被清除。",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        # 本地状态更新（主线程即时完成）
-        try:
-            if f.local_path and os.path.exists(f.local_path):
-                os.unlink(f.local_path)
-        except OSError:
-            pass
-        self.repo.mark_deleted(f.id)
-        self.model.remove_by_local_id(f.id)
-
-        # 交给持久化同步队列处理；失败状态会留在 DB，下次启动继续重试。
-        if f.cloud_id:
+        for f in files:
+            if not f.id or not self.repo.mark_deleted(f.id):
+                self._show_sync_status(f"无法标记 {f.name} 为待删除，请刷新列表后重试。")
+                continue
+            f.is_deleted = True
+            f.sync_state = FileSyncState.PENDING.value
+            self.model.upsert(f)
+            # 即使此刻尚无 cloud_id，也要入队：进行中的上传可能随后才取得 cloud_id。
             self.sync_service.enqueue_delete(f.id)
+        self._show_sync_status("删除请求已排队；云端确认后会释放空间。")
+        self._update_delete_button()
+
+    def _retry_delete(self, f: CloudFile):
+        if not f.id or not f.is_deleted or f.sync_state != FileSyncState.ERROR.value:
+            return
+        self.repo.set_sync_state(f.id, FileSyncState.PENDING.value)
+        f.sync_state = FileSyncState.PENDING.value
+        self.model.upsert(f)
+        self.sync_service.enqueue_delete(f.id)
+        self._show_sync_status(f"正在重试删除 {f.name}…")
+        self._update_delete_button()

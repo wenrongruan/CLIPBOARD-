@@ -50,6 +50,14 @@ class FilesClient:
         response = self._facade._request("GET", "/api/v1/files/quota")
         return response.json()
 
+    def files_list_page(self, page: int, per_page: int = 100) -> dict:
+        """列出当前登录账号的云端文件，供文件管理页补齐本地缺失的记录。"""
+        response = self._facade._request(
+            "GET", "/api/v1/files/sync",
+            params={"page": page, "per_page": per_page},
+        )
+        return response.json()
+
     def files_request_upload(self, meta: dict) -> dict:
         """请求上传位点。服务端按 size 决定单段 / multipart，并返回 presigned URL（仅 OSS）。
         meta 必须包含 name / size / sha256；可选 mime_type / device_id / device_name。
@@ -86,9 +94,10 @@ class FilesClient:
             self._facade._request("DELETE", f"/api/v1/files/{cloud_id}")
             return True
         except CloudAPIError as e:
-            # DELETE 必须幂等：重试时服务端已不存在等价于目标状态已达成。
+            # 服务端已删除的同账号文件会返回幂等成功。404 也可能表示文件属于
+            # 其他账号/团队成员，不能当作成功，否则会误清理本地副本。
             if e.status_code == 404:
-                return True
+                raise
             logger.warning(f"删除云端文件失败 (cloud_id={cloud_id}): {e}")
             return False
 

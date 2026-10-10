@@ -34,8 +34,10 @@ APP_PASSWORD="${APPLE_APP_PASSWORD:-}"
 
 APP_NAME="共享剪贴板"
 BUNDLE_ID="com.wenrongruan.sharedclipboard"
-APP_SIGN_CERT="Apple Distribution: wenrong ruan (N9B2B6LN88)"
-PKG_SIGN_CERT="3rd Party Mac Developer Installer: wenrong ruan (N9B2B6LN88)"
+# Pin the currently active identities: this account has duplicate same-name
+# certificates, and the app identity must match the embedded provisioning profile.
+APP_SIGN_CERT="${APP_SIGN_CERT:-BF57D332309E8E01D4A50F4BBB2631EE54DA7CE0}"
+PKG_SIGN_CERT="${PKG_SIGN_CERT:-148E3A8B99D188D5A7CE6D6E0BF9612F63ED8B12}"
 
 APP_BUNDLE="dist/${APP_NAME}.app"
 PKG_OUTPUT="SharedClipboard_appstore.pkg"

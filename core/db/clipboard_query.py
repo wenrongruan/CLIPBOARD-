@@ -137,7 +137,7 @@ class ClipboardQuery:
             spec.filters.append(Filter(key="is", op=Op.EQ, value="starred"))
         # 旧契约里 page 是 0-based；search() 内部兼容 0/1-based
         items = self.search(
-            spec, page=page if page else 1, page_size=page_size, space_id=space_id
+            spec, page=max(0, page) + 1, page_size=page_size, space_id=space_id
         )
         total = self._count_spec(spec, space_id=space_id)
         return items, total
@@ -312,25 +312,8 @@ class ClipboardQuery:
         has_text = bool(query_spec.keywords or query_spec.exact_phrases)
 
         def op(conn):
-            # SQLite + FTS5 可用：关键词走 FTS5 子查询
-            if has_text and self._has_fts and not self._is_mysql:
-                try:
-                    fts_expr = query_spec.fts_match_expression()
-                    where_sql = "id IN (SELECT rowid FROM clipboard_fts WHERE clipboard_fts MATCH ?)"
-                    params: List = [fts_expr]
-                    if filter_clauses:
-                        where_sql += " AND " + " AND ".join(filter_clauses)
-                        params.extend(filter_params)
-                    return self._do_select(
-                        conn, where_sql, params, limit, offset, for_count
-                    )
-                except Exception as exc:
-                    # Why 必须兜底：FTS5 的 MATCH 语法对普通输入极敏感（搜 "AND"、
-                    # "*"、"a**b" 都会抛 fts5: syntax error），异常冒泡后整个列表
-                    # 页直接报"加载失败"并清空。降级到 LIKE 语义正确性稍差但可用。
-                    logger.warning("FTS 查询失败，降级到 LIKE 搜索: %s", exc)
-
-            # FTS 不可用或无关键词：LIKE 回退 + filter
+            # unicode61 FTS 仅能匹配词首，遗漏中文中部和单字符子串。
+            # 列表与计数统一使用字面子串 LIKE；不以 FTS 零结果作为回退条件。
             like_clauses: List[str] = []
             like_params: List = []
             if has_text:
@@ -338,12 +321,14 @@ class ClipboardQuery:
                     like_clauses.append(
                         "(text_content LIKE ? ESCAPE '!' OR preview LIKE ? ESCAPE '!')"
                     )
-                    like_params.extend([self._escape_like(kw), self._escape_like(kw)])
+                    pattern = f"%{self._escape_like(kw)}%"
+                    like_params.extend([pattern, pattern])
                 for phrase in query_spec.exact_phrases:
                     like_clauses.append(
                         "(text_content LIKE ? ESCAPE '!' OR preview LIKE ? ESCAPE '!')"
                     )
-                    like_params.extend([self._escape_like(phrase), self._escape_like(phrase)])
+                    pattern = f"%{self._escape_like(phrase)}%"
+                    like_params.extend([pattern, pattern])
 
             all_clauses = like_clauses + filter_clauses
             where_sql = " AND ".join(all_clauses) if all_clauses else ""

@@ -3,12 +3,26 @@ import time
 import random
 import logging
 import threading
+import weakref
 from typing import Callable, Any
 from contextlib import contextmanager
 
 from .base_database import AbstractDatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+class _ThreadConnectionCleanup:
+    """thread-local 容器在线程退出时释放，及时关闭该线程的连接。"""
+
+    def __init__(self, manager, conn):
+        self._manager = weakref.ref(manager)
+        self._conn = conn
+
+    def __del__(self):
+        manager = self._manager()
+        if manager is not None:
+            manager._discard_thread_conn(self._conn)
 
 try:
     import pymysql
@@ -372,15 +386,15 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
 
     def _discard_thread_conn(self, conn) -> None:
         """关闭并从池中移除一个已失效连接；单独封装让 _get_thread_conn 主路径平直。"""
-        try:
-            conn.close()
-        except Exception:
-            pass
         with self._conns_lock:
             try:
                 self._all_conns.remove(conn)
             except ValueError:
-                pass
+                return
+        try:
+            conn.close()
+        except Exception:
+            logger.debug("关闭 MySQL 线程连接失败", exc_info=True)
 
     def _get_thread_conn(self) -> "pymysql.connections.Connection":
         """返回当前线程独占的 connection；首次访问或连接失效时创建。
@@ -406,6 +420,7 @@ class MySQLDatabaseManager(AbstractDatabaseManager):
         self._tls.last_ping_ts = time.monotonic()
         with self._conns_lock:
             self._all_conns.append(new_conn)
+        self._tls.cleanup = _ThreadConnectionCleanup(self, new_conn)
         return new_conn
 
     @contextmanager

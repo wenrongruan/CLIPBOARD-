@@ -34,6 +34,8 @@ class _FakeFileSyncService(QObject):
     download_progress = Signal(int, int, int)
     upload_finished = Signal(int, bool, str)
     download_finished = Signal(int, bool, str)
+    delete_finished = Signal(int, bool, str)
+    inventory_finished = Signal(int, bool, str)
     sync_error = Signal(str, int)
 
     def __init__(self):
@@ -42,6 +44,9 @@ class _FakeFileSyncService(QObject):
 
     def start(self):
         self.started = True
+
+    def refresh_inventory(self):
+        return self.started
 
 
 class _FakeEntitlement(QObject):
@@ -84,8 +89,9 @@ class _FakeCloudSyncService(QObject):
     def enqueue_upload(self, item):
         self.enqueued.append(item)
 
-    def stop(self):
+    def stop(self, timeout_ms=3000):
         self.stopped = True
+        return True
 
 
 @pytest.fixture(scope="module")
@@ -145,12 +151,16 @@ def test_open_files_starts_manual_sync_with_background_switch_off(qapp, monkeypa
     ctx = SimpleNamespace(repository=parent.repository, entitlement_service=None)
     entitlement = _FakeEntitlement()
     sync_service = _FakeFileSyncService()
-    monkeypatch.setattr(cloud_module, "settings", lambda: SimpleNamespace(files_sync_enabled=False))
+    monkeypatch.setattr(
+        cloud_module,
+        "settings",
+        lambda: SimpleNamespace(files_sync_enabled=False, cloud_user_email="owner@example.com"),
+    )
     monkeypatch.setattr(
         "core.entitlement_service.get_entitlement_service", lambda **_kw: entitlement
     )
     monkeypatch.setattr(
-        "core.file_repository.CloudFileRepository", lambda _db: _FakeFileRepository()
+        "core.file_repository.CloudFileRepository", lambda _db, **_kw: _FakeFileRepository()
     )
     monkeypatch.setattr(
         "core.file_sync_service.FileCloudSyncService", lambda *_args: sync_service

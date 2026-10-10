@@ -791,6 +791,17 @@ class CloudSyncService(QObject):
             logger.debug(f"CloudSyncService.start 被忽略,当前状态: {self._state.value}")
             return
 
+        if (self._worker_thread.isRunning()
+                and self._worker_thread.isInterruptionRequested()
+                and not self._worker_thread.wait(3000)):
+            logger.warning("云端同步 worker 仍在停止中，稍后重试启动")
+            return
+        if not self._worker_thread.isRunning():
+            self._worker_thread.start()
+        self._pulling_spaces.clear()
+        self._pushing_spaces.clear()
+        self._pulling = self._pushing = False
+
         self._transition(CloudSyncState.RUNNING)
 
         # 注册设备
@@ -819,29 +830,24 @@ class CloudSyncService(QObject):
             self._worker, "do_starred_sync", Qt.QueuedConnection,
         )
 
-    def stop(self):
+    def stop(self, timeout_ms: int = 3000) -> bool:
         """停止云端同步服务"""
-        was_running = self._state != CloudSyncState.STOPPED
         self._transition(CloudSyncState.STOPPED)
         self._pull_timer.stop()
         self._push_timer.stop()
-        if was_running:
-            # 退出时落盘游标（改走 app_meta，单条 key-value 比全量 settings 便宜）
-            self._persist_cursor()
+        # 非阻塞停止后的最终退出也需落盘末次回调推进的游标。
+        self._persist_cursor()
 
         if self._worker_thread.isRunning():
             # 请求中断，让 worker 安全退出
             self._worker_thread.requestInterruption()
             self._worker_thread.quit()
-            if not self._worker_thread.wait(3000):
-                logger.warning("云端同步 worker 线程未在 3s 内退出，触发 terminate 兜底")
-                try:
-                    self._worker_thread.terminate()
-                    self._worker_thread.wait()
-                except Exception as e:
-                    logger.debug(f"terminate worker 线程失败（忽略）: {e}")
+            if not self._worker_thread.wait(max(0, timeout_ms)):
+                logger.warning("云端同步 worker 仍在退出，等待当前任务完成")
+                return False
 
         logger.info("云端同步服务已停止")
+        return True
 
     def __del__(self):
         """析构兜底：绝不让运行中的 worker QThread 随对象一起析构。"""
@@ -849,9 +855,7 @@ class CloudSyncService(QObject):
             t = self.__dict__.get("_worker_thread")
             if t is not None and t.isRunning():
                 t.quit()
-                if not t.wait(2000):
-                    t.terminate()
-                    t.wait()
+                t.wait()
         except Exception:
             pass
 
@@ -896,7 +900,8 @@ class CloudSyncService(QObject):
     def _on_device_registered(self) -> None:
         """worker 线程设备注册成功后，在主线程（QueuedConnection）写入标志位。
         使用具名槽替代 lambda，避免 lambda 强引用 self 阻止 GC。"""
-        self._device_registered = True
+        if self._state != CloudSyncState.STOPPED:
+            self._device_registered = True
 
     def _register_device(self):
         """向云端注册当前设备（在工作线程执行，避免阻塞启动）"""
@@ -934,6 +939,8 @@ class CloudSyncService(QObject):
     def _on_pull_done(self, space_key, new_items: list, max_server_id: int):
         """拉取完成回调（主线程）。
         游标以节流方式增量落盘（每 N 次或每 T 秒任一触发），stop()/atexit 兜底。"""
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._pulling_spaces.discard(space_key)
         self._pulling = bool(self._pulling_spaces)
         cursor_advanced = False
@@ -967,6 +974,8 @@ class CloudSyncService(QObject):
     @Slot(object, str, int)
     def _on_pull_error(self, space_key, message: str, status_code: int):
         """拉取失败回调(主线程)"""
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._pulling_spaces.discard(space_key)
         self._pulling = bool(self._pulling_spaces)
         if status_code == 401:
@@ -989,6 +998,8 @@ class CloudSyncService(QObject):
     @Slot(list)
     def _on_spaces_pulled(self, spaces: list):
         """list_spaces 成功后的回调：更新 _known_spaces，落盘，发 signal 给 UI/SpaceService。"""
+        if self._state == CloudSyncState.STOPPED:
+            return
         try:
             ids = [None]
             for sp in spaces or []:
@@ -1131,6 +1142,8 @@ class CloudSyncService(QObject):
         Why 键带 space 维度：同一 content_hash 可能同时存在于个人和团队空间，
         只按 hash 放弃会让另一个空间的同内容条目也永远不入上传队列。
         """
+        if self._state == CloudSyncState.STOPPED:
+            return
         scope = space_key or ""
         for h in hashes or []:
             if not h:
@@ -1148,6 +1161,8 @@ class CloudSyncService(QObject):
     @Slot(object, int)
     def _on_push_done(self, space_key, uploaded_count: int):
         """推送完成回调（主线程）"""
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._pushing_spaces.discard(space_key)
         self._pushing = bool(self._pushing_spaces)
         self.upload_completed.emit(uploaded_count)
@@ -1158,6 +1173,8 @@ class CloudSyncService(QObject):
     @Slot(object, str, int, list)
     def _on_push_error(self, space_key, message: str, status_code: int, failed_batch: list):
         """推送失败回调（主线程）"""
+        if self._state == CloudSyncState.STOPPED:
+            return
         self._pushing_spaces.discard(space_key)
         self._pushing = bool(self._pushing_spaces)
         logger.error(f"云端推送失败 (space={space_key}): {message}")

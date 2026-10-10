@@ -31,9 +31,11 @@ class SubscriptionWidget(QWidget):
     logout_completed = QtSignal()  # 退出登录完成信号
     _subscription_loaded = QtSignal(object)  # 后台线程加载完成信号
 
-    def __init__(self, cloud_api: CloudAPIClient, parent=None):
+    def __init__(self, cloud_api: CloudAPIClient, parent=None, before_auth_change=None):
         super().__init__(parent)
         self.cloud_api = cloud_api
+        self._before_auth_change = before_auth_change
+        self._auth_changing = False
         self._executor: ThreadPoolExecutor | None = None
         self._subscription_loaded.connect(self._on_subscription_loaded)
         self._setup_ui()
@@ -202,6 +204,8 @@ class SubscriptionWidget(QWidget):
         self.devices_label.setText("已注册设备: --")
 
     def _load_subscription(self):
+        if self._auth_changing:
+            return
         """加载订阅信息（HTTP 请求在后台线程执行）"""
         if not self.cloud_api.is_authenticated:
             self._reset_to_logged_out()
@@ -241,7 +245,7 @@ class SubscriptionWidget(QWidget):
                 pct = min(100, int(ent.files_used_bytes * 100 / max(1, ent.files_quota_bytes)))
                 self.files_usage_progress.setValue(pct)
             else:
-                self.files_count_label.setText("仅 Basic / Super / Ultimate 可用")
+                self.files_count_label.setText("仅 Basic / Super / Ultimate / Team 可用")
         except Exception as e:
             logger.debug(f"本地 entitlement 预填失败: {e}")
 
@@ -347,7 +351,7 @@ class SubscriptionWidget(QWidget):
                     f"QProgressBar::chunk{{background-color:{color};border-radius:4px;}}"
                 )
             else:
-                self.files_count_label.setText("仅 Basic / Super / Ultimate 可用")
+                self.files_count_label.setText("仅 Basic / Super / Ultimate / Team 可用")
                 self.files_usage_progress.setValue(0)
 
         except CloudAPIError as e:
@@ -381,6 +385,16 @@ class SubscriptionWidget(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        self._auth_changing = True
+        self.setEnabled(False)
+        if self._before_auth_change is not None:
+            self._before_auth_change(self._finish_logout)
+        else:
+            self._finish_logout()
+
+    def _finish_logout(self):
+        self.setEnabled(True)
+
         try:
             self.cloud_api.logout()
         except Exception as e:
@@ -398,8 +412,10 @@ class SubscriptionWidget(QWidget):
                 QMessageBox.No,
             )
             if force_reply != QMessageBox.Yes:
+                self._auth_changing = False
                 return
             self._reset_to_logged_out()
+            self._auth_changing = False
             self.logout_completed.emit()
             QMessageBox.information(
                 self,
@@ -409,6 +425,7 @@ class SubscriptionWidget(QWidget):
             return
 
         self._reset_to_logged_out()
+        self._auth_changing = False
         self.logout_completed.emit()
 
         QMessageBox.information(self, "提示", "已退出云端账户，重启应用后生效。")

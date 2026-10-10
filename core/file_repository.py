@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import List, Optional
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class CloudFileRepository:
+    _ACCOUNT_SCOPE_META_KEY = "cloud_files_account_scope_v1"
     _SELECT_FIELDS = (
         "id, cloud_id, name, original_path, local_path, size_bytes, "
         "mime_type, content_sha256, mtime, device_id, device_name, "
@@ -28,9 +30,92 @@ class CloudFileRepository:
         "created_at, is_deleted, sync_state, last_error, NULL as bookmark"
     )
 
-    def __init__(self, db_manager: AbstractDatabaseManager):
+    def __init__(
+        self,
+        db_manager: AbstractDatabaseManager,
+        account_identifier: str = "",
+    ):
         self.db = db_manager
         self._is_mysql = db_manager.is_mysql
+        if account_identifier:
+            self.bind_account(account_identifier)
+
+    def bind_account(self, account_identifier: str) -> bool:
+        """把本地文件索引绑定到当前云账号。
+
+        文件 API 在服务端按 user_id 隔离；本地数据库也必须遵守同一边界，
+        否则同一台 Mac 切换账号后会短暂显示上一账号的文件。首次升级没有旧
+        账号标记时保留现有索引并归属当前账号，之后账号变化会清空旧索引与缓存。
+        返回值表示是否发生了账号切换清理。
+        """
+        normalized = (account_identifier or "").strip().casefold()
+        if not normalized:
+            return False
+        scope = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+        key_col = "`key`" if self._is_mysql else "key"
+        value_col = "`value`" if self._is_mysql else "value"
+
+        def op(conn):
+            row = self.db.fetch_one(
+                conn,
+                f"SELECT {value_col} FROM app_meta WHERE {key_col} = ?",
+                (self._ACCOUNT_SCOPE_META_KEY,),
+            )
+            current = None
+            if row is not None:
+                current = row.get("value") if isinstance(row, dict) else row[0]
+
+            if current == scope:
+                return False, []
+
+            stale_files = []
+            if current:
+                rows = self.db.fetch_all(
+                    conn,
+                    "SELECT content_sha256, local_path FROM cloud_files",
+                    (),
+                )
+                for stale in rows:
+                    if isinstance(stale, dict):
+                        stale_files.append(
+                            (stale.get("content_sha256") or "", stale.get("local_path") or "")
+                        )
+                    else:
+                        stale_files.append((stale[0] or "", stale[1] or ""))
+                self.db.execute_write(conn, "DELETE FROM cloud_file_upload_parts", ())
+                self.db.execute_write(conn, "DELETE FROM cloud_files", ())
+                self.db.execute_write(
+                    conn,
+                    f"DELETE FROM app_meta WHERE {key_col} = ?",
+                    ("files_last_change_id",),
+                )
+
+            if row is None:
+                self.db.execute_write(
+                    conn,
+                    f"INSERT INTO app_meta ({key_col}, {value_col}) VALUES (?, ?)",
+                    (self._ACCOUNT_SCOPE_META_KEY, scope),
+                )
+            else:
+                self.db.execute_write(
+                    conn,
+                    f"UPDATE app_meta SET {value_col} = ? WHERE {key_col} = ?",
+                    (scope, self._ACCOUNT_SCOPE_META_KEY),
+                )
+            return bool(current), stale_files
+
+        switched, stale_files = self.db.execute_with_retry(op)
+        if switched:
+            from .file_storage import remove_from_container
+
+            for sha, local_path in stale_files:
+                try:
+                    remove_from_container(sha, local_path)
+                except (TypeError, ValueError):
+                    logger.debug("忽略无效的旧账号文件缓存记录", exc_info=True)
+            logger.info("云文件本地索引已切换到当前账号")
+        return switched
 
     # ========== Files CRUD ==========
 

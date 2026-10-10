@@ -81,6 +81,10 @@ class ClipboardMonitor(QObject):
         self._add_counter = 0  # 计数器，每 50 次 add 才清理
         self._counter_lock = threading.Lock()  # 保护 _add_counter 在主线程和图片后台线程的并发访问
         self._image_executor = ThreadPoolExecutor(max_workers=1)
+        self._image_executor_stopped = False
+        self._image_lock = threading.Lock()
+        self._pending_image_hashes = set()
+        self._image_generation = 0
         self._consecutive_failures = 0
         self._unhealthy_notified = False
         self._signal_connected = False
@@ -105,6 +109,9 @@ class ClipboardMonitor(QObject):
 
     def start(self):
         if not self._monitoring:
+            if self._image_executor_stopped:
+                self._image_executor = ThreadPoolExecutor(max_workers=1)
+                self._image_executor_stopped = False
             self._monitoring = True
             # 记录当前剪贴板内容，避免启动时重复保存
             self._last_text = self.clipboard.text()
@@ -138,9 +145,14 @@ class ClipboardMonitor(QObject):
                 except (TypeError, RuntimeError):
                     pass
                 self._signal_connected = False
-            # wait=False 避免与后台任务通过 QTimer 投递主线程产生死锁
-            self._image_executor.shutdown(wait=False)
             logger.info("剪贴板监控已停止")
+        if not self._image_executor_stopped:
+            # wait=False 避免与后台任务通过 QTimer 投递主线程产生死锁。
+            self._image_executor.shutdown(wait=False, cancel_futures=True)
+            self._image_executor_stopped = True
+            with self._image_lock:
+                self._image_generation += 1
+                self._pending_image_hashes.clear()
 
     def _poll_clipboard(self):
         if not self._monitoring:
@@ -211,9 +223,8 @@ class ClipboardMonitor(QObject):
         if text == self._last_text:
             return
 
-        self._last_text = text
-
         if s.max_text_length > 0 and len(text) > s.max_text_length:
+            self._last_text = text
             logger.info(f"文本超过最大长度限制 ({len(text)} > {s.max_text_length})，跳过")
             return
 
@@ -232,6 +243,7 @@ class ClipboardMonitor(QObject):
         if existing and existing.id:
             try:
                 self.repository.touch_item(existing.id, now_ms)
+                self._last_text = text
                 existing.created_at = now_ms
                 self.item_added.emit(existing)
             except Exception as e:
@@ -243,6 +255,7 @@ class ClipboardMonitor(QObject):
             self._source_app_seen_failures,
         )
         if self._is_excluded(source_app_value, s):
+            self._last_text = text
             return
 
         item = TextClipboardItem(
@@ -259,6 +272,7 @@ class ClipboardMonitor(QObject):
         try:
             item_id = self.repository.add_item(item)
             item.id = item_id
+            self._last_text = text
 
             self._maybe_cleanup()
 
@@ -298,10 +312,10 @@ class ClipboardMonitor(QObject):
 
         raw_bytes = self._rgba_bytes(image, width, height, bytes_per_line)
         full_hash = compute_content_hash(raw_bytes)
-        if fast_hash == self._last_image_hash and full_hash == self._last_image_full_hash:
-            return
-        self._last_image_hash = fast_hash
-        self._last_image_full_hash = full_hash
+        with self._image_lock:
+            if ((fast_hash == self._last_image_hash and full_hash == self._last_image_full_hash)
+                    or full_hash in self._pending_image_hashes):
+                return
 
         # Why: 在主线程（信号触发点）捕获来源 App，保证拿到的是"复制瞬间"的前台窗口，
         # 而不是后台线程真正处理到这张图时的前台窗口。
@@ -313,10 +327,33 @@ class ClipboardMonitor(QObject):
             return
 
         logger.info(f"检测到新图片: {width}x{height}，提交后台处理")
-        self._image_executor.submit(
-            self._process_image_background, raw_bytes, width, height, s,
-            source_app_value, source_title_value,
-        )
+        with self._image_lock:
+            generation = self._image_generation
+            self._pending_image_hashes.add(full_hash)
+        try:
+            future = self._image_executor.submit(
+                self._process_image_background, raw_bytes, width, height, s,
+                source_app_value, source_title_value, generation,
+            )
+        except Exception:
+            with self._image_lock:
+                self._pending_image_hashes.discard(full_hash)
+            raise
+
+        def finished(result):
+            try:
+                succeeded = result.result()
+            except Exception:
+                succeeded = False
+            with self._image_lock:
+                if generation != self._image_generation:
+                    return
+                self._pending_image_hashes.discard(full_hash)
+                if succeeded:
+                    self._last_image_hash = fast_hash
+                    self._last_image_full_hash = full_hash
+
+        future.add_done_callback(finished)
 
     @staticmethod
     def _rgba_bytes(image: QImage, width: int, height: int, bytes_per_line: int) -> bytes:
@@ -362,7 +399,8 @@ class ClipboardMonitor(QObject):
         self.error_occurred.emit(msg)
 
     def _process_image_background(self, raw_bytes: bytes, width: int, height: int, s,
-                                   source_app_value: str = "", source_title_value: str = ""):
+                                   source_app_value: str = "", source_title_value: str = "",
+                                   generation=None):
         """后台线程：PNG 编码、缩略图生成、数据库写入"""
         try:
             # 延迟导入 PIL 和 image_utils，缩短冷启动时间，且仅在后台线程首次使用时加载
@@ -373,13 +411,19 @@ class ClipboardMonitor(QObject):
             image_data = image_to_bytes(pil_img, format="PNG")
 
             if not image_data:
-                return
+                return False
+
+            with self._image_lock:
+                if generation is not None and generation != self._image_generation:
+                    return False
 
             self._persist_image(image_data, s, source_app_value, source_title_value)
+            return True
 
         except Exception as e:
             logger.error(f"后台处理图片失败: {e}")
             self._threadsafe_emit_error_occurred(f"图片保存失败: {e}")
+            return False
 
     def persist_image_bytes(
         self,
@@ -438,6 +482,7 @@ class ClipboardMonitor(QObject):
                 self._threadsafe_emit_item_added(existing)
             except Exception as e:
                 logger.warning(f"重复图片置顶失败: {e}")
+                raise
             return existing
 
         try:

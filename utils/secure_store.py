@@ -254,6 +254,7 @@ def delete_credential(key: str):
         except Exception as e:
             _log_keyring_error("删除", key, e, fallback_level=logging.DEBUG)
     _write_to_config(key, "")
+    _clear_legacy_key(key)
 
 
 def _write_to_config(key: str, value: str):

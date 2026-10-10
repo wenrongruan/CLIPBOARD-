@@ -248,8 +248,13 @@ class ClipboardListController(QObject):
         del victim
 
     def on_item_added(self, item: ClipboardItem):
-        if self._current_page == 0 and not self._search_query and not self._starred_only:
+        if (self._current_page == 0 and not self._search_query
+                and not self._starred_only and not self._current_tag_id
+                and self._current_space_id is None):
             self.prepend_item(item)
+            timeline = getattr(self._parent, "timeline_view", None)
+            if self._view_mode == "timeline" and timeline is not None:
+                timeline.set_items(self._items)
         elif self._current_page == 0 and not self._search_query:
             self.load_items()
         try:

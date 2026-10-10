@@ -53,10 +53,13 @@ class ShareLinkDialog(QDialog):
         share_service,
         space_id: Optional[str] = None,
         parent=None,
+        repository=None,
     ):
         super().__init__(parent)
         self._items = list(items or [])
         self._share_service = share_service
+        self._repository = (repository or getattr(parent, "repository", None)
+                            or getattr(share_service, "_repo", None))
         # Service 侧约定 space_id 是字符串；None 统一转成 ""
         self._space_id = space_id or ""
         self._result: Optional[dict] = None
@@ -184,12 +187,23 @@ class ShareLinkDialog(QDialog):
         checked = self._expiry_group.checkedButton()
         seconds = int(checked.property("seconds") or 86400) if checked else 86400
 
-        item_ids = [i.id for i in self._items if i.id is not None]
-        if not item_ids:
-            QMessageBox.warning(self, "无法分享", "没有可分享的条目（item_id 为空）。")
-            return
-
         try:
+            if not self._items:
+                raise ValueError("没有可分享的条目")
+            if not self._space_id:
+                raise ValueError("请选择云端空间后再创建分享链接")
+            if any((item.space_id or "") != self._space_id for item in self._items):
+                raise ValueError("所选条目必须全部属于当前目标空间")
+            local_ids = [item.id for item in self._items if item.id is not None]
+            mapping = None
+            if self._repository is not None:
+                mapping = self._repository.get_cloud_ids_for_ids(local_ids)
+            item_ids = [
+                mapping.get(item.id) if mapping is not None else item.cloud_id
+                for item in self._items
+            ]
+            if any(not isinstance(cloud_id, int) or cloud_id <= 0 for cloud_id in item_ids):
+                raise ValueError("请等待所有选中条目完成云端同步后再分享")
             result = self._share_service.create_share_link(
                 space_id=self._space_id,
                 item_ids=item_ids,
@@ -203,7 +217,7 @@ class ShareLinkDialog(QDialog):
         self._result = result or {}
         url = str(self._result.get("share_url") or "")
         token = str(self._result.get("token") or "")
-        display = url or (f"token: {token}" if token else "")
+        display = url
         if not display:
             QMessageBox.warning(self, "创建失败", "云端未返回有效链接。")
             return

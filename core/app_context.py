@@ -67,6 +67,8 @@ class AppContext:
         ctx = cls()
 
         # ---------- 基础 ----------
+        from core.file_storage import cleanup_legacy_open_views
+        cleanup_legacy_open_views()
         ctx.db = create_database_manager()
         ctx.repository = ClipboardRepository(ctx.db)
         ctx.clipboard_monitor = ClipboardMonitor(ctx.repository)
@@ -85,7 +87,11 @@ class AppContext:
                 try:
                     from core.file_repository import CloudFileRepository
 
-                    ctx.file_repository = CloudFileRepository(ctx.db)
+                    from config import settings
+                    ctx.file_repository = CloudFileRepository(
+                        ctx.db,
+                        account_identifier=settings().cloud_user_email,
+                    )
                 except Exception as ent_err:
                     logger.warning(f"文件云同步初始化失败: {ent_err}", exc_info=True)
                     ctx.file_repository = None
@@ -131,6 +137,9 @@ class AppContext:
                 if self.clipboard_monitor:
                     try:
                         self.clipboard_monitor.stop()
+                        executor = getattr(self.clipboard_monitor, "_image_executor", None)
+                        if executor is not None:
+                            executor.shutdown(wait=True, cancel_futures=True)
                     except Exception:
                         logger.exception("clipboard_monitor.stop() 异常")
                 if self.sync_service:
@@ -140,20 +149,30 @@ class AppContext:
                         logger.exception("sync_service.stop() 异常")
                 if self.cloud_sync_service:
                     try:
-                        self.cloud_sync_service.stop()
+                        if self.cloud_sync_service.stop() is False:
+                            self.cloud_sync_service._worker_thread.wait()
                     except Exception:
                         logger.exception("cloud_sync_service.stop() 异常")
                 if self.file_sync_service:
                     try:
-                        self.file_sync_service.stop()
+                        if self.file_sync_service.stop() is False:
+                            self.file_sync_service._worker_thread.wait()
                     except Exception:
                         logger.exception("file_sync_service.stop() 异常")
                 if self.plugin_manager:
                     try:
+                        self.plugin_manager.cancel_action()
+                        for worker in self.plugin_manager.active_workers():
+                            worker.wait()
                         # PluginManager 用 unload_all() 释放插件，没有 shutdown()
                         self.plugin_manager.unload_all()
                     except Exception:
                         logger.exception("plugin_manager.unload_all() 异常")
+                if self.entitlement_service:
+                    try:
+                        self.entitlement_service.wait_for_refresh()
+                    except Exception:
+                        logger.exception("entitlement_service.wait_for_refresh() 异常")
                 try:
                     from core.cloud_api import reset_cloud_client
                     reset_cloud_client()

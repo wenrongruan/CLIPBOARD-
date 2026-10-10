@@ -40,6 +40,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         # ctx 优先；任何显式 kwarg 为 None 时尝试从 ctx 兜底
         self.ctx = ctx
+        controller = getattr(parent, "cloud_controller", None)
+        self._before_auth_change = getattr(controller, "prepare_auth_change", None)
         if ctx is not None:
             if plugin_manager is None:
                 plugin_manager = getattr(ctx, "plugin_manager", None)
@@ -97,6 +99,7 @@ class SettingsDialog(QDialog):
         self.cloud_tab = CloudTab(
             ctx=self.ctx, parent=self,
             cloud_api=self._cloud_api, plugin_manager=self._plugin_manager,
+            before_auth_change=self._before_auth_change,
         )
         self.cloud_tab.cloud_api_changed.connect(self._on_cloud_api_changed)
         self._tab_name_to_index["cloud"] = tab_widget.addTab(self.cloud_tab, "云端同步")
@@ -140,7 +143,26 @@ class SettingsDialog(QDialog):
 
     # ---- OK / Cancel ----
 
+    def _auth_busy(self):
+        login = getattr(self.cloud_tab, "_cloud_login_widget", None)
+        subscription = getattr(self.cloud_tab, "_subscription_widget", None)
+        return bool((login is not None and login._login_in_flight)
+                    or (subscription is not None and subscription._auth_changing))
+
+    def reject(self):
+        if self._auth_busy():
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        if self._auth_busy():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def _on_accept(self):
+        if self._auth_busy():
+            return
         # 1) DatabaseTab 校验 MySQL（连通性 + api 公共库探测）+ 写入 keyring
         if not self.database_tab.validate_and_persist_on_accept():
             return

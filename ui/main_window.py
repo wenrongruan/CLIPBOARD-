@@ -243,6 +243,12 @@ class MainWindow(EdgeHiddenWindow):
         self.list_controller.item_save_requested.connect(self.item_controller.on_item_save)
         self.list_controller.cloud_delete_requested.connect(self.item_controller.on_cloud_delete)
         self.list_controller.image_url_copy_requested.connect(self.item_controller.on_image_url_copy)
+        if self.timeline_view is not None:
+            self.timeline_view.item_delete_requested.connect(self.item_controller.on_item_delete)
+            self.timeline_view.item_star_requested.connect(self.item_controller.on_item_star)
+            self.timeline_view.item_save_requested.connect(self.item_controller.on_item_save)
+            self.timeline_view.cloud_delete_requested.connect(self.item_controller.on_cloud_delete)
+            self.timeline_view.image_url_copy_requested.connect(self.item_controller.on_image_url_copy)
 
         # 插件信号
         if self.plugin_manager:

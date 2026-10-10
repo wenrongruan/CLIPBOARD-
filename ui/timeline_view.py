@@ -41,6 +41,11 @@ class TimelineView(QWidget):
 
     item_clicked = Signal(int)                   # item_id
     item_context_menu = Signal(int, QPoint)      # item_id, global pos
+    item_delete_requested = Signal(object)
+    item_star_requested = Signal(object)
+    item_save_requested = Signal(object)
+    cloud_delete_requested = Signal(object)
+    image_url_copy_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -165,6 +170,11 @@ class TimelineView(QWidget):
             item_id = item.id
             if item_id is not None:
                 row.clicked.connect(lambda it, iid=item_id: self.item_clicked.emit(iid))
+            row.delete_clicked.connect(self.item_delete_requested)
+            row.star_clicked.connect(self.item_star_requested)
+            row.save_clicked.connect(self.item_save_requested)
+            row.cloud_delete_clicked.connect(self.cloud_delete_requested)
+            row.image_url_clicked.connect(self.image_url_copy_requested)
             # 右键菜单：用 row 的 customContextMenu 复用起来比较重，直接
             # 借用 contextMenuEvent 不太好；这里只用 item_clicked 即可，
             # 右键菜单由上层 MainWindow 的列表视图提供。

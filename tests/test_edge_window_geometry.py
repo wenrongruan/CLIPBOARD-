@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
 import ui.edge_window as ew
 
@@ -202,6 +202,53 @@ def test_pinned_window_does_not_slide_out(env):
     env.pos_value = QPoint(PHYS.center().x(), PHYS.center().y())
     w._check_mouse_position()
     assert w._is_visible is True
+
+
+def test_active_window_slides_out_when_mouse_leaves(env, monkeypatch):
+    """macOS 上鼠标离开不会让工具窗口失焦，轮询仍须收回。"""
+    w = _make_window("left", visible=True)
+    monkeypatch.setattr(w, "isActiveWindow", lambda: True)
+    env.pos_value = QPoint(PHYS.center().x(), PHYS.center().y())
+
+    w._check_mouse_position()
+
+    assert w._is_visible is False
+    assert w._animation.endValue() == w._get_hidden_geometry(AVAIL)
+
+
+def test_delayed_leave_hides_active_window(env, monkeypatch):
+    """热键唤出后确实离开窗口时，即使仍激活也要收回。"""
+    w = _make_window("left", visible=True)
+    w._summoned = True
+    monkeypatch.setattr(w, "isActiveWindow", lambda: True)
+    env.pos_value = QPoint(PHYS.center().x(), PHYS.center().y())
+
+    w._check_should_hide()
+
+    assert w._is_visible is False
+
+
+def test_summoned_window_stays_open_until_pointer_has_entered(env):
+    w = _make_window("left", visible=True)
+    w._summoned = True
+    env.pos_value = QPoint(PHYS.center().x(), PHYS.center().y())
+
+    w._check_mouse_position()
+
+    assert w._is_visible is True
+
+
+def test_child_dialog_keeps_parent_window_open(env):
+    w = _make_window("left", visible=True)
+    dialog = QDialog(w)
+    dialog.show()
+    env.pos_value = QPoint(PHYS.center().x(), PHYS.center().y())
+
+    w._check_mouse_position()
+    w._check_should_hide()
+
+    assert w._is_visible is True
+    dialog.close()
 
 
 # ---------- 4. 窗口尺寸取真实值而不是 QWidget 默认值 ----------

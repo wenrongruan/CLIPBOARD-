@@ -34,7 +34,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name "SharedClipboard" --icon "NONE" --add-data "core;core" --add-data "ui;ui" --add-data "utils;utils" --add-data "sql;sql" --add-data "i18n_strings;i18n_strings" --hidden-import "PySide6.QtCore" --hidden-import "PySide6.QtGui" --hidden-import "PySide6.QtWidgets" --hidden-import "PIL" main.py
+          pyinstaller --onefile --windowed --name "SharedClipboard" --icon "NONE" --add-data "core;core" --add-data "ui;ui" --add-data "utils;utils" --add-data "sql;sql" --add-data "i18n_strings;i18n_strings" --add-data "plugins;plugins" --hidden-import "PySide6.QtCore" --hidden-import "PySide6.QtGui" --hidden-import "PySide6.QtWidgets" --hidden-import "PIL" main.py
 
       - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
@@ -73,6 +73,7 @@ jobs:
             --add-data "utils:utils" \
             --add-data "sql:sql" \
             --add-data "i18n_strings:i18n_strings" \
+            --add-data "plugins:plugins" \
             --hidden-import "PySide6.QtCore" \
             --hidden-import "PySide6.QtGui" \
             --hidden-import "PySide6.QtWidgets" \
@@ -82,8 +83,8 @@ jobs:
             --hidden-import "Cocoa" \
             --hidden-import "Quartz" \
             main.py
-          # 替换 Info.plist 以隐藏 Dock 图标 (LSUIElement)
-          cp Info.plist "dist/共享剪贴板.app/Contents/Info.plist"
+          # 合并应用配置，保留 PyInstaller 生成的启动入口
+          python scripts/merge_bundle_plist.py "dist/共享剪贴板.app" Info.plist
 
       - name: Sign and prepare app
         run: |
@@ -161,6 +162,7 @@ jobs:
             --add-data "icons:icons" \
             --add-data "sql:sql" \
             --add-data "i18n_strings:i18n_strings" \
+            --add-data "plugins:plugins" \
             --hidden-import "PySide6.QtCore" \
             --hidden-import "PySide6.QtGui" \
             --hidden-import "PySide6.QtWidgets" \

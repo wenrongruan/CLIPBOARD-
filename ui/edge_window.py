@@ -4,7 +4,10 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, QTimer, QPoint, Slot, QEvent
 from PySide6.QtGui import QCursor, QScreen, QMouseEvent
-from PySide6.QtWidgets import QWidget, QApplication
+from PySide6.QtWidgets import (
+    QWidget, QApplication, QAbstractButton, QAbstractItemView, QAbstractSlider,
+    QAbstractSpinBox, QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
+)
 
 from config import (
     settings,
@@ -391,13 +394,9 @@ class EdgeHiddenWindow(QWidget):
         else:
             if self._is_visible and not self._is_pinned:
                 if not self.geometry().contains(cursor_pos):
-                    if self.isActiveWindow():
-                        return
-                    # 显式唤出后不因"鼠标不在窗口里"而滑出（activateWindow 在
-                    # 应用非前台时可能失败，所以不能只靠 isActiveWindow 兜底）。
-                    # 收回路径：用户进入过窗口（enterEvent 清标）或点击了别的
-                    # 应用（changeEvent 失焦清标），之后恢复常规自动隐藏。
-                    if self._summoned:
+                    # 热键/托盘唤出后，等用户进入窗口或切换应用再恢复自动收回。
+                    # 窗口保持激活不等于鼠标仍在窗口内，macOS 上尤其如此。
+                    if self._summoned or self._has_visible_child_window():
                         return
                     self._slide_out()
 
@@ -492,10 +491,15 @@ class EdgeHiddenWindow(QWidget):
             QTimer.singleShot(300, self._check_should_hide)
         super().leaveEvent(event)
 
+    def _has_visible_child_window(self) -> bool:
+        # 设置、引导等子窗口打开时，主面板仍是它们的父窗口，不能把父窗口滑走。
+        return any(child.isWindow() and child.isVisible()
+                   for child in self.findChildren(QWidget))
+
     def _check_should_hide(self):
-        if self._is_pinned or self._show_protection:
-            return
-        if self.isActiveWindow():
+        if (not self._is_visible or self._is_pinned or self._is_floating
+                or self._show_protection or self._dragging
+                or self._has_visible_child_window()):
             return
 
         cursor_pos = QCursor.pos()
@@ -507,11 +511,16 @@ class EdgeHiddenWindow(QWidget):
     def mousePressEvent(self, event: QMouseEvent):
         """鼠标按下事件 - 开始拖动"""
         if event.button() == Qt.LeftButton:
-            # 命中子控件（搜索框等）时不启动拖拽，避免顶部 40px 条盖住交互区
+            # 空白容器允许拖动，可交互控件及其内部子控件保留鼠标操作。
             child = self.childAt(event.position().toPoint())
-            if child is not None and child is not self:
-                super().mousePressEvent(event)
-                return
+            while child is not None and child is not self:
+                if isinstance(child, (
+                    QAbstractButton, QAbstractItemView, QAbstractSlider,
+                    QAbstractSpinBox, QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
+                )):
+                    super().mousePressEvent(event)
+                    return
+                child = child.parentWidget()
             # 只在窗口顶部 40 像素区域允许拖动
             if event.position().y() <= 40:
                 self._dragging = True

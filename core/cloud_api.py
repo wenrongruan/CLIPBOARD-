@@ -241,6 +241,9 @@ class CloudAPIClient:
     def files_get_quota(self) -> dict:
         return self.files.files_get_quota()
 
+    def files_list_page(self, page: int, per_page: int = 100) -> dict:
+        return self.files.files_list_page(page, per_page)
+
     def files_request_upload(self, meta: dict) -> dict:
         return self.files.files_request_upload(meta)
 

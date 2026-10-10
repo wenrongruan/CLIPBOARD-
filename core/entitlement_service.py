@@ -88,6 +88,8 @@ def _default_quota_for(plan: Plan) -> int:
         return _DEFAULT_SUPER_QUOTA_BYTES
     if plan == Plan.ULTIMATE:
         return _DEFAULT_ULTIMATE_QUOTA_BYTES
+    if plan == Plan.TEAM:
+        return _DEFAULT_ULTIMATE_QUOTA_BYTES
     return 0
 
 
@@ -103,12 +105,21 @@ class EntitlementService(QObject):
         self._lock = threading.RLock()
         self._current: Entitlement = Entitlement()
         self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_threads: set[threading.Thread] = set()
+        self._account_generation = 0
         self._refresh_in_progress = False
         self._last_refresh_failed = False
         self._load_from_meta_locked()
 
     def set_cloud_api(self, cloud_api: Optional[CloudAPIClient]) -> None:
         with self._lock:
+            if cloud_api is not self._cloud_api:
+                self._account_generation += 1
+                self._refresh_thread = None
+                self._refresh_in_progress = False
+                self._last_refresh_failed = False
+                self._current = Entitlement()
+                self._persist_locked(None)
             self._cloud_api = cloud_api
 
     # ---------- 读 ----------
@@ -126,7 +137,7 @@ class EntitlementService(QObject):
         e = self.current()
         if not e.files_enabled:
             if e.plan == Plan.FREE:
-                return False, "文件云同步需要付费订阅（Basic / Super / Ultimate），请先升级套餐。"
+                return False, "文件云同步需要付费订阅（Basic / Super / Ultimate / Team），请先升级套餐。"
             if e.status != "active":
                 return False, f"订阅当前状态为 {e.status}，无法使用文件云同步。"
             return False, "当前套餐暂不支持文件云同步。"
@@ -161,7 +172,7 @@ class EntitlementService(QObject):
         _emit_ent = None
         _thread = None
         with self._lock:
-            if self._refresh_thread and self._refresh_thread.is_alive():
+            if self._refresh_in_progress:
                 return
             if self._cloud_api is None or not self._cloud_api.is_authenticated:
                 self._refresh_in_progress = False
@@ -178,18 +189,45 @@ class EntitlementService(QObject):
                 self._refresh_in_progress = True
                 self._last_refresh_failed = False
                 _thread = threading.Thread(
-                    target=self._do_refresh, name="EntitlementRefresh", daemon=True,
+                    target=self._run_refresh,
+                    args=(self._cloud_api, self._account_generation),
+                    name="EntitlementRefresh", daemon=True,
                 )
                 self._refresh_thread = _thread
-        # 锁外：emit 或启动线程（两者互斥，不会同时非 None）
+                self._refresh_threads.add(_thread)
+                # 与集合登记共用锁，退出快照不会看到尚未 start 的线程。
+                try:
+                    _thread.start()
+                except RuntimeError:
+                    self._refresh_threads.discard(_thread)
+                    self._refresh_thread = None
+                    self._refresh_in_progress = False
+                    self._last_refresh_failed = True
+                    _emit_ent = self._current
+                    logger.warning("无法启动 entitlement 刷新线程", exc_info=True)
+        # 锁外 emit，避免槽函数持锁回调。
         if _emit_ent is not None:
             self.entitlement_changed.emit(_emit_ent)
-        if _thread is not None:
-            _thread.start()
+
+    def active_refresh_threads(self) -> Tuple[threading.Thread, ...]:
+        """包含旧账号仍在排空的请求；退出时必须等它们结束再关闭 API/数据库。"""
+        with self._lock:
+            return tuple(self._refresh_threads)
+
+    def wait_for_refresh(self, timeout: Optional[float] = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        for thread in self.active_refresh_threads():
+            if thread is threading.current_thread():
+                return False
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            thread.join(remaining)
+        return not any(thread.is_alive() for thread in self.active_refresh_threads())
 
     def invalidate(self) -> None:
         """登出时调用：清空内存与持久化缓存。"""
         with self._lock:
+            self._account_generation += 1
+            self._refresh_thread = None
             self._current = Entitlement()
             self._refresh_in_progress = False
             self._last_refresh_failed = False
@@ -212,16 +250,26 @@ class EntitlementService(QObject):
 
     # ---------- internal ----------
 
-    def _do_refresh(self) -> None:
+    def _run_refresh(self, cloud_api, generation: int) -> None:
         try:
-            data = self._cloud_api.get_subscription()
+            self._do_refresh(cloud_api, generation)
+        except Exception:
+            logger.warning("EntitlementService 响应解析失败", exc_info=True)
+            self._extend_grace_on_error(generation)
+        finally:
+            with self._lock:
+                self._refresh_threads.discard(threading.current_thread())
+
+    def _do_refresh(self, cloud_api, generation: int) -> None:
+        try:
+            data = cloud_api.get_subscription()
         except CloudAPIError as e:
             logger.info(f"EntitlementService 刷新失败（走缓存兜底）: {e}")
-            self._extend_grace_on_error()
+            self._extend_grace_on_error(generation)
             return
         except Exception as e:
             logger.warning(f"EntitlementService 刷新异常: {e}")
-            self._extend_grace_on_error()
+            self._extend_grace_on_error(generation)
             return
 
         plan = Plan.parse(data.get("plan", "free"))
@@ -274,6 +322,8 @@ class EntitlementService(QObject):
         )
         _emit_needed = False
         with self._lock:
+            if generation != self._account_generation:
+                return
             was_refreshing = self._refresh_in_progress
             self._refresh_in_progress = False
             self._last_refresh_failed = False
@@ -282,9 +332,11 @@ class EntitlementService(QObject):
         if _emit_needed:
             self.entitlement_changed.emit(ent)
 
-    def _extend_grace_on_error(self) -> None:
+    def _extend_grace_on_error(self, generation: int) -> None:
         """网络失败时保留现有订阅缓存，并通知 UI 验证失败。"""
         with self._lock:
+            if generation != self._account_generation:
+                return
             self._refresh_in_progress = False
             self._last_refresh_failed = True
             # grace 基于上次成功时间，不因失败延长；emit 给 UI 更新验证状态。

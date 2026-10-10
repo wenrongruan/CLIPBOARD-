@@ -10,6 +10,8 @@ import os
 import sys
 from unittest.mock import patch
 
+import pytest
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -54,7 +56,21 @@ def test_files_request_upload_delegates_to_files_client():
         client.close()
 
 
-def test_files_delete_treats_not_found_as_success():
+def test_file_inventory_is_scoped_to_authenticated_account():
+    client = _make_client()
+    try:
+        with patch.object(client, "_request") as request:
+            request.return_value.json.return_value = {"items": [], "total": 0}
+            assert client.files_list_page(2, 50) == {"items": [], "total": 0}
+            request.assert_called_once_with(
+                "GET", "/api/v1/files/sync",
+                params={"page": 2, "per_page": 50},
+            )
+    finally:
+        client.close()
+
+
+def test_files_delete_does_not_treat_other_account_as_deleted():
     client = _make_client()
     try:
         with patch.object(
@@ -62,7 +78,9 @@ def test_files_delete_treats_not_found_as_success():
             "_request",
             side_effect=CloudAPIError("not found", 404),
         ):
-            assert client.files_delete(123) is True
+            with pytest.raises(CloudAPIError) as exc:
+                client.files_delete(123)
+            assert exc.value.status_code == 404
     finally:
         client.close()
 

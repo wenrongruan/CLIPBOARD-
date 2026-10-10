@@ -40,12 +40,14 @@ class CloudTab(QWidget):
         parent=None,
         cloud_api=None,
         plugin_manager=None,
+        before_auth_change=None,
         **_legacy_kwargs,
     ):
         super().__init__(parent)
         self.ctx = ctx
         self._cloud_api = cloud_api
         self._plugin_manager = plugin_manager
+        self._before_auth_change = before_auth_change
         if ctx is not None:
             if self._cloud_api is None:
                 self._cloud_api = getattr(ctx, "cloud_api", None)
@@ -153,7 +155,9 @@ class CloudTab(QWidget):
         if not self._cloud_api:
             self._cloud_api = get_cloud_client()
 
-        self._cloud_login_widget = CloudLoginWidget(self._cloud_api)
+        self._cloud_login_widget = CloudLoginWidget(
+            self._cloud_api, before_auth_change=self._before_auth_change,
+        )
         self._cloud_login_widget.login_succeeded.connect(self._on_cloud_login_success)
         group_layout.addWidget(self._cloud_login_widget)
 
@@ -163,7 +167,8 @@ class CloudTab(QWidget):
     def _show_cloud_logged_in(self):
         from ui.subscription_widget import SubscriptionWidget
         self._clear_cloud_content()
-        widget = SubscriptionWidget(self._cloud_api)
+        widget = SubscriptionWidget(self._cloud_api, before_auth_change=self._before_auth_change)
+        self._subscription_widget = widget
         try:
             widget.logout_completed.connect(self._show_cloud_login_form)
         except Exception:
@@ -171,6 +176,7 @@ class CloudTab(QWidget):
         self._cloud_content_layout.addWidget(widget)
 
     def _on_cloud_login_success(self, result: dict):
+        self._cloud_api = self._cloud_login_widget.cloud_api
         # Why: 旧实现只更新一条"重启后生效"的文字，用户永远看不到套餐/用量。
         # 登录成功后直接切换到已登录视图，用量/套餐/登出按钮立即可见；
         # 云端同步服务本身仍需重启应用才会挂载。
