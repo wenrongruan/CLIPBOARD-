@@ -59,7 +59,10 @@ class SyncClient:
         传 space_id 则过滤该团队空间。
         返回 {"items": [...], "has_more": bool}
         """
-        params = {"since_id": since_id, "device_id": device_id, "limit": 100}
+        params = {
+            "since_id": since_id, "device_id": device_id, "limit": 100,
+            "include_image_urls": 1,
+        }
         if space_id:
             params["space_id"] = space_id
         response = self._facade._request("GET", "/api/v1/clipboard/sync", params=params)
@@ -109,9 +112,9 @@ class SyncClient:
         return response.json().get("url", "")
 
     @requires_plugin_permission("network")
-    def download_image(self, item_id: int) -> Optional[bytes]:
-        """下载图片数据：先获取 presigned URL，再下载内容"""
-        url = self.get_image_url(item_id)
+    def download_image(self, item_id: int, *, image_url: Optional[str] = None) -> Optional[bytes]:
+        """复用同步响应的签名 URL；旧服务端仍先获取 URL，再下载内容。"""
+        url = image_url or self.get_image_url(item_id)
         if not url:
             return None
         if not self._http._validate_storage_url(url, self._http._ALLOWED_DOWNLOAD_DOMAINS):

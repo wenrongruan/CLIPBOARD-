@@ -225,8 +225,8 @@ class CloudAPIClient:
     def get_image_url(self, item_id: int) -> str:
         return self.sync_client.get_image_url(item_id)
 
-    def download_image(self, item_id: int) -> Optional[bytes]:
-        return self.sync_client.download_image(item_id)
+    def download_image(self, item_id: int, *, image_url: Optional[str] = None) -> Optional[bytes]:
+        return self.sync_client.download_image(item_id, image_url=image_url)
 
     # ========== Files domain delegation ==========
 

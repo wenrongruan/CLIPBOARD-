@@ -29,6 +29,7 @@ class _SyncWorker(QObject):
     # space_id=None 表示个人空间；带 str 才是团队空间。
     # 信号携带 space_key (None 或 str) 便于主线程按空间分别维护游标。
     pull_done = Signal(object, list, int)   # (space_key, new_items, max_server_id)
+    pull_backlog = Signal(object, int)     # (space_key, cursor): 下一页可立即拉取
     pull_error = Signal(object, str, int)   # (space_key, message, status_code)
     push_done = Signal(object, int)         # (space_key, uploaded_count)
     push_error = Signal(object, str, int, list)  # (space_key, message, status_code, failed_batch)
@@ -57,6 +58,7 @@ class _SyncWorker(QObject):
         self._skip_counter: dict[int, int] = {}
         self._skip_counter_loaded: bool = False
         self._skip_counter_dirty: bool = False
+        self._image_pending_since: dict[int, float] = {}
 
     @Slot(object, int)
     def do_pull(self, space_key, last_sync_id: int):
@@ -72,6 +74,12 @@ class _SyncWorker(QObject):
             )
             items_data = data.get("items", [])
 
+            # 先按空间去重。游标因某张图片失败而回退时，已落库图片无需再次下载。
+            existing_map = self.repository.get_existing_hashes(
+                [row.get("content_hash", "") for row in items_data],
+                space_id=space_key, space_scoped=True,
+            )
+
             # 第一遍：解析所有条目，收集 content_hash
             # parsed_items 三元组：(server_id, item, tag_names) —— tag_names 由 do_pull
             # 在 item 落库拿到本地 id 后调 apply_tag_names 写入，不在 _server_item_to_local 里做。
@@ -79,26 +87,30 @@ class _SyncWorker(QObject):
             skipped_server_ids = []
             for item_data in items_data:
                 server_id = item_data.get("id", 0)
-                item = self._server_item_to_local(item_data, space_key)
+                existing = existing_map.get(item_data.get("content_hash", ""))
+                item = self._server_item_to_local(
+                    item_data, space_key, download_image=existing is None,
+                )
                 if item is None:
-                    logger.warning(f"跳过服务端条目 id={server_id}（解析或图片下载失败，下次同步将重试）")
+                    waiting_for_upload = (
+                        item_data.get("content_type") == "image"
+                        and item_data.get("has_image") is False
+                        and self._waiting_for_image_upload(server_id)
+                    )
+                    if waiting_for_upload:
+                        logger.debug("等待云端图片上传完成 (server_id=%s)", server_id)
+                    else:
+                        logger.warning(f"跳过服务端条目 id={server_id}（解析或图片下载失败，下次同步将重试）")
                     # 记录跳过的 server_id，用于限制 max_server_id 不越过它
                     if server_id:
                         skipped_server_ids.append(server_id)
                     # 多次失败后登记到永久跳过集合，避免无限阻塞同步游标
-                    self._register_skip(server_id)
+                    if not waiting_for_upload:
+                        self._register_skip(server_id)
                     continue
                 raw_tags = item_data.get("tags") or []
                 tag_names = [str(t) for t in raw_tags if t]
                 parsed_items.append((server_id, item, tag_names))
-
-            # 批量查询已存在的 hash（替代逐条 get_by_hash，减少 N 次查询为 1 次）。
-            # 必须带 space 维度：否则团队空间同步会命中个人空间的同 hash 条目，
-            # 把团队的 server_id 绑到个人条目上，删除云端副本时会误删团队数据。
-            all_hashes = [item.content_hash for _, item, _ in parsed_items]
-            existing_map = self.repository.get_existing_hashes(
-                all_hashes, space_id=space_key, space_scoped=True
-            )
 
             new_items = []
             cloud_id_pairs = []
@@ -129,6 +141,7 @@ class _SyncWorker(QObject):
                     item_id = self.repository.add_item(item)
                     item.id = item_id
                     new_items.append(item)
+                    existing_map[item.content_hash] = item
                     if server_id and item_id:
                         cloud_id_pairs.append((item_id, server_id))
                     local_item_id = item_id
@@ -181,6 +194,11 @@ class _SyncWorker(QObject):
                 self._save_skip_counter()
                 self._skip_counter_dirty = False
             self.pull_done.emit(space_key, new_items, max_server_id)
+            # 只在整页成功且游标前进时继续。失败图片留到下轮重试，避免瞬间
+            # 用完重试次数；独立信号让 Qt 队列中的上传有机会在分页之间执行。
+            if (data.get("has_more") and items_data
+                    and min_retryable_skip is None and max_server_id > last_sync_id):
+                self.pull_backlog.emit(space_key, max_server_id)
 
         except CloudAPIError as e:
             self.pull_error.emit(space_key, str(e), e.status_code)
@@ -339,8 +357,19 @@ class _SyncWorker(QObject):
     # 图片下载失败重试计数：{server_id: fail_count}
     # 超过 _MAX_IMAGE_RETRY 次后视为永久放弃，允许同步游标越过
     _MAX_IMAGE_RETRY = 5
+    # 元数据先于图片二进制创建；等待上传期间不能耗尽下载重试次数。
+    _IMAGE_UPLOAD_GRACE_SEC = 300.0
 
-    def _server_item_to_local(self, data: dict, space_key=None) -> Optional[ClipboardItem]:
+    def _waiting_for_image_upload(self, server_id: int) -> bool:
+        if not server_id:
+            return False
+        now = time.monotonic()
+        started = self._image_pending_since.setdefault(server_id, now)
+        return now - started < self._IMAGE_UPLOAD_GRACE_SEC
+
+    def _server_item_to_local(
+        self, data: dict, space_key=None, *, download_image: bool = True,
+    ) -> Optional[ClipboardItem]:
         """将服务端返回的 item 数据转换为本地 ClipboardItem
 
         根据服务端 content_type 分派到 TextClipboardItem / ImageClipboardItem 子类。
@@ -379,11 +408,18 @@ class _SyncWorker(QObject):
                 image_data=None,
                 image_thumbnail=None,
             )
+            if not download_image:
+                # 仅用来合并已有条目的 cloud_id / 收藏 / 标签，不写入空图片。
+                return item
             server_id = data.get("id")
             if not server_id:
                 logger.warning("服务端图片条目缺少 id，无法下载")
                 return None
-            if not self._download_image(item, server_id):
+            if data.get("has_image") is False and self._waiting_for_image_upload(server_id):
+                return None
+            if data.get("has_image"):
+                self._image_pending_since.pop(server_id, None)
+            if not self._download_image(item, server_id, image_url=data.get("image_url")):
                 # 下载失败且未达到永久放弃阈值 → 返回 None，下次重试
                 if not self._is_permanently_skipped(server_id):
                     return None
@@ -404,13 +440,18 @@ class _SyncWorker(QObject):
             )
             return None
 
-    def _download_image(self, item: ImageClipboardItem, server_id: int) -> bool:
+    def _download_image(
+        self, item: ImageClipboardItem, server_id: int, *, image_url: Optional[str] = None,
+    ) -> bool:
         """下载云端图片；成功返回 True，失败返回 False
 
         签名改为 ImageClipboardItem：image_data/image_thumbnail 仅该子类拥有。
         """
         try:
-            image_data = self.cloud_api.download_image(server_id)
+            if image_url:
+                image_data = self.cloud_api.download_image(server_id, image_url=image_url)
+            else:
+                image_data = self.cloud_api.download_image(server_id)
             if image_data:
                 item.image_data = image_data
                 from utils.image_utils import create_thumbnail
@@ -580,13 +621,14 @@ class CloudSyncService(QObject):
     _trigger_pull = Signal(object, int)    # (space_key, last_sync_id)
     _trigger_list_spaces = Signal()
 
-    # 自适应轮询参数（与 SyncService 一致）
+    # 自适应轮询：限制空闲等待，避免另一个设备复制后等上 30 秒。
     _MIN_INTERVAL_MS = 1000
-    _MAX_INTERVAL_MS = 30000
+    _MAX_INTERVAL_MS = 3000
     _INTERVAL_STEP_MS = 2000
 
     # 上传批次大小
     _UPLOAD_BATCH_SIZE = 20
+    _UPLOAD_DEBOUNCE_MS = 150
 
     # 数据库扫描未同步条目的最小间隔（秒）
     _DB_SCAN_INTERVAL_SEC = 10
@@ -653,6 +695,7 @@ class CloudSyncService(QObject):
         self._worker = _SyncWorker(cloud_api, repository)
         self._worker.moveToThread(self._worker_thread)
         self._worker.pull_done.connect(self._on_pull_done)
+        self._worker.pull_backlog.connect(self._on_pull_backlog)
         self._worker.pull_error.connect(self._on_pull_error)
         self._worker.push_done.connect(self._on_push_done)
         self._worker.push_error.connect(self._on_push_error)
@@ -676,6 +719,12 @@ class CloudSyncService(QObject):
         # 推送定时器（间隔稍长，减少请求频率）
         self._push_timer = QTimer(self)
         self._push_timer.timeout.connect(self._push_to_cloud)
+
+        # 新内容合并一个短窗口后上传；离线扫描与失败重试仍使用周期定时器。
+        self._upload_timer = QTimer(self)
+        self._upload_timer.setSingleShot(True)
+        self._upload_timer.setInterval(self._UPLOAD_DEBOUNCE_MS)
+        self._upload_timer.timeout.connect(self._push_to_cloud)
 
         # 注册设备（首次连接时）
         self._device_registered = False
@@ -812,15 +861,19 @@ class CloudSyncService(QObject):
         self._trigger_list_spaces.emit()
 
         # 启动拉取定时器
-        self._pull_timer.start(interval_ms)
+        self._current_interval = max(
+            self._MIN_INTERVAL_MS, min(interval_ms, self._MAX_INTERVAL_MS),
+        )
+        self._pull_timer.start(self._current_interval)
 
-        # 推送定时器间隔为拉取的 2 倍
-        self._push_timer.start(interval_ms * 2)
+        # 周期定时器用于离线恢复与失败重试；新条目走短窗口上传。
+        self._push_timer.start(self._MIN_INTERVAL_MS * 2)
+        QTimer.singleShot(0, self.force_sync)
 
         # 启动后延迟 5 秒执行初始收藏同步（推送未同步的收藏 + 清理非收藏云端副本）
         QTimer.singleShot(5000, self._trigger_starred_sync)
 
-        logger.info(f"云端同步服务已启动,拉取间隔 {interval_ms}ms")
+        logger.info(f"云端同步服务已启动,拉取间隔 {self._current_interval}ms")
 
     def _trigger_starred_sync(self):
         """触发收藏同步（在工作线程执行）"""
@@ -835,6 +888,7 @@ class CloudSyncService(QObject):
         self._transition(CloudSyncState.STOPPED)
         self._pull_timer.stop()
         self._push_timer.stop()
+        self._upload_timer.stop()
         # 非阻塞停止后的最终退出也需落盘末次回调推进的游标。
         self._persist_cursor()
 
@@ -864,12 +918,9 @@ class CloudSyncService(QObject):
         if self._state != CloudSyncState.RUNNING:
             logger.debug(f"force_sync 被忽略,当前状态: {self._state.value}")
             return
-        self._pulling_spaces.clear()
-        self._pushing_spaces.clear()
-        self._pulling = False
-        self._pushing = False
-        self._pull_from_cloud()
+        # 保留在途标记，避免手动同步与分页/上传重叠，重复请求同一批数据。
         self._push_to_cloud()
+        self._pull_from_cloud()
 
     def reset_sync_position(self):
         """重置同步位置（全部 space 清零）"""
@@ -893,6 +944,13 @@ class CloudSyncService(QObject):
             )
             self.queue_overflow.emit(dropped.id or 0)
         self._pending_upload_queue.append(item)
+        self._schedule_upload()
+
+    def _schedule_upload(self):
+        if (self._state == CloudSyncState.RUNNING
+                and not self._upload_timer.isActive()):
+            # 不重置活动定时器，持续复制时也能在第一个窗口结束后上传。
+            self._upload_timer.start()
 
     # ========== 设备注册 ==========
 
@@ -971,6 +1029,17 @@ class CloudSyncService(QObject):
                 self._last_cursor_persist_ts = now
                 self._persist_cursor()
 
+    @Slot(object, int)
+    def _on_pull_backlog(self, space_key, cursor: int):
+        """有下一页时立即调度，无需再等待轮询间隔。"""
+        if (self._state != CloudSyncState.RUNNING
+                or space_key in self._pulling_spaces
+                or self._space_cursors.get(space_key, 0) != cursor):
+            return
+        self._pulling_spaces.add(space_key)
+        self._pulling = True
+        self._trigger_pull.emit(space_key, cursor)
+
     @Slot(object, str, int)
     def _on_pull_error(self, space_key, message: str, status_code: int):
         """拉取失败回调(主线程)"""
@@ -983,6 +1052,7 @@ class CloudSyncService(QObject):
             # 停止轮询,避免反复刷 401 日志
             self._pull_timer.stop()
             self._push_timer.stop()
+            self._upload_timer.stop()
             self._transition(CloudSyncState.AUTH_FAILED)
             self.sync_error.emit("云端认证失败,请在设置中重新登录")
         elif status_code == 403:
@@ -1025,6 +1095,7 @@ class CloudSyncService(QObject):
         self._pull_timer.setInterval(self._current_interval)
         self._pull_timer.start()
         self._push_timer.start()
+        self.force_sync()
         logger.info("认证恢复,同步定时器已重启")
 
     def _increase_interval(self):
@@ -1045,6 +1116,11 @@ class CloudSyncService(QObject):
         if self._state != CloudSyncState.RUNNING:
             return
 
+        # worker 实际串行执行。上一批尚未确认时不要重复扫描数据库，也不要
+        # 把新内容从主队列移到容量更小的重试队列。
+        if self._pushing_spaces:
+            return
+
         # 队列为空时，定期从数据库扫描未同步的条目
         if not self._pending_upload_queue and not self._retry_queue:
             self._load_unsynced_from_db()
@@ -1052,17 +1128,12 @@ class CloudSyncService(QObject):
         if not self._pending_upload_queue and not self._retry_queue:
             return
 
-        # 每 10 次推送检查一次配额
-        self._quota_check_counter += 1
-        if self._quota_check_counter % 10 == 1:
-            QMetaObject.invokeMethod(self._worker, "do_check_quota", Qt.QueuedConnection)
-
-        # 优先处理重试队列，其次新数据
+        # 优先发送新内容，积压的失败重试不应拖延本次复制。
         batch: list = []
-        while self._retry_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
-            batch.append(self._retry_queue.popleft())
         while self._pending_upload_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
             batch.append(self._pending_upload_queue.popleft())
+        while self._retry_queue and len(batch) < self._UPLOAD_BATCH_SIZE:
+            batch.append(self._retry_queue.popleft())
 
         if not batch:
             return
@@ -1093,6 +1164,11 @@ class CloudSyncService(QObject):
                 f"云端推送：发送 {len(items)} 条记录 (space={space_key})",
             )
             self._trigger_push.emit(space_key, items)
+
+        # 配额查询排在上传后，减少热路径的一次 HTTP 等待。
+        self._quota_check_counter += 1
+        if self._quota_check_counter % 10 == 1:
+            QMetaObject.invokeMethod(self._worker, "do_check_quota", Qt.QueuedConnection)
 
     def _can_edit_team_space(self) -> bool:
         """订阅降级后 team space 为只读（不 push）；team 计划允许编辑所有空间。
@@ -1169,6 +1245,8 @@ class CloudSyncService(QObject):
         logger.warning(
             f"云端推送成功：已上传 {uploaded_count} 条记录 (space={space_key})",
         )
+        if self._pending_upload_queue and not self._pushing_spaces:
+            self._schedule_upload()
 
     @Slot(object, str, int, list)
     def _on_push_error(self, space_key, message: str, status_code: int, failed_batch: list):
