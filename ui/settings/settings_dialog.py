@@ -60,7 +60,8 @@ class SettingsDialog(QDialog):
         self._auto_load_store = auto_load_store
 
         self.setWindowTitle(t("settings"))
-        self.setFixedSize(580, 560)
+        self.setMinimumSize(660, 600)
+        self.resize(720, 640)
         self.setStyleSheet(MAIN_STYLE)
         # Why: 父 MainWindow 带 WindowStaysOnTopHint + Tool, 子 dialog 不继承
         # 这两个标志时会被父窗口永久盖住, 表现为"点击设置没反应"。

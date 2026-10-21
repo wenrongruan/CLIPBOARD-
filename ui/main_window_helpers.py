@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt, QUrl, QThread, Signal as QSignal
+from PySide6.QtCore import QSize, Qt, QUrl, QThread, Signal as QSignal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -37,6 +37,8 @@ from config import (
 )
 from i18n import t, set_language
 from ui.thread_utils import track_thread
+from .icons import icon
+from .styles import theme_style
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +52,30 @@ def build_clipboard_page(window) -> QWidget:
     page = QWidget()
     clip_layout = QVBoxLayout(page)
     clip_layout.setContentsMargins(0, 0, 0, 0)
-    clip_layout.setSpacing(6)
+    clip_layout.setSpacing(10)
 
     # 视图切换(列表 / 时间线)
     view_row = QHBoxLayout()
     view_row.setSpacing(4)
+    section_label = QLabel(t("recent_records"))
+    section_label.setObjectName("sectionCaption")
+    view_row.addWidget(section_label)
+    view_row.addStretch()
     window.view_list_btn = QToolButton()
-    window.view_list_btn.setText("列表")
+    window.view_list_btn.setIcon(icon("list"))
+    window.view_list_btn.setToolTip(t("list_view"))
     window.view_list_btn.setCheckable(True)
     window.view_list_btn.setChecked(True)
     window.view_timeline_btn = QToolButton()
-    window.view_timeline_btn.setText("时间线")
+    window.view_timeline_btn.setIcon(icon("clock"))
+    window.view_timeline_btn.setToolTip(t("timeline_view"))
     window.view_timeline_btn.setCheckable(True)
+    for btn in (window.view_list_btn, window.view_timeline_btn):
+        btn.setObjectName("viewButton")
+        btn.setFixedSize(30, 28)
+        btn.setIconSize(QSize(16, 16))
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setAccessibleName(btn.toolTip())
     window._view_group = QButtonGroup(window)
     window._view_group.setExclusive(True)
     window._view_group.addButton(window.view_list_btn, 0)
@@ -69,21 +83,49 @@ def build_clipboard_page(window) -> QWidget:
     window._view_group.idClicked.connect(window.list_controller.on_view_changed)
     view_row.addWidget(window.view_list_btn)
     view_row.addWidget(window.view_timeline_btn)
-    view_row.addStretch()
     clip_layout.addLayout(view_row)
 
     # 列表 + 时间线视图的堆叠
     window._view_stack = QStackedWidget()
     clip_layout.addWidget(window._view_stack, 1)
 
-    from PySide6.QtCore import Qt
     window.list_widget = QListWidget()
+    window.list_widget.setObjectName("historyList")
     window.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     window.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     window.list_widget.setSpacing(1)
     window.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
     window.list_widget.customContextMenuRequested.connect(window.plugin_controller.show_context_menu)
     window._view_stack.addWidget(window.list_widget)
+
+    # A non-interactive overlay stays centered in the real list viewport.
+    # It never creates a selectable fake record or changes the view routing.
+    window.empty_state = QWidget(window.list_widget.viewport())
+    window.empty_state.setAttribute(Qt.WA_TransparentForMouseEvents)
+    empty_layout = QVBoxLayout(window.empty_state)
+    empty_layout.setSpacing(12)
+    empty_layout.addStretch()
+    empty_icon = QLabel()
+    empty_icon.setObjectName("emptyIcon")
+    empty_icon.setFixedSize(64, 64)
+    empty_icon.setAlignment(Qt.AlignCenter)
+    empty_icon.setPixmap(icon("clipboard", "accent").pixmap(30, 30))
+    empty_layout.addWidget(empty_icon, 0, Qt.AlignHCenter)
+    window.empty_title = QLabel(t("empty_history_title"))
+    window.empty_title.setObjectName("emptyTitle")
+    window.empty_title.setAlignment(Qt.AlignCenter)
+    window.empty_title.setWordWrap(True)
+    empty_layout.addWidget(window.empty_title)
+    window.empty_description = QLabel(t("empty_history_description"))
+    window.empty_description.setObjectName("emptyDescription")
+    window.empty_description.setAlignment(Qt.AlignCenter)
+    window.empty_description.setWordWrap(True)
+    empty_layout.addWidget(window.empty_description)
+    empty_layout.addStretch()
+    viewport_layout = QVBoxLayout(window.list_widget.viewport())
+    viewport_layout.setContentsMargins(16, 0, 16, 0)
+    viewport_layout.addWidget(window.empty_state)
+    window.empty_state.hide()
 
     # 时间线视图懒加载
     window.timeline_view = None
@@ -105,18 +147,28 @@ def build_clipboard_page(window) -> QWidget:
     pagination_layout = QHBoxLayout()
     pagination_layout.setSpacing(8)
 
-    window.prev_btn = QPushButton(t("prev_page"))
+    hint = QLabel(t("click_to_copy"))
+    hint.setObjectName("sidebarCaption")
+    pagination_layout.addWidget(hint, 1)
+
+    window.prev_btn = QPushButton()
     window.prev_btn.setObjectName("pageBtn")
+    window.prev_btn.setIcon(icon("chevron-left"))
+    window.prev_btn.setToolTip(t("prev_page"))
+    window.prev_btn.setAccessibleName(t("prev_page"))
     window.prev_btn.clicked.connect(window.list_controller.prev_page)
     pagination_layout.addWidget(window.prev_btn)
 
     window.page_label = QLabel("1 / 1")
     window.page_label.setObjectName("pageLabel")
     window.page_label.setAlignment(Qt.AlignCenter)
-    pagination_layout.addWidget(window.page_label, 1)
+    pagination_layout.addWidget(window.page_label)
 
-    window.next_btn = QPushButton(t("next_page"))
+    window.next_btn = QPushButton()
     window.next_btn.setObjectName("pageBtn")
+    window.next_btn.setIcon(icon("chevron-right"))
+    window.next_btn.setToolTip(t("next_page"))
+    window.next_btn.setAccessibleName(t("next_page"))
     window.next_btn.clicked.connect(window.list_controller.next_page)
     pagination_layout.addWidget(window.next_btn)
 
@@ -154,30 +206,37 @@ def build_file_page_placeholder() -> QWidget:
     pl.setSpacing(14)
     pl.addStretch()
 
-    title = QLabel("文件云同步(付费功能)")
+    illustration = QLabel()
+    illustration.setObjectName("emptyIcon")
+    illustration.setFixedSize(64, 64)
+    illustration.setAlignment(Qt.AlignCenter)
+    illustration.setPixmap(icon("file", "accent").pixmap(30, 30))
+    pl.addWidget(illustration, 0, Qt.AlignHCenter)
+
+    title = QLabel(t("my_files"))
+    title.setObjectName("emptyTitle")
     title.setAlignment(Qt.AlignCenter)
-    title.setStyleSheet("color:#e8e8e8;font-size:15px;font-weight:600;")
     pl.addWidget(title)
 
     tip = QLabel("登录云端账户并升级到付费套餐后,在此管理常用文件。")
     tip.setWordWrap(True)
     tip.setAlignment(Qt.AlignCenter)
-    tip.setStyleSheet("color:#aaa;")
+    tip.setObjectName("emptyDescription")
     pl.addWidget(tip)
 
     diff = QLabel(
-        "📋 <b>剪贴板同步</b>(免费版已包含):自动备份文字和图片记录,"
+        "<b>剪贴板同步 · 免费</b><br>自动备份文字和图片记录，"
         "图片会压缩为 JPG、长边 ≤ 2K 节省流量。<br><br>"
-        "📁 <b>文件云同步</b>(本功能):保存原始文件(文档、压缩包、音视频、"
-        "工程文件等),最大单文件 1 GB、保留原始字节和扩展名,跨设备按需下载。"
+        "<b>文件云同步 · 付费增强</b><br>保留文档、压缩包、音视频等原始文件，"
+        "最大单文件 1 GB，跨设备按需下载。"
     )
     diff.setWordWrap(True)
     diff.setTextFormat(Qt.RichText)
     diff.setAlignment(Qt.AlignLeft)
-    diff.setStyleSheet(
-        "color:#cbd5e1;background:#2a2a2a;border:1px solid #3c3c3c;"
-        "border-radius:6px;padding:10px 14px;"
-    )
+    diff.setStyleSheet(theme_style(
+        "color:$secondary;background:$surface;border:1px solid $border;"
+        "border-radius:10px;padding:16px;"
+    ))
     pl.addWidget(diff)
 
     upgrade_btn = QPushButton("升级套餐")

@@ -1,0 +1,44 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: ['codex/windows-build-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Build Windows executable
+        shell: cmd
+        run: build_windows.bat
+      - name: Check application startup and core features
+        shell: pwsh
+        run: |
+          .\.venv_windows\Scripts\python.exe -m pip install pytest
+          .\.venv_windows\Scripts\python.exe -m pytest tests/test_smoke.py tests/test_source_app.py tests/test_startup_dialogs.py tests/test_clipboard_e2e_local.py tests/test_database.py tests/test_i18n_completeness.py tests/test_screenshot.py -q --junitxml=dist/windows-tests.xml
+      - name: Launch the packaged executable
+        shell: pwsh
+        run: .\.venv_windows\Scripts\python.exe scripts/smoke_windows_exe.py dist/SharedClipboard.exe
+      - name: Record checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/SharedClipboard.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  SharedClipboard.exe" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+      - name: Upload Windows build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SharedClipboard-Windows-x64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

@@ -1,6 +1,6 @@
 """SyncStateDAO: 云端同步状态相关的读写。
 
-只触碰 clipboard_items 上的 cloud_id 字段以及与云同步关联的检索路径。
+管理 clipboard_items 上的 cloud_id，以及云端图片修复和同步检索路径。
 不持有 DAO 引用 —— 这里都是简单的单语句操作，直接走 db_manager 即可。
 """
 
@@ -80,6 +80,41 @@ class SyncStateDAO:
 
         self.db.execute_with_retry(operation)
 
+    def restore_cloud_image(
+        self,
+        item_id: int,
+        image_data: bytes,
+        image_thumbnail: Optional[bytes],
+        cloud_id: int,
+    ) -> bool:
+        """补齐已有图片的云端二进制，保留原始内容 hash 和其他元数据。
+
+        云端图片可能经过压缩，不能按下载后的二进制重算 content_hash。
+        只更新仍存在的图片行，避免下载完成时复活已删除的条目。
+        """
+        if not image_data:
+            return False
+
+        def operation(conn) -> bool:
+            sql = """
+                UPDATE clipboard_items
+                SET image_data = ?, image_thumbnail = ?, cloud_id = ?
+                WHERE id = ? AND content_type = 'image'
+            """
+            rowcount, _ = self.db.execute_write(
+                conn, sql, (image_data, image_thumbnail, cloud_id, item_id)
+            )
+            if rowcount > 0:
+                return True
+            # MySQL 的 rowcount 默认只计实际变更；相同图片的重复修复仍算成功。
+            return self.db.fetch_one(
+                conn,
+                "SELECT id FROM clipboard_items WHERE id = ? AND content_type = 'image'",
+                (item_id,),
+            ) is not None
+
+        return self.db.execute_with_retry(operation)
+
     # ------------------------------------------------------------------
     # 读：基于 cloud_id 的检索
     # ------------------------------------------------------------------
@@ -157,5 +192,37 @@ class SyncStateDAO:
             """
             rows = self.db.fetch_all(conn, sql, (limit,))
             return [ClipboardItem.from_db_row(row) for row in rows]
+
+        return self.db.execute_read(operation)
+
+    def get_image_hashes_with_data(
+        self, hashes: list, space_id: Optional[str] = None
+    ) -> set[str]:
+        """返回目标空间内有完整图片二进制的 hash，不读取图片 BLOB。
+
+        个人空间兼容 NULL / 空串；缩略图存在不能替代完整图片数据。
+        """
+        if not hashes:
+            return set()
+
+        def operation(conn) -> set[str]:
+            result = set()
+            # 为空间参数保留一个位置，每次最多绑定 500 个参数。
+            batch_size = 499
+            for offset in range(0, len(hashes), batch_size):
+                batch = hashes[offset:offset + batch_size]
+                placeholders = ",".join("?" for _ in batch)
+                sql = f"""
+                    SELECT content_hash
+                    FROM clipboard_items
+                    WHERE content_hash IN ({placeholders})
+                      AND COALESCE(space_id, '') = ?
+                      AND content_type = 'image'
+                      AND image_data IS NOT NULL
+                      AND LENGTH(image_data) > 0
+                """
+                rows = self.db.fetch_all(conn, sql, (*batch, space_id or ""))
+                result.update(row["content_hash"] for row in rows)
+            return result
 
         return self.db.execute_read(operation)

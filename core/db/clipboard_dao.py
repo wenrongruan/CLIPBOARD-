@@ -433,7 +433,18 @@ class ClipboardDAO:
     # 复用已有的 app_meta 表存 JSON value，跨 SQLite / MySQL 方言透明。
 
     def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """读取 app_meta 表中的一条键值；MySQL 的 `key` 需反引号转义。"""
+        """兼容读取：数据库不可用时记录日志并返回默认值。"""
+        try:
+            return self.get_meta_strict(key, default)
+        except Exception as e:
+            logger.debug(f"读取 app_meta[{key}] 失败: {e}")
+            return default
+
+    def get_meta_strict(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """读取 app_meta，数据库错误必须向调用者抛出。
+
+        default 只用于键不存在的情况，不能把读取失败当作状态缺失。
+        """
         sql = (
             "SELECT `value` FROM app_meta WHERE `key` = ?"
             if self._is_mysql
@@ -445,14 +456,20 @@ class ClipboardDAO:
             # SQLite Row (row_factory=sqlite3.Row) 与 MySQL DictCursor 均支持 row["value"]
             return row["value"] if row else default
 
-        try:
-            return self.db.execute_read(operation)
-        except Exception as e:
-            logger.debug(f"读取 app_meta[{key}] 失败: {e}")
-            return default
+        return self.db.execute_read(operation)
 
     def set_meta(self, key: str, value: str) -> None:
-        """写入 app_meta 表；SQLite 用 INSERT OR REPLACE，MySQL 用 ON DUPLICATE KEY UPDATE。"""
+        """兼容写入：数据库不可用时记录日志。"""
+        try:
+            self.set_meta_strict(key, value)
+        except Exception as e:
+            logger.warning(f"写入 app_meta[{key}] 失败: {e}")
+
+    def set_meta_strict(self, key: str, value: str) -> None:
+        """持久化 app_meta；提交失败时向调用者抛出数据库错误。
+
+        云同步游标只有在恢复队列成功落盘后才能推进，不能吞掉写入错误。
+        """
         if self._is_mysql:
             sql = (
                 "INSERT INTO app_meta (`key`, `value`) VALUES (?, ?) "
@@ -464,7 +481,4 @@ class ClipboardDAO:
         def operation(conn):
             self._execute_write(conn, sql, (key, value))
 
-        try:
-            self.db.execute_with_retry(operation)
-        except Exception as e:
-            logger.warning(f"写入 app_meta[{key}] 失败: {e}")
+        self.db.execute_with_retry(operation)

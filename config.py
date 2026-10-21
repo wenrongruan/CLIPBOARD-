@@ -39,7 +39,7 @@ class SyncMode(str, Enum):
 # ============ 模块级常量 ============
 
 APP_NAME = "SharedClipboard"
-APP_VERSION = "3.3.9"
+APP_VERSION = "3.3.10"
 
 PRICING_URL = "https://www.jlike.com/pricing.html"
 
@@ -85,8 +85,8 @@ MAX_ITEMS = 10000
 SYNC_INTERVAL_MS = 1000  # 同步轮询间隔(毫秒)
 
 # UI 尺寸 - macOS 上稍大
-WINDOW_WIDTH = 380 if IS_MACOS else 350
-WINDOW_HEIGHT = 650 if IS_MACOS else 600
+WINDOW_WIDTH = 620 if IS_MACOS else 600
+WINDOW_HEIGHT = 720 if IS_MACOS else 680
 HIDDEN_MARGIN = 3  # 隐藏时露出的像素
 TRIGGER_ZONE = 10  # 触发区域宽度
 ANIMATION_DURATION = 250 if IS_MACOS else 200

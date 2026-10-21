@@ -30,6 +30,8 @@ class _SyncWorker(QObject):
     # 信号携带 space_key (None 或 str) 便于主线程按空间分别维护游标。
     pull_done = Signal(object, list, int)   # (space_key, new_items, max_server_id)
     pull_backlog = Signal(object, int)     # (space_key, cursor): 下一页可立即拉取
+    images_recovered = Signal(object, list)  # 重试补齐图片，独立于分页游标
+    image_retry_done = Signal()
     pull_error = Signal(object, str, int)   # (space_key, message, status_code)
     push_done = Signal(object, int)         # (space_key, uploaded_count)
     push_error = Signal(object, str, int, list)  # (space_key, message, status_code, failed_batch)
@@ -40,10 +42,11 @@ class _SyncWorker(QObject):
     device_registered = Signal()    # 设备注册成功
     spaces_pulled = Signal(list)    # list_spaces 成功后发射 [dict, ...]
 
-    # app_meta 表中存放永久放弃同步的 server_id 集合（JSON list）
-    # Why: 进程重启后若某 server_id 的图片下载始终失败，无持久化时会从该 id
-    # 处再次阻塞 _MAX_IMAGE_RETRY 次。落盘达阈值 id 后重启即永久放弃。
+    # 保留旧的永久跳过集合，只用于无法解析的元数据；图片不再永久跳过。
     _META_SKIP_KEY = "cloud_sync_permanently_skipped"
+    _META_IMAGE_RETRIES_KEY = "cloud_sync_image_retries"
+    _IMAGE_RETRY_BASE_SEC = 5.0
+    _IMAGE_RETRY_MAX_SEC = 300.0
 
     def __init__(self, cloud_api: CloudAPIClient, repository: ClipboardRepository):
         super().__init__()
@@ -58,7 +61,9 @@ class _SyncWorker(QObject):
         self._skip_counter: dict[int, int] = {}
         self._skip_counter_loaded: bool = False
         self._skip_counter_dirty: bool = False
-        self._image_pending_since: dict[int, float] = {}
+        self._image_retries: dict[tuple, dict] = {}
+        self._image_retries_loaded = False
+        self._image_retries_dirty = False
 
     @Slot(object, int)
     def do_pull(self, space_key, last_sync_id: int):
@@ -68,16 +73,21 @@ class _SyncWorker(QObject):
         并在信号回传时区分落库到哪条游标。
         """
         try:
+            self._ensure_image_retries_loaded()
             data = self.cloud_api.sync(
                 since_id=last_sync_id, device_id=self._device_id,
                 space_id=space_key if space_key else None,
             )
             items_data = data.get("items", [])
 
-            # 先按空间去重。游标因某张图片失败而回退时，已落库图片无需再次下载。
+            # 先按空间去重，并检查真实二进制；空图片占位仍需补拉。
             existing_map = self.repository.get_existing_hashes(
                 [row.get("content_hash", "") for row in items_data],
                 space_id=space_key, space_scoped=True,
+            )
+            complete_image_hashes = self.repository.get_image_hashes_with_data(
+                [row.get("content_hash", "") for row in items_data
+                 if row.get("content_type") == "image"], space_id=space_key,
             )
 
             # 第一遍：解析所有条目，收集 content_hash
@@ -85,28 +95,51 @@ class _SyncWorker(QObject):
             # 在 item 落库拿到本地 id 后调 apply_tag_names 写入，不在 _server_item_to_local 里做。
             parsed_items = []
             skipped_server_ids = []
+            deferred_server_ids = []
             for item_data in items_data:
                 server_id = item_data.get("id", 0)
                 existing = existing_map.get(item_data.get("content_hash", ""))
-                item = self._server_item_to_local(
-                    item_data, space_key, download_image=existing is None,
-                )
-                if item is None:
-                    waiting_for_upload = (
-                        item_data.get("content_type") == "image"
-                        and item_data.get("has_image") is False
-                        and self._waiting_for_image_upload(server_id)
+                is_image = item_data.get("content_type") == "image"
+                has_local_image = item_data.get("content_hash", "") in complete_image_hashes
+                retry_key = (space_key, server_id)
+                if is_image and existing and existing.cloud_id and existing.cloud_id != server_id:
+                    # 本地只能表示同空间同 hash 的一条记录，保留既有绑定。
+                    deferred_server_ids.append(server_id)
+                    continue
+                waiting_for_upload = is_image and item_data.get("has_image") is False
+                already_deferred = is_image and retry_key in self._image_retries and not has_local_image
+                if waiting_for_upload or already_deferred:
+                    item = None
+                else:
+                    item = self._server_item_to_local(
+                        item_data, space_key, download_image=not has_local_image,
                     )
-                    if waiting_for_upload:
-                        logger.debug("等待云端图片上传完成 (server_id=%s)", server_id)
-                    else:
-                        logger.warning(f"跳过服务端条目 id={server_id}（解析或图片下载失败，下次同步将重试）")
+                if item is None:
+                    if is_image and server_id and item_data.get("content_hash"):
+                        # 下载失败与尚未上传的图片进入持久重试队列，不阻塞后续分页。
+                        self._defer_image(
+                            space_key, item_data,
+                            attempted=not waiting_for_upload and not already_deferred,
+                            local_id=existing.id if existing else None,
+                        )
+                        if waiting_for_upload and has_local_image and existing.cloud_id:
+                            # 修复旧版本曾错误确认的标记，确保完整本地图还能补传。
+                            self.repository.clear_cloud_id(existing.id)
+                            existing.cloud_id = None
+                        if waiting_for_upload and has_local_image and existing.id:
+                            self.repository.update_cloud_sync_metadata(
+                                existing.id, is_starred=bool(item_data.get("is_starred", False)),
+                            )
+                            tag_names = [str(tag) for tag in (item_data.get("tags") or []) if tag]
+                            self._apply_cloud_tags(existing.id, space_key, tag_names)
+                        deferred_server_ids.append(server_id)
+                        continue
+                    logger.warning(f"跳过服务端条目 id={server_id}（解析失败，下次同步将重试）")
                     # 记录跳过的 server_id，用于限制 max_server_id 不越过它
                     if server_id:
                         skipped_server_ids.append(server_id)
                     # 多次失败后登记到永久跳过集合，避免无限阻塞同步游标
-                    if not waiting_for_upload:
-                        self._register_skip(server_id)
+                    self._register_skip(server_id)
                     continue
                 raw_tags = item_data.get("tags") or []
                 tag_names = [str(t) for t in raw_tags if t]
@@ -114,7 +147,7 @@ class _SyncWorker(QObject):
 
             new_items = []
             cloud_id_pairs = []
-            max_server_id = last_sync_id
+            max_server_id = max([last_sync_id] + deferred_server_ids)
             # 服务端历史数据可能在同一团队空间保存了不同作者的同 hash
             # 条目。本地当前仅能表示 (space_id, hash) 一条，不能让后一条
             # server_id 覆盖前一条，否则删除时会删错云端记录。
@@ -146,6 +179,14 @@ class _SyncWorker(QObject):
                         cloud_id_pairs.append((item_id, server_id))
                     local_item_id = item_id
                 elif existing.id:
+                    if (isinstance(item, ImageClipboardItem) and item.image_data
+                            and item.content_hash not in complete_image_hashes):
+                        if not self.repository.restore_cloud_image(
+                            existing.id, item.image_data, item.image_thumbnail, server_id,
+                        ):
+                            raise RuntimeError("无法修复本地云端图片")
+                        item.id = existing.id
+                        new_items.append(item)
                     remote_starred = bool(item.is_starred)
                     needs_cloud_id = bool(server_id and existing.cloud_id != server_id)
                     needs_star_merge = bool(existing.is_starred != remote_starred)
@@ -160,22 +201,13 @@ class _SyncWorker(QObject):
                 # v3.5：合并云端标签到本地（add-only 语义，删除不同步以避免误删）。
                 # apply_tag_names 内部 INSERT OR IGNORE，幂等。本地缺失的 tag_definitions
                 # 会在 (space_id, name) 上自动 create。
-                if tag_names and local_item_id:
-                    try:
-                        space_for_tag = item.space_id or ""
-                        self.repository.tag_service.apply_tag_names(
-                            local_item_id, space_for_tag, tag_names
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "为 item %s 写入云端标签 %s 失败: %s",
-                            local_item_id, tag_names, exc,
-                        )
+                self._apply_cloud_tags(local_item_id, item.space_id, tag_names)
 
                 if server_id > max_server_id:
                     max_server_id = server_id
                 if server_id:
                     seen_server_ids[item.content_hash] = server_id
+                    self._remove_image_retry(space_key, server_id)
 
             # 若存在跳过的条目，游标只能推进到最小跳过 id - 1（避免越过重试目标）
             # 但若该条目已被标记为“永久放弃”（超过重试次数），则允许越过
@@ -189,13 +221,14 @@ class _SyncWorker(QObject):
                     max_server_id = last_sync_id
 
             self.repository.set_cloud_ids_bulk(cloud_id_pairs)
+            # 必须先落盘重试目标，再允许分页游标越过它们；重启后仍能补拉。
+            self._persist_image_retries()
             # 本批若有新增永久放弃项，统一落盘一次（避免批内多次写 app_meta）
             if self._skip_counter_dirty:
                 self._save_skip_counter()
                 self._skip_counter_dirty = False
             self.pull_done.emit(space_key, new_items, max_server_id)
-            # 只在整页成功且游标前进时继续。失败图片留到下轮重试，避免瞬间
-            # 用完重试次数；独立信号让 Qt 队列中的上传有机会在分页之间执行。
+            # 图片已经独立安排补拉；只有无法解析的记录仍需限制分页游标。
             if (data.get("has_more") and items_data
                     and min_retryable_skip is None and max_server_id > last_sync_id):
                 self.pull_backlog.emit(space_key, max_server_id)
@@ -354,18 +387,166 @@ class _SyncWorker(QObject):
         except CloudAPIError as e:
             logger.debug(f"配额检查失败: {e}")
 
-    # 图片下载失败重试计数：{server_id: fail_count}
-    # 超过 _MAX_IMAGE_RETRY 次后视为永久放弃，允许同步游标越过
+    # 仅无效元数据采用次数上限；图片下载失败使用独立的持久退避队列。
     _MAX_IMAGE_RETRY = 5
-    # 元数据先于图片二进制创建；等待上传期间不能耗尽下载重试次数。
-    _IMAGE_UPLOAD_GRACE_SEC = 300.0
 
-    def _waiting_for_image_upload(self, server_id: int) -> bool:
-        if not server_id:
-            return False
-        now = time.monotonic()
-        started = self._image_pending_since.setdefault(server_id, now)
-        return now - started < self._IMAGE_UPLOAD_GRACE_SEC
+    def _ensure_image_retries_loaded(self):
+        if self._image_retries_loaded:
+            return
+        raw = self.repository.get_meta_strict(self._META_IMAGE_RETRIES_KEY, "[]")
+        entries = json.loads(raw or "[]")
+        if not isinstance(entries, list):
+            raise ValueError("无效的云端图片重试队列")
+        now = time.time()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("无效的云端图片重试记录")
+            data = entry.get("item") or {}
+            server_id = int(data.get("id") or 0)
+            space_key = entry.get("space_id") or None
+            if not server_id or not data.get("content_hash") or data.get("content_type") != "image":
+                raise ValueError("云端图片重试记录缺少标识")
+            entry["attempts"] = max(0, int(entry.get("attempts") or 0))
+            entry["next_attempt_at"] = min(
+                float(entry.get("next_attempt_at") or now), now + self._IMAGE_RETRY_MAX_SEC,
+            )
+            self._image_retries[(space_key, server_id)] = entry
+        self._image_retries_loaded = True
+
+    def _defer_image(self, space_key, data: dict, *, attempted: bool, local_id=None):
+        # 签名链接会过期，重试时重新取链接；持久队列只保存必要元数据。
+        fields = (
+            "id", "content_type", "content_hash", "preview", "device_id", "device_name",
+            "created_at", "is_starred", "space_id", "source_app", "source_title", "tags", "has_image",
+        )
+        metadata = {key: data[key] for key in fields if key in data}
+        key = (space_key, data["id"])
+        if key in self._image_retries:
+            entry = self._image_retries[key]
+            if entry["item"] != metadata:
+                entry["item"] = metadata
+                self._image_retries_dirty = True
+            if local_id and not entry.get("local_id"):
+                entry["local_id"] = local_id
+                self._image_retries_dirty = True
+            return
+        self._image_retries[key] = {
+            "space_id": space_key, "item": metadata, "attempts": int(attempted),
+            "next_attempt_at": time.time() + self._IMAGE_RETRY_BASE_SEC,
+            "local_id": local_id,
+        }
+        self._image_retries_dirty = True
+
+    def _remove_image_retry(self, space_key, server_id):
+        if self._image_retries.pop((space_key, server_id), None) is not None:
+            self._image_retries_dirty = True
+
+    def _persist_image_retries(self):
+        if self._image_retries_dirty:
+            self.repository.set_meta_strict(
+                self._META_IMAGE_RETRIES_KEY,
+                json.dumps(list(self._image_retries.values()), ensure_ascii=False),
+            )
+            self._image_retries_dirty = False
+
+    def _postpone_image_retry(self, entry):
+        entry["attempts"] += 1
+        delay = min(
+            self._IMAGE_RETRY_BASE_SEC * 2 ** min(entry["attempts"] - 1, 6),
+            self._IMAGE_RETRY_MAX_SEC,
+        )
+        entry["next_attempt_at"] = time.time() + delay
+        self._image_retries_dirty = True
+        self._persist_image_retries()
+
+    def _apply_cloud_tags(self, item_id, space_key, tag_names):
+        if not item_id or not tag_names:
+            return
+        try:
+            self.repository.tag_service.apply_tag_names(item_id, space_key or "", tag_names)
+        except Exception as exc:
+            logger.warning("为 item %s 合并云端标签失败: %s", item_id, type(exc).__name__)
+
+    @Slot()
+    def do_retry_images(self):
+        """每个任务最多补拉一张到期图片；失败退避，成功后通知 UI。"""
+        active_key = None
+        entry = None
+        try:
+            self._ensure_image_retries_loaded()
+            now = time.time()
+            due = [(key, entry) for key, entry in self._image_retries.items()
+                   if entry["next_attempt_at"] <= now]
+            if not due:
+                return
+            (space_key, server_id), entry = min(due, key=lambda pair: pair[1]["next_attempt_at"])
+            active_key = (space_key, server_id)
+            metadata = dict(entry["item"])
+            content_hash = metadata["content_hash"]
+            local_id = entry.get("local_id")
+            if local_id:
+                existing = self.repository.get_item_by_id(local_id)
+                if (existing is None or existing.content_hash != content_hash
+                        or (existing.space_id or None) != space_key):
+                    # 等待补拉期间用户已经删除/编辑了旧记录，不能重新创建它。
+                    self._remove_image_retry(space_key, server_id)
+                    self._persist_image_retries()
+                    return
+            else:
+                existing = self.repository.get_existing_hashes(
+                    [content_hash], space_id=space_key, space_scoped=True,
+                ).get(content_hash)
+            if existing and existing.cloud_id and existing.cloud_id != server_id:
+                self._remove_image_retry(space_key, server_id)
+                self._persist_image_retries()
+                return
+
+            # has_image 是旧快照；上传可能已完成，下载接口会校验最新状态。
+            metadata.pop("has_image", None)
+            metadata.pop("image_url", None)
+            item = self._server_item_to_local(metadata, space_key)
+            if item is None:
+                self._postpone_image_retry(entry)
+                return
+
+            if existing and existing.id:
+                complete = content_hash in self.repository.get_image_hashes_with_data(
+                    [content_hash], space_id=space_key,
+                )
+                item.id = existing.id
+                if not complete and not self.repository.restore_cloud_image(
+                    existing.id, item.image_data, item.image_thumbnail, server_id,
+                ):
+                    raise RuntimeError("无法补齐本地云端图片")
+                # 队列中的收藏状态可能已过期，保留等待期间用户的最新修改。
+                self.repository.update_cloud_sync_metadata(existing.id, cloud_id=server_id)
+                item.is_starred = existing.is_starred
+            else:
+                item.id = self.repository.add_item(item)
+                if not item.id:
+                    raise RuntimeError("无法保存补拉的云端图片")
+                self.repository.set_cloud_ids_bulk([(item.id, server_id)])
+            item.cloud_id = server_id
+            tag_names = [str(tag) for tag in (metadata.get("tags") or []) if tag]
+            self._apply_cloud_tags(item.id, item.space_id, tag_names)
+            self._remove_image_retry(space_key, server_id)
+            self._persist_image_retries()
+            self.images_recovered.emit(space_key, [item])
+        except Exception as exc:
+            logger.warning("云端图片补拉失败: %s", type(exc).__name__)
+            if entry is not None and active_key is not None:
+                # 数据或队列落盘失败时保留目标，不能在内存中丢掉最后一次补拉机会。
+                self._image_retries[active_key] = entry
+                self._image_retries_dirty = True
+                try:
+                    if entry["next_attempt_at"] <= time.time():
+                        self._postpone_image_retry(entry)
+                    else:
+                        self._persist_image_retries()
+                except Exception:
+                    logger.warning("云端图片重试队列暂时无法落盘，保留内存进度")
+        finally:
+            self.image_retry_done.emit()
 
     def _server_item_to_local(
         self, data: dict, space_key=None, *, download_image: bool = True,
@@ -373,7 +554,7 @@ class _SyncWorker(QObject):
         """将服务端返回的 item 数据转换为本地 ClipboardItem
 
         根据服务端 content_type 分派到 TextClipboardItem / ImageClipboardItem 子类。
-        图片类型下载失败时返回 None（调用方会跳过该条目且不推进游标，下次重试）
+        图片类型下载失败时返回 None，由持久队列补拉，不阻塞分页游标。
 
         space_key: 当前正在同步的空间（None=个人）。Why 必须落库 space_id：
         get_existing_hashes 已按 (space_id, content_hash) 去重，若团队条目落库时
@@ -408,6 +589,8 @@ class _SyncWorker(QObject):
                 image_data=None,
                 image_thumbnail=None,
             )
+            if data.get("has_image") is False:
+                return None
             if not download_image:
                 # 仅用来合并已有条目的 cloud_id / 收藏 / 标签，不写入空图片。
                 return item
@@ -415,19 +598,8 @@ class _SyncWorker(QObject):
             if not server_id:
                 logger.warning("服务端图片条目缺少 id，无法下载")
                 return None
-            if data.get("has_image") is False and self._waiting_for_image_upload(server_id):
-                return None
-            if data.get("has_image"):
-                self._image_pending_since.pop(server_id, None)
             if not self._download_image(item, server_id, image_url=data.get("image_url")):
-                # 下载失败且未达到永久放弃阈值 → 返回 None，下次重试
-                if not self._is_permanently_skipped(server_id):
-                    return None
-                # 已达阈值：允许进入本地库（preview 至少保留），
-                # 避免同步游标被永久卡住；但 image_data 仍为 None
-                logger.error(
-                    f"图片下载持续失败达 {self._MAX_IMAGE_RETRY} 次 (server_id={server_id})，放弃重试并写入空图片占位"
-                )
+                return None
 
             return item
         except Exception as e:
@@ -620,6 +792,7 @@ class CloudSyncService(QObject):
     _trigger_push = Signal(object, list)   # (space_key, batch)
     _trigger_pull = Signal(object, int)    # (space_key, last_sync_id)
     _trigger_list_spaces = Signal()
+    _trigger_image_retry = Signal()
 
     # 自适应轮询：限制空闲等待，避免另一个设备复制后等上 30 秒。
     _MIN_INTERVAL_MS = 1000
@@ -676,6 +849,7 @@ class CloudSyncService(QObject):
         # 向后兼容：供老代码/测试读（值为 any space 在途）
         self._pulling = False
         self._pushing = False
+        self._image_retry_inflight = False
 
         # 待上传队列（离线队列）— 仅存新增条目，保证新数据不被失败重试挤出
         self._pending_upload_queue: deque = deque(maxlen=500)
@@ -696,6 +870,8 @@ class CloudSyncService(QObject):
         self._worker.moveToThread(self._worker_thread)
         self._worker.pull_done.connect(self._on_pull_done)
         self._worker.pull_backlog.connect(self._on_pull_backlog)
+        self._worker.images_recovered.connect(self._on_images_recovered)
+        self._worker.image_retry_done.connect(self._on_image_retry_done)
         self._worker.pull_error.connect(self._on_pull_error)
         self._worker.push_done.connect(self._on_push_done)
         self._worker.push_error.connect(self._on_push_error)
@@ -709,6 +885,7 @@ class CloudSyncService(QObject):
         self._trigger_push.connect(self._worker.do_push, Qt.QueuedConnection)
         self._trigger_pull.connect(self._worker.do_pull, Qt.QueuedConnection)
         self._trigger_list_spaces.connect(self._worker.do_list_spaces, Qt.QueuedConnection)
+        self._trigger_image_retry.connect(self._worker.do_retry_images, Qt.QueuedConnection)
         self._worker.spaces_pulled.connect(self._on_spaces_pulled, Qt.QueuedConnection)
         self._worker_thread.start()
 
@@ -725,6 +902,10 @@ class CloudSyncService(QObject):
         self._upload_timer.setSingleShot(True)
         self._upload_timer.setInterval(self._UPLOAD_DEBOUNCE_MS)
         self._upload_timer.timeout.connect(self._push_to_cloud)
+
+        self._image_retry_timer = QTimer(self)
+        self._image_retry_timer.setInterval(1000)
+        self._image_retry_timer.timeout.connect(self._retry_images)
 
         # 注册设备（首次连接时）
         self._device_registered = False
@@ -850,6 +1031,7 @@ class CloudSyncService(QObject):
         self._pulling_spaces.clear()
         self._pushing_spaces.clear()
         self._pulling = self._pushing = False
+        self._image_retry_inflight = False
 
         self._transition(CloudSyncState.RUNNING)
 
@@ -868,6 +1050,7 @@ class CloudSyncService(QObject):
 
         # 周期定时器用于离线恢复与失败重试；新条目走短窗口上传。
         self._push_timer.start(self._MIN_INTERVAL_MS * 2)
+        self._image_retry_timer.start()
         QTimer.singleShot(0, self.force_sync)
 
         # 启动后延迟 5 秒执行初始收藏同步（推送未同步的收藏 + 清理非收藏云端副本）
@@ -889,6 +1072,7 @@ class CloudSyncService(QObject):
         self._pull_timer.stop()
         self._push_timer.stop()
         self._upload_timer.stop()
+        self._image_retry_timer.stop()
         # 非阻塞停止后的最终退出也需落盘末次回调推进的游标。
         self._persist_cursor()
 
@@ -1040,6 +1224,22 @@ class CloudSyncService(QObject):
         self._pulling = True
         self._trigger_pull.emit(space_key, cursor)
 
+    def _retry_images(self):
+        if (self._state != CloudSyncState.RUNNING or self._image_retry_inflight
+                or self._pushing_spaces):
+            return
+        self._image_retry_inflight = True
+        self._trigger_image_retry.emit()
+
+    @Slot()
+    def _on_image_retry_done(self):
+        self._image_retry_inflight = False
+
+    @Slot(object, list)
+    def _on_images_recovered(self, space_key, items: list):
+        if self._state == CloudSyncState.RUNNING and items:
+            self.new_items_available.emit(items)
+
     @Slot(object, str, int)
     def _on_pull_error(self, space_key, message: str, status_code: int):
         """拉取失败回调(主线程)"""
@@ -1053,6 +1253,7 @@ class CloudSyncService(QObject):
             self._pull_timer.stop()
             self._push_timer.stop()
             self._upload_timer.stop()
+            self._image_retry_timer.stop()
             self._transition(CloudSyncState.AUTH_FAILED)
             self.sync_error.emit("云端认证失败,请在设置中重新登录")
         elif status_code == 403:
@@ -1095,6 +1296,7 @@ class CloudSyncService(QObject):
         self._pull_timer.setInterval(self._current_interval)
         self._pull_timer.start()
         self._push_timer.start()
+        self._image_retry_timer.start()
         self.force_sync()
         logger.info("认证恢复,同步定时器已重启")
 
