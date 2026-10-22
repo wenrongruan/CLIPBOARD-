@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage, QPixmapCache
 import shiboken6
 from PySide6.QtWidgets import (
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import ClipboardItem, TextClipboardItem, ImageClipboardItem
+from .icons import icon
 
 
 class ClipboardItemWidget(QWidget):
@@ -25,8 +26,8 @@ class ClipboardItemWidget(QWidget):
 
     # 行高常量：controller 计算行高时必须引用这里，三处各写一遍魔法数字曾造成
     # "删除按钮被截一半"的 bug（改样式时三处不同步）。
-    MIN_H_TEXT = 76   # 纯文本条目最小行高
-    MIN_H_IMAGE = 92  # 图片条目最小行高
+    MIN_H_TEXT = 88   # 纯文本条目最小行高
+    MIN_H_IMAGE = 100  # 图片条目最小行高
     ROW_EXTRA = 8     # item 边框/边距附加高度
 
     def __init__(self, item: ClipboardItem, parent=None):
@@ -69,7 +70,7 @@ class ClipboardItemWidget(QWidget):
 
     def _setup_ui(self):
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 10, 10)
+        layout.setContentsMargins(16, 14, 12, 14)
         layout.setSpacing(10)
 
         # 左侧：内容预览
@@ -176,8 +177,11 @@ class ClipboardItemWidget(QWidget):
             btn.setFlat(True)
             btn.setFixedSize(24, 22)
             btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            btn.setIconSize(QSize(15, 15))
+            btn.setAccessibleName(btn.toolTip())
 
-        star_btn = QPushButton("★" if self.item.is_starred else "☆")
+        star_btn = QPushButton()
+        star_btn.setIcon(icon("star", "accent" if self.item.is_starred else "muted", self.item.is_starred))
         star_btn.setObjectName("starButton")
         star_btn.setToolTip("收藏" if not self.item.is_starred else "取消收藏")
         star_btn.clicked.connect(lambda: self.star_clicked.emit(self.item))
@@ -185,7 +189,8 @@ class ClipboardItemWidget(QWidget):
         button_layout.addWidget(star_btn)
 
         if self.item.is_cloud_synced:
-            cloud_btn = QPushButton("☁")
+            cloud_btn = QPushButton()
+            cloud_btn.setIcon(icon("cloud", "accent"))
             cloud_btn.setObjectName("cloudButton")
             cloud_btn.setToolTip("已同步到云端\n点击删除云端副本")
             cloud_btn.clicked.connect(lambda: self.cloud_delete_clicked.emit(self.item))
@@ -194,21 +199,24 @@ class ClipboardItemWidget(QWidget):
 
         if self.item.is_image:
             if self.item.is_cloud_synced:
-                url_btn = QPushButton("🔗")
+                url_btn = QPushButton()
+                url_btn.setIcon(icon("link"))
                 url_btn.setObjectName("urlButton")
                 url_btn.setToolTip("复制图片链接")
                 url_btn.clicked.connect(lambda: self.image_url_clicked.emit(self.item))
                 _style_btn(url_btn)
                 button_layout.addWidget(url_btn)
 
-            save_btn = QPushButton("💾")
+            save_btn = QPushButton()
+            save_btn.setIcon(icon("download"))
             save_btn.setObjectName("saveButton")
             save_btn.setToolTip("保存图片")
             save_btn.clicked.connect(lambda: self.save_clicked.emit(self.item))
             _style_btn(save_btn)
             button_layout.addWidget(save_btn)
 
-        delete_btn = QPushButton("×")
+        delete_btn = QPushButton()
+        delete_btn.setIcon(icon("trash", "muted"))
         delete_btn.setObjectName("deleteButton")
         delete_btn.setToolTip("删除")
         delete_btn.clicked.connect(lambda: self.delete_clicked.emit(self.item))
@@ -224,6 +232,7 @@ class ClipboardItemWidget(QWidget):
             meta_text += "  ·  " + self.item.device_name
         label = QLabel(meta_text)
         label.setObjectName("metaLabel")
+        label.setToolTip(meta_text)
         label.setMinimumWidth(0)
         # Why: 长 device_name (如 "mangguodeairdeMacBook-Air.local (Darwin)")
         # 若保留默认 Preferred policy 会撑大行宽, 把右侧 28px 按钮列挤出可视区。

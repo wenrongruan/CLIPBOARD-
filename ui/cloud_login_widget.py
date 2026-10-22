@@ -23,6 +23,7 @@ from config import (
 )
 from core.cloud_api import CloudAPIClient, CloudAPIError, rebuild_cloud_client_for_url
 from urllib.parse import urlparse
+from ui.styles import theme_style
 
 logger = logging.getLogger(__name__)
 
@@ -114,15 +115,15 @@ class CloudLoginWidget(QWidget):
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.status_label.setStyleSheet(theme_style("color: $danger; font-size: 12px;"))
         root.addWidget(self.status_label)
 
         # 注册链接 —— 跟随服务器地址，自托管用户也能跳到对应站点
-        link_style = "color: #58a6ff; text-decoration: none;"
+        link_style = "text-decoration: none;"
         self._link_style = link_style
         self.register_label = QLabel()
         self.register_label.setOpenExternalLinks(True)
-        self.register_label.setStyleSheet("color: #888888; font-size: 12px;")
+        self.register_label.setStyleSheet(theme_style("color: $muted; font-size: 12px;"))
         self._refresh_register_links(self.url_edit.text())
         self.url_edit.textChanged.connect(self._refresh_register_links)
         root.addWidget(self.register_label)
@@ -246,7 +247,7 @@ class CloudLoginWidget(QWidget):
     def _on_login_timeout(self):
         """请求未结束时继续禁止重试，避免重叠请求写入不同账号的凭证。"""
         logger.warning(f"[Login#{self._current_request_id}] 登录请求仍未结束")
-        self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
+        self.status_label.setStyleSheet(theme_style("color: $danger; font-size: 12px;"))
         self.status_label.setText("登录响应较慢，仍在等待当前请求结束，请暂勿重复登录。")
 
     def _handle_login_result(self, request_id, result, error_msg: str):
@@ -257,13 +258,13 @@ class CloudLoginWidget(QWidget):
         self._login_in_flight = False
         self._set_loading(False)
         if error_msg:
-            self.status_label.setStyleSheet("color: #f87171; font-size: 12px;")
+            self.status_label.setStyleSheet(theme_style("color: $danger; font-size: 12px;"))
             self.status_label.setText(error_msg)
             self._set_loading(False)
             self.login_failed.emit(error_msg)
             return
 
-        self.status_label.setStyleSheet("color: #4ade80; font-size: 12px;")
+        self.status_label.setStyleSheet(theme_style("color: $accent; font-size: 12px;"))
         self.status_label.setText("登录成功！")
         self.login_btn.setText("已登录")
         self.login_succeeded.emit(result if isinstance(result, dict) else {})

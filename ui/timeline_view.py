@@ -110,7 +110,8 @@ class TimelineView(QWidget):
         if not self._items:
             empty = QLabel("暂无条目")
             empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet("color:#888;padding:24px;")
+            empty.setObjectName("emptyDescription")
+            empty.setContentsMargins(16, 24, 16, 24)
             layout.insertWidget(layout.count() - 1, empty)
             self._group_widgets[_dt.date.today()] = empty  # 占位避免后续 None
             return
@@ -141,22 +142,18 @@ class TimelineView(QWidget):
     ) -> QWidget:
         frame = QFrame()
         frame.setObjectName("timelineGroup")
-        frame.setStyleSheet(
-            "QFrame#timelineGroup { background:#2a2a2a; border:1px solid #3c3c3c; "
-            "border-radius:6px; }"
-        )
         v = QVBoxLayout(frame)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(4)
 
         header = QLabel(f"{day.isoformat()}  ({len(items)})")
-        header.setStyleSheet("color:#e8e8e8;font-weight:600;font-size:12px;")
+        header.setObjectName("sectionCaption")
         v.addWidget(header)
 
         if not show_details:
             # 仅显示计数，不渲染每个条目
             hint = QLabel(f"共 {len(items)} 条（大数据集折叠）")
-            hint.setStyleSheet("color:#888;font-size:11px;")
+            hint.setObjectName("sidebarCaption")
             v.addWidget(hint)
             return frame
 

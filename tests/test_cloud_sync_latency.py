@@ -108,7 +108,7 @@ def test_next_page_requires_matching_cursor_and_running_state(service):
     service._trigger_pull.emit.assert_called_once_with("team", 100)
 
 
-def test_failed_image_does_not_trigger_immediate_page_retry(tmp_path):
+def test_failed_image_is_deferred_without_blocking_next_page(tmp_path):
     db = DatabaseManager(str(tmp_path / "failed-image.db"))
     try:
         api = MagicMock()
@@ -121,8 +121,9 @@ def test_failed_image_does_not_trigger_immediate_page_retry(tmp_path):
         backlog = []
         worker.pull_backlog.connect(lambda *args: backlog.append(args))
         worker.do_pull(None, 0)
-        assert backlog == []
-        assert worker._skip_counter[1] == 1
+        assert backlog == [(None, 1)]
+        assert not worker._skip_counter
+        assert (None, 1) in worker._image_retries
     finally:
         db.close()
 
@@ -162,12 +163,14 @@ def test_pending_image_upload_does_not_exhaust_download_retries(tmp_path):
         for _ in range(worker._MAX_IMAGE_RETRY + 1):
             worker.do_pull(None, 0)
         api.download_image.assert_not_called()
-        assert not worker._skip_counter and not backlog
-        worker._image_pending_since[1] -= worker._IMAGE_UPLOAD_GRACE_SEC + 1
+        assert not worker._skip_counter and (None, 1) in worker._image_retries
+        assert backlog and all(cursor == 1 for _, cursor in backlog)
+        worker._image_retries[(None, 1)]["next_attempt_at"] = time.time() - 1
         api.download_image.return_value = None
-        worker.do_pull(None, 0)
+        worker.do_retry_images()
         api.download_image.assert_called_once_with(1)
-        assert worker._skip_counter[1] == 1
+        assert not worker._skip_counter
+        assert worker._image_retries[(None, 1)]["attempts"] == 1
     finally:
         db.close()
 
@@ -196,6 +199,31 @@ def test_personal_image_cache_does_not_suppress_team_image_download(tmp_path):
         assert repo.get_item_by_id(personal_id).cloud_id is None
         assert repo.get_by_cloud_id(77).space_id == "team"
         assert repo.get_by_cloud_id(77).image_data == b"team-image"
+    finally:
+        db.close()
+
+
+def test_retry_binds_later_local_placeholder_and_respects_its_deletion(tmp_path):
+    db = DatabaseManager(str(tmp_path / "late-placeholder.db"))
+    try:
+        repo = ClipboardRepository(db)
+        api = MagicMock()
+        api.sync.return_value = {"items": [{
+            "id": 77, "content_type": "image", "content_hash": "late-local",
+            "has_image": False, "created_at": 1,
+        }]}
+        worker = _SyncWorker(api, repo)
+        worker.do_pull(None, 0)
+        local_id = repo.add_item(ImageClipboardItem(content_hash="late-local", created_at=1))
+        worker.do_pull(None, 0)
+        entry = worker._image_retries[(None, 77)]
+        assert entry["local_id"] == local_id
+        repo.delete_item(local_id)
+        entry["next_attempt_at"] = time.time() - 1
+        worker.do_retry_images()
+        api.download_image.assert_not_called()
+        assert not worker._image_retries
+        assert not repo.get_existing_hashes(["late-local"], space_id=None, space_scoped=True)
     finally:
         db.close()
 

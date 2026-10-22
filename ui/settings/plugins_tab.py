@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # 旧代码在这里维护了一份私有 _ACTIVE_THREADS，与 main_window_helpers 的
 # window._migration_worker 互不共享；统一走 track_thread() 后两处行为一致。
 from ui.thread_utils import track_thread as _track_thread
+from ui.styles import theme_style
 
 
 class _StoreLoadThread(QThread):
@@ -180,7 +181,7 @@ class PluginsTab(QWidget):
             "插件是可选自动化增强；插件加载、商店或执行失败不会影响本地剪贴板历史、搜索和热键。"
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("color: #aaaaaa; font-size: 12px; padding: 0 0 8px 0;")
+        desc.setStyleSheet(theme_style("color: $secondary; font-size: 12px; padding: 0 0 8px 0;"))
         content_layout.addWidget(desc)
 
         # 已安装插件
@@ -200,7 +201,7 @@ class PluginsTab(QWidget):
         if not IS_APPSTORE_BUILD:
             separator = QFrame()
             separator.setFrameShape(QFrame.HLine)
-            separator.setStyleSheet("color: #555555; margin: 8px 0;")
+            separator.setStyleSheet(theme_style("color: $border; margin: 8px 0;"))
             content_layout.addWidget(separator)
 
             store_header = QHBoxLayout()
@@ -257,7 +258,7 @@ class PluginsTab(QWidget):
         plugins = self._plugin_manager.get_loaded_plugins()
         if not plugins:
             empty_label = QLabel(t("plugin_no_installed"))
-            empty_label.setStyleSheet("color: #888888; padding: 10px;")
+            empty_label.setStyleSheet(theme_style("color: $muted; padding: 10px;"))
             empty_label.setAlignment(Qt.AlignCenter)
             self._plugin_list_layout.addWidget(empty_label)
             return
@@ -287,22 +288,22 @@ class PluginsTab(QWidget):
         info_layout.addWidget(name_label)
 
         desc_label = QLabel(info["description"])
-        desc_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        desc_label.setStyleSheet(theme_style("color: $secondary; font-size: 12px;"))
         desc_label.setWordWrap(True)
         info_layout.addWidget(desc_label)
 
         status = info["status"]
         if status == "missing_deps":
             status_label = QLabel(t("plugin_missing_deps", deps=", ".join(info["missing_deps"])))
-            status_label.setStyleSheet("color: #f0ad4e; font-size: 11px;")
+            status_label.setStyleSheet(theme_style("color: $warning; font-size: 11px;"))
             info_layout.addWidget(status_label)
         elif status == "incompatible":
             status_label = QLabel(t("plugin_incompatible"))
-            status_label.setStyleSheet("color: #f87171; font-size: 11px;")
+            status_label.setStyleSheet(theme_style("color: $danger; font-size: 11px;"))
             info_layout.addWidget(status_label)
         elif status == "error":
             status_label = QLabel(f"{t('plugin_error')}: {info['status_message']}")
-            status_label.setStyleSheet("color: #f87171; font-size: 11px;")
+            status_label.setStyleSheet(theme_style("color: $danger; font-size: 11px;"))
             info_layout.addWidget(status_label)
 
         row_layout.addLayout(info_layout, 1)
@@ -321,8 +322,8 @@ class PluginsTab(QWidget):
         if not IS_APPSTORE_BUILD:
             uninstall_btn = QPushButton(t("plugin_uninstall"))
             uninstall_btn.setStyleSheet(
-                "QPushButton { color: #f87171; border: 1px solid #f87171; padding: 2px 8px; }"
-                "QPushButton:hover { background: #f87171; color: white; }"
+                theme_style("QPushButton { color: $danger; border: 1px solid $danger; padding: 2px 8px; }"
+                "QPushButton:hover { background: $danger; color: white; }")
             )
             uninstall_btn.clicked.connect(
                 lambda checked=False, pid=plugin_id: self._uninstall_plugin(pid)
@@ -363,7 +364,7 @@ class PluginsTab(QWidget):
         self._clear_layout(self._store_list_layout)
 
         loading_label = QLabel(t("plugin_store_loading"))
-        loading_label.setStyleSheet("color: #888888; padding: 10px;")
+        loading_label.setStyleSheet(theme_style("color: $muted; padding: 10px;"))
         loading_label.setAlignment(Qt.AlignCenter)
         self._store_list_layout.addWidget(loading_label)
 
@@ -407,7 +408,7 @@ class PluginsTab(QWidget):
 
         if not available and not incompatible:
             label = QLabel(t("plugin_store_empty"))
-            label.setStyleSheet("color: #888888; padding: 10px;")
+            label.setStyleSheet(theme_style("color: $muted; padding: 10px;"))
             label.setAlignment(Qt.AlignCenter)
             self._store_list_layout.addWidget(label)
             return
@@ -421,7 +422,7 @@ class PluginsTab(QWidget):
                 f"另有 {len(incompatible)} 个插件需要更高版本（当前 {APP_VERSION}），"
                 "请升级 SharedClipboard 后再查看。"
             )
-            hint.setStyleSheet("color:#aaa;font-size:11px;padding:8px 4px;")
+            hint.setStyleSheet(theme_style("color:$secondary;font-size:11px;padding:8px 4px;"))
             hint.setWordWrap(True)
             self._store_list_layout.addWidget(hint)
 
@@ -430,7 +431,7 @@ class PluginsTab(QWidget):
         self._clear_layout(self._store_list_layout)
 
         label = QLabel(t("plugin_store_error"))
-        label.setStyleSheet("color: #f87171; padding: 10px;")
+        label.setStyleSheet(theme_style("color: $danger; padding: 10px;"))
         label.setAlignment(Qt.AlignCenter)
         self._store_list_layout.addWidget(label)
 
@@ -451,7 +452,7 @@ class PluginsTab(QWidget):
         desc = info.get("description", "")
         if desc:
             desc_label = QLabel(desc)
-            desc_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+            desc_label.setStyleSheet(theme_style("color: $secondary; font-size: 12px;"))
             desc_label.setWordWrap(True)
             info_layout.addWidget(desc_label)
 
@@ -459,9 +460,9 @@ class PluginsTab(QWidget):
 
         install_btn = QPushButton(t("plugin_install"))
         install_btn.setStyleSheet(
-            "QPushButton { color: #4fc3f7; border: 1px solid #4fc3f7; padding: 4px 16px; }"
-            "QPushButton:hover { background: #4fc3f7; color: white; }"
-            "QPushButton:disabled { color: #888888; border-color: #888888; }"
+            theme_style("QPushButton { color: $accent; border: 1px solid $accent; padding: 4px 16px; }"
+            "QPushButton:hover { background: $accent; color: white; }"
+            "QPushButton:disabled { color: $muted; border-color: $muted; }")
         )
         plugin_id = info["id"]
         download_url = info.get("download_url", f"/api/plugins/download/{plugin_id}")

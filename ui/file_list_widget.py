@@ -39,6 +39,7 @@ from core.file_storage import (
 )
 
 from .file_list_model import FileListModel, ProgressDelegate
+from ui.styles import theme_style
 
 logger = logging.getLogger(__name__)
 
@@ -148,11 +149,11 @@ class FileListWidget(QWidget):
         # 顶部配额条
         quota_row = QHBoxLayout()
         self.plan_label = QLabel("套餐: --")
-        self.plan_label.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        self.plan_label.setStyleSheet(theme_style("color: $accent; font-weight: bold;"))
         quota_row.addWidget(self.plan_label)
         quota_row.addSpacing(10)
         self.quota_label = QLabel("已用 0 / 0")
-        self.quota_label.setStyleSheet("color: #aaa;")
+        self.quota_label.setStyleSheet(theme_style("color: $secondary;"))
         quota_row.addWidget(self.quota_label)
         quota_row.addStretch()
         self.add_btn = QPushButton("添加文件")
@@ -166,7 +167,7 @@ class FileListWidget(QWidget):
 
         manage_row = QHBoxLayout()
         self.scope_label = QLabel("当前账号的文件")
-        self.scope_label.setStyleSheet("color:#aaa;font-size:11px;")
+        self.scope_label.setStyleSheet(theme_style("color:$secondary;font-size:11px;"))
         manage_row.addWidget(self.scope_label)
         manage_row.addStretch()
         self.refresh_btn = QPushButton("刷新云端")
@@ -183,22 +184,22 @@ class FileListWidget(QWidget):
         self.usage_bar.setTextVisible(False)
         self.usage_bar.setFixedHeight(6)
         self.usage_bar.setStyleSheet(
-            "QProgressBar{background:#333;border:none;border-radius:3px;}"
-            "QProgressBar::chunk{background:#0078d4;border-radius:3px;}"
+            theme_style("QProgressBar{background:$subtle;border:none;border-radius:3px;}"
+            "QProgressBar::chunk{background:$accent;border-radius:3px;}")
         )
         root.addWidget(self.usage_bar)
 
         # 灰化横幅（未付费时显示）
         self.gate_banner = QFrame()
         self.gate_banner.setStyleSheet(
-            "QFrame{background:rgba(255,165,0,0.12);border:1px solid #fbbf24;border-radius:6px;padding:8px;}"
+            theme_style("QFrame{background:$warning_soft;border:1px solid $warning;border-radius:6px;padding:8px;}")
         )
         gb_layout = QHBoxLayout(self.gate_banner)
         gb_layout.setContentsMargins(10, 6, 10, 6)
         self.gate_banner_text = QLabel(
             "文件云同步需要付费订阅（Basic / Super / Ultimate / Team）"
         )
-        self.gate_banner_text.setStyleSheet("color: #fbbf24; background: transparent; border: none;")
+        self.gate_banner_text.setStyleSheet(theme_style("color: $warning; background: transparent; border: none;"))
         gb_layout.addWidget(self.gate_banner_text, 1)
         go = QPushButton("去升级")
         go.clicked.connect(self._open_pricing)
@@ -209,8 +210,8 @@ class FileListWidget(QWidget):
         # 同步状态条（替代弹窗，避免打断主路径）
         self.sync_status_label = QLabel("")
         self.sync_status_label.setStyleSheet(
-            "color:#fbbf24;background:rgba(255,165,0,0.10);"
-            "border:1px solid rgba(251,191,36,0.4);border-radius:4px;padding:4px 8px;font-size:11px;"
+            theme_style("color:$warning;background:$warning_soft;"
+            "border:1px solid $warning;border-radius:4px;padding:4px 8px;font-size:11px;")
         )
         self.sync_status_label.setWordWrap(True)
         self.sync_status_label.setVisible(False)
@@ -452,14 +453,14 @@ class FileListWidget(QWidget):
             self.usage_bar.setValue(pct)
             if pct != self._last_usage_pct:
                 if pct >= 95:
-                    color = "#f87171"
+                    color = "danger"
                 elif pct >= 80:
-                    color = "#fbbf24"
+                    color = "warning"
                 else:
-                    color = "#0078d4"
+                    color = "accent"
                 self.usage_bar.setStyleSheet(
-                    f"QProgressBar{{background:#333;border:none;border-radius:3px;}}"
-                    f"QProgressBar::chunk{{background:{color};border-radius:3px;}}"
+                    theme_style(f"QProgressBar{{background:$subtle;border:none;border-radius:3px;}}"
+                    f"QProgressBar::chunk{{background:${color};border-radius:3px;}}")
                 )
                 if pct >= 95:
                     threshold = 95

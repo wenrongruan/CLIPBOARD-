@@ -6,21 +6,28 @@ rem 在 Windows 10/11 的命令提示符中双击或执行此文件即可生成 
 
 cd /d "%~dp0"
 
-where py >nul 2>&1
+rem 优先使用 PATH 中已选定的 Python，尊重 CI 和虚拟环境的版本配置。
+where python >nul 2>&1
 if not errorlevel 1 (
-    set "PYTHON=py -3"
+    set "PYTHON=python"
 ) else (
-    where python >nul 2>&1
+    where py >nul 2>&1
     if errorlevel 1 (
         echo [错误] 未找到 Python 3。请先从 https://www.python.org/downloads/windows/ 安装 Python 3.11+。
         exit /b 1
     )
-    set "PYTHON=python"
+    set "PYTHON=py -3"
 )
 
 %PYTHON% --version
 if errorlevel 1 (
     echo [错误] 无法运行 Python 解释器。
+    exit /b 1
+)
+
+%PYTHON% -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"
+if errorlevel 1 (
+    echo [错误] 需要 Python 3.11 或更新版本。
     exit /b 1
 )
 

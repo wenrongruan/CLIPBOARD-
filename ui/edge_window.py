@@ -236,7 +236,7 @@ class EdgeHiddenWindow(QWidget):
                 zone,
             )
 
-    def _effective_size(self) -> tuple[int, int]:
+    def _effective_size(self, screen_rect: Optional[QRect] = None) -> tuple[int, int]:
         """窗口的"真实"尺寸，用于算隐藏位。
 
         子控件（侧边栏等）的最小尺寸可能把窗口撑得比 WINDOW_WIDTH 大，
@@ -254,15 +254,18 @@ class EdgeHiddenWindow(QWidget):
         （_correct_position_after_layout）。
         """
         if self._laid_out:
-            return (
-                max(self._window_width, self.width()),
-                max(self._window_height, self.height()),
-            )
-        hint = self.sizeHint()
-        return (
-            max(self._window_width, hint.width()),
-            max(self._window_height, hint.height()),
-        )
+            width = max(self._window_width, self.width())
+            height = max(self._window_height, self.height())
+        else:
+            hint = self.sizeHint()
+            width = max(self._window_width, hint.width())
+            height = max(self._window_height, hint.height())
+        # Use one fitted size for both animation endpoints. Otherwise a short
+        # display can hide/show using different heights and cover the Dock.
+        if screen_rect is not None and not screen_rect.isEmpty():
+            width = min(width, screen_rect.width())
+            height = min(height, screen_rect.height())
+        return width, height
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -276,35 +279,28 @@ class EdgeHiddenWindow(QWidget):
     def _correct_position_after_layout(self) -> None:
         """按布局算出的真实尺寸校正一次停靠位置。
 
-        只在真实尺寸确实大于配置尺寸（子控件把窗口撑大了）时才动，避免无谓的
-        setGeometry 引发一次可见的跳动。悬浮态是用户自己摆的，不动。
+        同时处理子控件撑大和屏幕可用区域较小两种情况；位置与尺寸已经正确时
+        不重复 setGeometry。悬浮态是用户自己摆的，不动。
         """
         if self._is_floating:
-            return
-        if self.width() <= self._window_width and self.height() <= self._window_height:
             return
         screen_rect = self._get_screen_rect()
         if screen_rect.isEmpty():
             return
-        logger.debug(
-            "窗口真实尺寸 %dx%d 大于配置 %dx%d，重算停靠位置",
-            self.width(),
-            self.height(),
-            self._window_width,
-            self._window_height,
+        target = (
+            self._get_visible_geometry(screen_rect) if self._is_visible
+            else self._get_hidden_geometry(screen_rect)
         )
-        if self._is_visible:
-            self._move_to_visible_position(screen_rect)
-        else:
-            self._move_to_hidden_position(screen_rect)
+        if self.geometry() != target:
+            self.setGeometry(target)
 
     def _get_hidden_geometry(self, screen_rect: QRect) -> QRect:
         margin = self._hidden_margin
-        width, height = self._effective_size()
+        width, height = self._effective_size(screen_rect)
 
         if self._dock_edge == "right":
             return QRect(
-                screen_rect.right() - margin,
+                screen_rect.right() + 1 - margin,
                 (screen_rect.height() - height) // 2 + screen_rect.top(),
                 width,
                 height,
@@ -326,17 +322,17 @@ class EdgeHiddenWindow(QWidget):
         else:  # bottom
             return QRect(
                 (screen_rect.width() - width) // 2 + screen_rect.left(),
-                screen_rect.bottom() - margin,
+                screen_rect.bottom() + 1 - margin,
                 width,
                 height,
             )
 
     def _get_visible_geometry(self, screen_rect: QRect) -> QRect:
-        width, height = self._effective_size()
+        width, height = self._effective_size(screen_rect)
 
         if self._dock_edge == "right":
             return QRect(
-                screen_rect.right() - width,
+                screen_rect.right() + 1 - width,
                 (screen_rect.height() - height) // 2 + screen_rect.top(),
                 width,
                 height,
@@ -358,7 +354,7 @@ class EdgeHiddenWindow(QWidget):
         else:  # bottom
             return QRect(
                 (screen_rect.width() - width) // 2 + screen_rect.left(),
-                screen_rect.bottom() - height,
+                screen_rect.bottom() + 1 - height,
                 width,
                 height,
             )

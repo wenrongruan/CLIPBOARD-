@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import PRICING_URL
+from ui.styles import theme_style
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +137,7 @@ class TeamTab(QWidget):
             "团队空间是可选协作增强；未启用或不可用时，本地剪贴板历史、搜索、收藏和热键仍可正常使用。"
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("color:#aaa;font-size:12px;padding:0 0 6px 0;")
+        desc.setStyleSheet(theme_style("color:$secondary;font-size:12px;padding:0 0 6px 0;"))
         layout.addWidget(desc)
 
         ent = None
@@ -154,7 +155,7 @@ class TeamTab(QWidget):
         if not team_enabled:
             tip = QLabel("升级到 Team 档位（或 Super / Ultimate）以解锁团队功能。")
             tip.setWordWrap(True)
-            tip.setStyleSheet("color:#aaa;padding:16px;")
+            tip.setStyleSheet(theme_style("color:$secondary;padding:16px;"))
             layout.addWidget(tip)
             upgrade_btn = QPushButton("查看套餐")
             upgrade_btn.clicked.connect(self._open_pricing_page)
@@ -164,7 +165,7 @@ class TeamTab(QWidget):
 
         # 上半区：team 空间列表 + 新建按钮
         spaces_label = QLabel("团队空间")
-        spaces_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        spaces_label.setStyleSheet(theme_style("color:$secondary;font-size:11px;font-weight:600;"))
         layout.addWidget(spaces_label)
 
         self._team_space_list = QListWidget()
@@ -183,7 +184,7 @@ class TeamTab(QWidget):
 
         # 下半区：成员列表
         members_label = QLabel("成员")
-        members_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        members_label.setStyleSheet(theme_style("color:$secondary;font-size:11px;font-weight:600;"))
         layout.addWidget(members_label)
 
         self._team_member_list = QListWidget()

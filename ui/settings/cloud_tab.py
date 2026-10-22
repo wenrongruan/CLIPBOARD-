@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 
 from config import get_cloud_access_token, settings, update_settings
 from i18n import t  # noqa: F401  (保留，与其他 Tab 一致；部分子部件可能也会用)
+from ui.styles import theme_style
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ class CloudTab(QWidget):
             "  · 剪贴板同步：传文本和图片，免费档位即可使用。\n"
             "  · 文件云同步：付费增强，按容量上传原始文件字节，可单独开关。"
         )
-        desc.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        desc.setStyleSheet(theme_style("color: $secondary; font-size: 12px;"))
         desc.setWordWrap(True)
         cloud_layout.addWidget(desc)
 

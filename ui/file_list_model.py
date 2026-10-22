@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.file_models import CloudFile, FileSyncState
+from .styles import COLORS
 
 
 _HEADERS = ["名称", "大小", "修改时间", "状态", "设备"]
@@ -147,9 +148,9 @@ class FileListModel(QAbstractTableModel):
                 return f.last_error
         elif role == Qt.ForegroundRole and col == self.COL_STATE:
             if f.sync_state == FileSyncState.ERROR.value:
-                return QColor("#f87171")
+                return QColor(COLORS["danger"])
             if f.sync_state == FileSyncState.SYNCED.value:
-                return QColor("#4ade80")
+                return QColor(COLORS["accent"])
         elif role == Qt.UserRole:
             return f
         elif role == Qt.UserRole + 1 and col == self.COL_STATE:
@@ -166,8 +167,6 @@ class ProgressDelegate(QStyledItemDelegate):
 
     # Why: macOS 原生 QStyle.CE_ProgressBar 在 progress=0 时会完全不渲染（没有槽也没有文字），
     # 0% → ~100% 的整个上传过程状态列看起来就是空白。自绘槽 + 填充 + 文字保证可见。
-    _TRACK_COLOR = QColor("#3c3c3c")
-    _FILL_COLOR = QColor("#0078d4")
 
     def paint(self, painter, option, index):
         data = index.data(Qt.UserRole + 1)
@@ -179,12 +178,12 @@ class ProgressDelegate(QStyledItemDelegate):
             bar_rect = option.rect.adjusted(4, 6, -4, -6)
             painter.save()
             painter.setPen(Qt.NoPen)
-            painter.setBrush(self._TRACK_COLOR)
+            painter.setBrush(QColor(COLORS["subtle"]))
             painter.drawRoundedRect(bar_rect, 3, 3)
             if pct > 0:
                 filled = QRect(bar_rect)
                 filled.setWidth(int(bar_rect.width() * pct / 100))
-                painter.setBrush(self._FILL_COLOR)
+                painter.setBrush(QColor(COLORS["accent"]))
                 painter.drawRoundedRect(filled, 3, 3)
             painter.setPen(option.palette.text().color())
             painter.drawText(option.rect, Qt.AlignCenter, f"{pct}%")

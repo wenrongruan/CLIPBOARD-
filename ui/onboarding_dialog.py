@@ -21,6 +21,8 @@ from PySide6.QtWidgets import (
 )
 
 from config import get_effective_hotkey, update_settings, flush_settings
+from ui.styles import theme_style
+from ui.theme import follow_system_theme
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class OnboardingDialog(QDialog):
         self.setModal(False)
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setMinimumSize(460, 300)
+        follow_system_theme(self)
         self._setup_ui()
         self._render_step()
 
@@ -57,7 +60,7 @@ class OnboardingDialog(QDialog):
         layout.addWidget(self.slogan)
 
         self.step_label = QLabel("")
-        self.step_label.setStyleSheet("color:#aaa;font-size:11px;")
+        self.step_label.setStyleSheet(theme_style("color:$secondary;font-size:11px;"))
         layout.addWidget(self.step_label)
 
         self.title_label = QLabel("")

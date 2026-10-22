@@ -208,3 +208,28 @@ def test_collapse_persists_through_settings_store(tmp_path):
 
     reloaded = config.SettingsStore(path)
     assert reloaded.snapshot().sidebar_collapsed is True
+
+
+def test_create_space_button_text_fits_both_themes(host, qapp):
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+    from ui.styles import current_theme
+    from ui.theme import follow_system_theme, theme_manager
+
+    follow_system_theme(host)
+    manager = theme_manager()
+    original_theme = current_theme()
+    host.sidebar.space_section.show()
+    try:
+        for theme in ("light", "dark"):
+            manager._apply_theme(theme)
+            qapp.processEvents()
+            button = host.sidebar.create_space_btn
+            option = QStyleOptionButton()
+            button.initStyleOption(option)
+            content = button.style().subElementRect(QStyle.SE_PushButtonContents, option, button)
+            assert content.width() >= button.fontMetrics().horizontalAdvance(button.text())
+            assert content.height() >= button.fontMetrics().height()
+            assert button.width() == 22
+            assert button.height() == 22
+    finally:
+        manager._apply_theme(original_theme)

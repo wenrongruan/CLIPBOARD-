@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from config import PRICING_URL
 from core.cloud_api import CloudAPIClient, CloudAPIError
 from PySide6.QtCore import Signal as QtSignal
+from ui.styles import theme_style
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +53,12 @@ class SubscriptionWidget(QWidget):
         layout.setSpacing(16)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # QGroupBox 内的 QLabel 和 QFormLayout 行标签在某些深色主题下默认色不可见，
-        # 这里统一给 groupbox 后代样式，保证所有行标签/小提示在深色背景下看得清
-        _group_style = (
-            "QGroupBox{color:#e8e8e8;font-weight:600;border:1px solid #3c3c3c;"
+        # Keep account and quota panels aligned with the shared surface tokens.
+        _group_style = theme_style(
+            "QGroupBox{color:$text;font-weight:600;border:1px solid $border;"
             "border-radius:6px;margin-top:10px;padding:8px 10px 10px 10px;}"
             "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 4px;}"
-            "QGroupBox QLabel{color:#cbd5e1;background:transparent;}"
+            "QGroupBox QLabel{color:$secondary;background:transparent;}"
         )
 
         # ===== 账户信息组 =====
@@ -72,15 +72,15 @@ class SubscriptionWidget(QWidget):
         email = settings().cloud_user_email
 
         self.email_label = QLabel(email or "未登录")
-        self.email_label.setStyleSheet("color: #e8e8e8;")
+        self.email_label.setStyleSheet(theme_style("color: $text;"))
         account_layout.addRow("邮箱:", self.email_label)
 
         self.plan_label = QLabel("加载中...")
-        self.plan_label.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        self.plan_label.setStyleSheet(theme_style("color: $accent; font-weight: bold;"))
         account_layout.addRow("当前套餐:", self.plan_label)
 
         self.status_label = QLabel("--")
-        self.status_label.setStyleSheet("color: #aaaaaa;")
+        self.status_label.setStyleSheet(theme_style("color: $secondary;"))
         account_layout.addRow("状态:", self.status_label)
 
         layout.addWidget(account_group)
@@ -95,10 +95,10 @@ class SubscriptionWidget(QWidget):
         items_layout = QHBoxLayout()
         items_layout.setSpacing(8)
         self.items_label = QLabel("剪贴板条目:")
-        self.items_label.setStyleSheet("color: #e8e8e8;")
+        self.items_label.setStyleSheet(theme_style("color: $text;"))
         items_layout.addWidget(self.items_label)
         self.items_count_label = QLabel("-- / --")
-        self.items_count_label.setStyleSheet("color: #aaaaaa;")
+        self.items_count_label.setStyleSheet(theme_style("color: $secondary;"))
         items_layout.addWidget(self.items_count_label)
         items_layout.addStretch()
         usage_layout.addLayout(items_layout)
@@ -109,32 +109,32 @@ class SubscriptionWidget(QWidget):
         self.usage_progress.setValue(0)
         self.usage_progress.setTextVisible(False)
         self.usage_progress.setFixedHeight(8)
-        self.usage_progress.setStyleSheet("""
+        self.usage_progress.setStyleSheet(theme_style("""
             QProgressBar {
-                background-color: #3c3c3c;
+                background-color: $border;
                 border: none;
                 border-radius: 4px;
             }
             QProgressBar::chunk {
-                background-color: #0078d4;
+                background-color: $accent;
                 border-radius: 4px;
             }
-        """)
+        """))
         usage_layout.addWidget(self.usage_progress)
 
         # 设备数
         self.devices_label = QLabel("已注册设备: --")
-        self.devices_label.setStyleSheet("color: #aaaaaa; font-size: 12px;")
+        self.devices_label.setStyleSheet(theme_style("color: $secondary; font-size: 12px;"))
         usage_layout.addWidget(self.devices_label)
 
         # 文件存储（付费功能，未启用时显示「需要升级」）
         files_layout = QHBoxLayout()
         files_layout.setSpacing(8)
         files_caption = QLabel("文件存储:")
-        files_caption.setStyleSheet("color: #e8e8e8;")
+        files_caption.setStyleSheet(theme_style("color: $text;"))
         files_layout.addWidget(files_caption)
         self.files_count_label = QLabel("-- / --")
-        self.files_count_label.setStyleSheet("color: #aaaaaa;")
+        self.files_count_label.setStyleSheet(theme_style("color: $secondary;"))
         files_layout.addWidget(self.files_count_label)
         files_layout.addStretch()
         usage_layout.addLayout(files_layout)
@@ -144,10 +144,10 @@ class SubscriptionWidget(QWidget):
         self.files_usage_progress.setValue(0)
         self.files_usage_progress.setTextVisible(False)
         self.files_usage_progress.setFixedHeight(8)
-        self.files_usage_progress.setStyleSheet("""
-            QProgressBar {background-color:#3c3c3c;border:none;border-radius:4px;}
-            QProgressBar::chunk {background-color:#0078d4;border-radius:4px;}
-        """)
+        self.files_usage_progress.setStyleSheet(theme_style("""
+            QProgressBar {background-color:$border;border:none;border-radius:4px;}
+            QProgressBar::chunk {background-color:$accent;border-radius:4px;}
+        """))
         usage_layout.addWidget(self.files_usage_progress)
 
         layout.addWidget(usage_group)
@@ -166,18 +166,18 @@ class SubscriptionWidget(QWidget):
         btn_layout.addWidget(self.manage_btn)
 
         self.logout_btn = QPushButton("退出登录")
-        self.logout_btn.setStyleSheet("""
+        self.logout_btn.setStyleSheet(theme_style("""
             QPushButton {
-                background-color: #3c3c3c;
-                border: 1px solid #ff6b6b;
+                background-color: $border;
+                border: 1px solid $danger;
                 border-radius: 6px;
                 padding: 4px 8px;
-                color: #ff6b6b;
+                color: $danger;
             }
             QPushButton:hover {
-                background-color: rgba(255, 107, 107, 0.2);
+                background-color: $danger_soft;
             }
-        """)
+        """))
         self.logout_btn.clicked.connect(self._do_logout)
         btn_layout.addWidget(self.logout_btn)
 
@@ -310,11 +310,11 @@ class SubscriptionWidget(QWidget):
                 self.usage_progress.setValue(percentage)
 
                 # 用量高时变红
-                chunk_color = "#f87171" if percentage >= 80 else "#0078d4"
-                self.usage_progress.setStyleSheet(f"""
-                    QProgressBar {{ background-color: #3c3c3c; border: none; border-radius: 4px; }}
-                    QProgressBar::chunk {{ background-color: {chunk_color}; border-radius: 4px; }}
-                """)
+                chunk_color = "danger" if percentage >= 80 else "accent"
+                self.usage_progress.setStyleSheet(theme_style(f"""
+                    QProgressBar {{ background-color: $border; border: none; border-radius: 4px; }}
+                    QProgressBar::chunk {{ background-color: ${chunk_color}; border-radius: 4px; }}
+                """))
 
             # 设备数
             self.devices_label.setText(f"已注册设备: {devices_count}/{max_devices}")
@@ -345,10 +345,10 @@ class SubscriptionWidget(QWidget):
                 self.files_count_label.setText(f"已用 {_fmt(files_used)} / {_fmt(files_quota)}")
                 pct = min(100, int(files_used * 100 / max(1, files_quota)))
                 self.files_usage_progress.setValue(pct)
-                color = "#0078d4" if pct < 80 else ("#fbbf24" if pct < 95 else "#f87171")
+                color = "accent" if pct < 80 else ("warning" if pct < 95 else "danger")
                 self.files_usage_progress.setStyleSheet(
-                    f"QProgressBar{{background-color:#3c3c3c;border:none;border-radius:4px;}}"
-                    f"QProgressBar::chunk{{background-color:{color};border-radius:4px;}}"
+                    theme_style(f"QProgressBar{{background-color:$border;border:none;border-radius:4px;}}"
+                    f"QProgressBar::chunk{{background-color:${color};border-radius:4px;}}")
                 )
             else:
                 self.files_count_label.setText("仅 Basic / Super / Ultimate / Team 可用")

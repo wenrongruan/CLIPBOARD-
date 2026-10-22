@@ -14,6 +14,7 @@ from config import PAGE_SIZE, PRICING_URL
 from i18n import t
 
 from ..clipboard_item import ClipboardItemWidget
+from ..icons import icon
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,9 @@ class ClipboardListController(QObject):
                 self.update_list()
                 self.update_pagination()
                 self._parent.list_widget.clear()
+                empty = getattr(self._parent, "empty_state", None)
+                if empty is not None:
+                    empty.hide()
                 placeholder = QListWidgetItem("加载失败，请查看日志或重启应用。")
                 placeholder.setFlags(Qt.NoItemFlags)
                 self._parent.list_widget.addItem(placeholder)
@@ -207,6 +211,7 @@ class ClipboardListController(QObject):
             list_item, widget = self.make_list_item(item)
             list_widget.addItem(list_item)
             list_widget.setItemWidget(list_item, widget)
+        self._update_empty_state()
         if getattr(self._parent, "timeline_view", None) is not None:
             self._parent.timeline_view.set_items(self._items)
 
@@ -224,11 +229,21 @@ class ClipboardListController(QObject):
         list_widget.insertItem(0, list_item)
         list_widget.setItemWidget(list_item, widget)
         self._items.insert(0, item)
+        self._update_empty_state()
 
         if list_widget.count() > self._page_size:
             self._remove_row(list_widget, list_widget.count() - 1)
             if len(self._items) > self._page_size:
                 self._items.pop()
+
+    def _update_empty_state(self):
+        empty = getattr(self._parent, "empty_state", None)
+        if empty is None:
+            return
+        filtered = bool(self._search_query or self._current_tag_id or self._starred_only)
+        self._parent.empty_title.setText(t("empty_filter_title" if filtered else "empty_history_title"))
+        self._parent.empty_description.setText(t("empty_filter_description" if filtered else "empty_history_description"))
+        empty.setVisible(not self._items)
 
     @staticmethod
     def _remove_row(list_widget, row: int):
@@ -374,7 +389,8 @@ class ClipboardListController(QObject):
 
     def toggle_starred_filter(self):
         self._starred_only = not self._starred_only
-        self._parent.star_filter_btn.setText("★" if self._starred_only else "☆")
+        self._parent.star_filter_btn.setChecked(self._starred_only)
+        self._parent.star_filter_btn.setIcon(icon("star", "accent" if self._starred_only else "secondary", self._starred_only))
         self._current_page = 0
         self.load_items()
 

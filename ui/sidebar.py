@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from PySide6.QtCore import QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -36,11 +36,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from i18n import t
+from .icons import icon, set_label_icon
+
 logger = logging.getLogger(__name__)
 
-# 展开 / 折叠态的侧栏宽度（px）。
-# 折叠态 = 只剩一条窄轨道放切换按钮，展开态 = 原来的 200px。
-EXPANDED_WIDTH = 200
+# 展开 / 折叠态的侧栏宽度（px）。折叠后只保留切换按钮。
+EXPANDED_WIDTH = 156
 COLLAPSED_WIDTH = 38
 # 折叠动画时长（ms）；太慢会挡住用户连续操作
 TOGGLE_DURATION = 160
@@ -72,6 +74,7 @@ class Sidebar(QWidget):
         self._suppress_tag_signal = False
         self._collapsed = self._read_saved_collapsed()
         self.setObjectName("sidebar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
         # 折叠靠动画改 min/maxWidth，这里先把策略放开，否则 QHBoxLayout 会把宽度钉死
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self._setup_ui()
@@ -112,6 +115,7 @@ class Sidebar(QWidget):
         self._collapsed = collapsed
 
         self._content.setVisible(not collapsed)
+        self.brand.setVisible(not collapsed)
         self.header_label.setVisible(not collapsed)
         self.collapse_btn.setText("›" if collapsed else "‹")
         self.collapse_btn.setToolTip("展开标签栏" if collapsed else "折叠标签栏")
@@ -163,8 +167,26 @@ class Sidebar(QWidget):
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(8, 20, 8, 16)
         layout.setSpacing(8)
+
+        self.brand = QWidget()
+        brand_layout = QVBoxLayout(self.brand)
+        brand_layout.setContentsMargins(8, 0, 0, 18)
+        brand_layout.setSpacing(10)
+        mark = QLabel()
+        mark.setObjectName("brandMark")
+        mark.setFixedSize(34, 34)
+        mark.setAlignment(Qt.AlignCenter)
+        set_label_icon(mark, "clipboard", "on_accent", 22)
+        brand_layout.addWidget(mark)
+        name = QLabel("Clipboard")
+        name.setObjectName("brandName")
+        brand_layout.addWidget(name)
+        caption = QLabel(t("your_library"))
+        caption.setObjectName("brandCaption")
+        brand_layout.addWidget(caption)
+        layout.addWidget(self.brand)
 
         # --- 标题行：标题 + 折叠按钮（这一行始终可见，折叠后只剩按钮）---
         # Why 包一层 QWidget 再 addWidget(..., Qt.AlignTop)：折叠时 _content 被隐藏，
@@ -176,8 +198,8 @@ class Sidebar(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(6)
 
-        self.header_label = QLabel("标签")
-        self.header_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        self.header_label = QLabel(t("tags_heading"))
+        self.header_label.setObjectName("sidebarCaption")
         header.addWidget(self.header_label)
         header.addStretch(1)
 
@@ -200,6 +222,9 @@ class Sidebar(QWidget):
 
         # 标签树（主路径）
         self.tag_list = QListWidget()
+        self.tag_list.setObjectName("tagList")
+        self.tag_list.setIconSize(QSize(15, 15))
+        self.tag_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tag_list.setSelectionMode(QListWidget.SingleSelection)
         self.tag_list.itemSelectionChanged.connect(self._on_tag_selection_changed)
         content_layout.addWidget(self.tag_list, 1)
@@ -211,7 +236,7 @@ class Sidebar(QWidget):
         space_layout.setSpacing(4)
 
         space_label = QLabel("空间")
-        space_label.setStyleSheet("color:#aaa;font-size:11px;font-weight:600;")
+        space_label.setObjectName("sidebarCaption")
         space_layout.addWidget(space_label)
 
         space_row = QHBoxLayout()
@@ -221,8 +246,11 @@ class Sidebar(QWidget):
         space_row.addWidget(self.space_combo, 1)
 
         self.create_space_btn = QPushButton("+")
+        self.create_space_btn.setObjectName("iconButton")
         self.create_space_btn.setFixedSize(22, 22)
         self.create_space_btn.setToolTip("新建空间")
+        self.create_space_btn.setAccessibleName("新建空间")
+        self.create_space_btn.setCursor(Qt.PointingHandCursor)
         self.create_space_btn.clicked.connect(self._on_create_space_clicked)
         space_row.addWidget(self.create_space_btn)
 
@@ -242,6 +270,12 @@ class Sidebar(QWidget):
         self.upgrade_btn.clicked.connect(self.upgrade_requested.emit)
         content_layout.addWidget(self.upgrade_btn)
         self.upgrade_btn.setVisible(False)
+
+        library_hint = QLabel(t("library_hint"))
+        library_hint.setObjectName("sidebarCaption")
+        library_hint.setWordWrap(True)
+        library_hint.setContentsMargins(8, 8, 8, 0)
+        content_layout.addWidget(library_hint)
 
         layout.addWidget(self._content, 1)
 
@@ -306,7 +340,7 @@ class Sidebar(QWidget):
         try:
             self.tag_list.clear()
             # 固定首项："全部"
-            all_item = QListWidgetItem("全部")
+            all_item = QListWidgetItem(icon("clipboard", "accent"), t("all_records"))
             all_item.setData(Qt.UserRole, None)
             self.tag_list.addItem(all_item)
             self.tag_list.setCurrentItem(all_item)
@@ -324,7 +358,8 @@ class Sidebar(QWidget):
                 tags = []
 
             for tag in tags:
-                item = QListWidgetItem(tag.name or tag.id[:8])
+                item = QListWidgetItem(icon("tag"), tag.name or tag.id[:8])
+                item.setToolTip(tag.name or tag.id[:8])
                 item.setData(Qt.UserRole, tag.id)
                 self.tag_list.addItem(item)
         finally:

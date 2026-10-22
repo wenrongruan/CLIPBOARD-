@@ -20,7 +20,7 @@ from ui.settings.filter_tab import FilterTab
 from ui.settings.general_tab import GeneralTab
 from ui.settings.plugins_tab import PluginsTab
 from ui.settings.team_tab import TeamTab
-from ui.styles import MAIN_STYLE
+from ui.theme import follow_system_theme
 
 
 class SettingsDialog(QDialog):
@@ -60,8 +60,9 @@ class SettingsDialog(QDialog):
         self._auto_load_store = auto_load_store
 
         self.setWindowTitle(t("settings"))
-        self.setFixedSize(580, 560)
-        self.setStyleSheet(MAIN_STYLE)
+        self.setMinimumSize(660, 600)
+        self.resize(720, 640)
+        follow_system_theme(self)
         # Why: 父 MainWindow 带 WindowStaysOnTopHint + Tool, 子 dialog 不继承
         # 这两个标志时会被父窗口永久盖住, 表现为"点击设置没反应"。
         # 给 dialog 也加 StayOnTop 让它始终浮在父窗口之上。
@@ -125,6 +126,10 @@ class SettingsDialog(QDialog):
         ok_btn = button_box.button(QDialogButtonBox.Ok)
         if ok_btn:
             ok_btn.setObjectName("okButton")
+            ok_btn.setText(t("ok"))
+        cancel_btn = button_box.button(QDialogButtonBox.Cancel)
+        if cancel_btn:
+            cancel_btn.setText(t("cancel"))
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)

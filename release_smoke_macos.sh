@@ -189,6 +189,31 @@ for dep in httpx keyring; do
 done
 
 # ════════════════════════════════════════════════════════════════════════════
+# D3. Qt 的原生部署目标不能高于应用声明的最低系统版本
+# ════════════════════════════════════════════════════════════════════════════
+section "D3. macOS 系统版本兼容性"
+
+declared_min=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$INFO_PLIST" 2>/dev/null)
+qt_core=$(find "$APP_BUNDLE/Contents/Frameworks" -type f -path '*/QtCore.framework/Versions/*/QtCore' -print -quit)
+qt_min_versions=""
+if [ -n "$qt_core" ]; then
+    qt_min_versions=$(xcrun vtool -show-build "$qt_core" 2>/dev/null | awk '$1 == "minos" { print $2 }')
+fi
+if [ -z "$declared_min" ] || [ -z "$qt_min_versions" ]; then
+    fail "无法核对应用与 Qt 的最低 macOS 版本"
+elif python3 -c '
+import sys
+def version(value):
+    return tuple((list(map(int, value.split("."))) + [0, 0, 0])[:3])
+target = version(sys.argv[1])
+raise SystemExit(0 if all(version(v) <= target for v in sys.argv[2].split()) else 1)
+' "$declared_min" "$qt_min_versions"; then
+    pass "Qt 的两个架构均兼容应用声明的 macOS $declared_min"
+else
+    fail "Qt 的最低 macOS 版本高于应用声明的 $declared_min — 请使用兼容的 PySide6 构建"
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
 # E. 干净 container 启动检查（自动）
 # ════════════════════════════════════════════════════════════════════════════
 section "E. 新装机模拟（清空 sandbox container）"

@@ -11,6 +11,7 @@ from config import (
     update_settings,
 )
 from i18n import get_languages, t
+from ui.styles import theme_style
 
 
 class GeneralTab(QWidget):
@@ -25,6 +26,11 @@ class GeneralTab(QWidget):
         layout = QFormLayout(self)
         layout.setSpacing(12)
         layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        appearance = QLabel(t("appearance_follow_system"))
+        appearance.setProperty("role", "secondary")
+        appearance.setWordWrap(True)
+        layout.addRow(t("appearance"), appearance)
 
         # 语言
         self.language_combo = QComboBox()
@@ -53,7 +59,7 @@ class GeneralTab(QWidget):
 
         hotkey_help = QLabel("?")
         hotkey_help.setToolTip(t("hotkey_help"))
-        hotkey_help.setStyleSheet("color: #888; font-weight: bold;")
+        hotkey_help.setStyleSheet(theme_style("color: $muted; font-weight: bold;"))
         hotkey_layout.addWidget(hotkey_help)
         layout.addRow(t("global_hotkey"), hotkey_layout)
 
@@ -66,7 +72,7 @@ class GeneralTab(QWidget):
 
         screenshot_help = QLabel("?")
         screenshot_help.setToolTip(t("hotkey_help"))
-        screenshot_help.setStyleSheet("color: #888; font-weight: bold;")
+        screenshot_help.setStyleSheet(theme_style("color: $muted; font-weight: bold;"))
         screenshot_layout.addWidget(screenshot_help)
         layout.addRow(t("screenshot_hotkey"), screenshot_layout)
 

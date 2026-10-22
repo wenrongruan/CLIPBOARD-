@@ -9,15 +9,16 @@ from PySide6.QtWidgets import (
     QLabel,
 )
 
-from .styles import MAIN_STYLE
+from .theme import follow_system_theme
 from .cloud_login_widget import CloudLoginWidget
 from core.cloud_api import CloudAPIClient
+from ui.styles import theme_style
 
 logger = logging.getLogger(__name__)
 
 
 class CloudAuthDialog(QDialog):
-    """云端登录/注册对话框，使用项目暗色主题"""
+    """云端登录/注册对话框，使用应用统一主题"""
 
     def __init__(self, cloud_api: CloudAPIClient, parent=None):
         super().__init__(parent)
@@ -25,8 +26,9 @@ class CloudAuthDialog(QDialog):
         self._auth_result = None
 
         self.setWindowTitle("云端登录")
-        self.setFixedSize(400, 320)
-        self.setStyleSheet(MAIN_STYLE)
+        self.setMinimumSize(420, 440)
+        self.resize(440, 460)
+        follow_system_theme(self)
         self._setup_ui()
 
     def _setup_ui(self):
@@ -36,12 +38,12 @@ class CloudAuthDialog(QDialog):
 
         # 标题
         title = QLabel("云端登录")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        title.setStyleSheet(theme_style("font-size: 18px; font-weight: bold; color: $text;"))
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
         subtitle = QLabel("登录以启用跨设备云端同步")
-        subtitle.setStyleSheet("color: #888888; font-size: 12px;")
+        subtitle.setStyleSheet(theme_style("color: $muted; font-size: 12px;"))
         subtitle.setAlignment(Qt.AlignCenter)
         layout.addWidget(subtitle)
 

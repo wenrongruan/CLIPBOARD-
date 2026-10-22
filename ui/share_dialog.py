@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import ClipboardItem
+from ui.styles import theme_style
+from ui.theme import follow_system_theme
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ class ShareLinkDialog(QDialog):
         self.setWindowTitle("分享剪贴板条目")
         self.setModal(True)
         self.setMinimumWidth(420)
+        follow_system_theme(self)
 
         self._setup_ui()
 
@@ -101,12 +104,12 @@ class ShareLinkDialog(QDialog):
             "适用场景：把这一组文本/图片发给同事、客户或自己其他设备一次性使用。\n"
             "链接到期后自动失效，可创建多个链接，互不影响。"
         )
-        scenario.setStyleSheet("color:#aaa;font-size:11px;")
+        scenario.setStyleSheet(theme_style("color:$secondary;font-size:11px;"))
         scenario.setWordWrap(True)
         v.addWidget(scenario)
 
         expire_label = QLabel("链接有效期")
-        expire_label.setStyleSheet("color:#aaa;font-size:11px;")
+        expire_label.setStyleSheet(theme_style("color:$secondary;font-size:11px;"))
         v.addWidget(expire_label)
 
         self._expiry_group = QButtonGroup(self)
@@ -137,7 +140,7 @@ class ShareLinkDialog(QDialog):
         v.setSpacing(10)
 
         self._result_title = QLabel("链接已生成")
-        self._result_title.setStyleSheet("color:#e8e8e8;font-size:14px;font-weight:600;")
+        self._result_title.setStyleSheet(theme_style("color:$text;font-size:14px;font-weight:600;"))
         v.addWidget(self._result_title)
 
         url_row = QHBoxLayout()
@@ -150,7 +153,7 @@ class ShareLinkDialog(QDialog):
         v.addLayout(url_row)
 
         self._copied_label = QLabel("")
-        self._copied_label.setStyleSheet("color:#7ccf7c;font-size:11px;")
+        self._copied_label.setStyleSheet(theme_style("color:$accent;font-size:11px;"))
         v.addWidget(self._copied_label)
 
         self._qr_label = QLabel()
@@ -159,7 +162,7 @@ class ShareLinkDialog(QDialog):
         v.addWidget(self._qr_label)
 
         self._qr_hint = QLabel("")
-        self._qr_hint.setStyleSheet("color:#888;font-size:11px;")
+        self._qr_hint.setStyleSheet(theme_style("color:$muted;font-size:11px;"))
         self._qr_hint.setAlignment(Qt.AlignCenter)
         self._qr_hint.setWordWrap(True)
         v.addWidget(self._qr_hint)

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 
 from config import APP_VERSION
 from i18n import t
+from ui.styles import theme_style
 
 
 class AboutTab(QWidget):
@@ -23,23 +24,23 @@ class AboutTab(QWidget):
         layout.setContentsMargins(20, 20, 20, 20)
 
         app_name_label = QLabel(t("app_name"))
-        app_name_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        app_name_label.setStyleSheet(theme_style("font-size: 18px; font-weight: bold; color: $text;"))
         app_name_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(app_name_label)
 
         version_label = QLabel(f"v{APP_VERSION}")
-        version_label.setStyleSheet("color: #888888; font-size: 13px;")
+        version_label.setStyleSheet(theme_style("color: $muted; font-size: 13px;"))
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)
 
         desc_label = QLabel(t("about_description"))
-        desc_label.setStyleSheet("color: #aaaaaa; font-size: 13px;")
+        desc_label.setStyleSheet(theme_style("color: $secondary; font-size: 13px;"))
         desc_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(desc_label)
 
         layout.addSpacing(10)
 
-        link_style = "color: #58a6ff; text-decoration: none;"
+        link_style = "text-decoration: none;"
         links_group = QGroupBox("")
         links_layout = QFormLayout(links_group)
         links_layout.setSpacing(12)

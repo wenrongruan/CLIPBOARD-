@@ -119,6 +119,12 @@ class ClipboardRepository:
     def set_meta(self, key: str, value: str) -> None:
         return self._dao.set_meta(key, value)
 
+    def get_meta_strict(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        return self._dao.get_meta_strict(key, default)
+
+    def set_meta_strict(self, key: str, value: str) -> None:
+        return self._dao.set_meta_strict(key, value)
+
     # ------------------------------------------------------------------
     # 列表 / 搜索 / 时间轴 -> Query
     # ------------------------------------------------------------------
@@ -199,6 +205,22 @@ class ClipboardRepository:
         return self._sync.update_cloud_sync_metadata(
             item_id, cloud_id=cloud_id, is_starred=is_starred
         )
+
+    def restore_cloud_image(
+        self,
+        item_id: int,
+        image_data: bytes,
+        image_thumbnail: Optional[bytes],
+        cloud_id: int,
+    ) -> bool:
+        return self._sync.restore_cloud_image(
+            item_id, image_data, image_thumbnail, cloud_id
+        )
+
+    def get_image_hashes_with_data(
+        self, hashes: list, space_id: Optional[str] = None
+    ) -> set[str]:
+        return self._sync.get_image_hashes_with_data(hashes, space_id)
 
     def clear_cloud_id(self, item_id: int):
         return self._sync.clear_cloud_id(item_id)

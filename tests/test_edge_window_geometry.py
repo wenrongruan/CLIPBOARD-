@@ -294,11 +294,12 @@ def test_layout_done_uses_real_size(env, edge):
     w = _ProbeWindow()
     w._dock_edge = edge
     w._laid_out = True
-    w.setFixedWidth(480)  # 模拟子控件（侧栏等）把窗口撑大
+    grown_width = ew.WINDOW_WIDTH + 100
+    w.setFixedWidth(grown_width)  # 模拟子控件（侧栏等）把窗口撑大
 
     width, _ = w._effective_size()
-    assert width == 480
-    assert w._get_hidden_geometry(AVAIL).width() == 480
+    assert width == grown_width
+    assert w._get_hidden_geometry(AVAIL).width() == grown_width
 
 
 def test_correction_skipped_when_size_matches_config(env):
@@ -320,11 +321,12 @@ def test_correction_repositions_when_window_grew(env):
     w._laid_out = True
     w._is_visible = False
     w.setGeometry(w._get_hidden_geometry(AVAIL))
-    w.setFixedWidth(480)  # 模拟布局把窗口撑大
+    grown_width = ew.WINDOW_WIDTH + 100
+    w.setFixedWidth(grown_width)  # 模拟布局把窗口撑大
 
     w._correct_position_after_layout()
 
-    assert w.geometry().width() == 480
+    assert w.geometry().width() == grown_width
     assert w.geometry().right() == AVAIL.left() + ew.HIDDEN_MARGIN - 1
 
 
@@ -338,3 +340,58 @@ def test_correction_leaves_floating_window_alone(env):
 
     w._correct_position_after_layout()
     assert w.geometry() == QRect(120, 200, 480, 480)
+
+
+@pytest.mark.parametrize("edge", ["left", "right", "top", "bottom"])
+@pytest.mark.parametrize("laid_out", [False, True])
+@pytest.mark.parametrize("bounds", [QRect(0, 25, 1280, 675), QRect(-560, 25, 560, 660)])
+def test_docked_window_fits_available_screen(env, edge, laid_out, bounds):
+    w = _ProbeWindow()
+    try:
+        w._dock_edge = edge
+        w._laid_out = laid_out
+        visible = w._get_visible_geometry(bounds)
+        hidden = w._get_hidden_geometry(bounds)
+        assert bounds.contains(visible)
+        assert visible.size() == hidden.size()
+        exposed = hidden.intersected(bounds)
+        if edge in ("left", "right"):
+            assert exposed.width() == ew.HIDDEN_MARGIN
+            assert exposed.height() == hidden.height()
+        else:
+            assert exposed.height() == ew.HIDDEN_MARGIN
+            assert exposed.width() == hidden.width()
+    finally:
+        w.close()
+        w.deleteLater()
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_first_layout_correction_fits_short_screen(env, monkeypatch, visible):
+    w = _ProbeWindow()
+    bounds = QRect(0, 25, 1280, 675)
+    try:
+        w._laid_out = True
+        w._is_visible = visible
+        w._dock_edge = "left"
+        w.resize(ew.WINDOW_WIDTH, ew.WINDOW_HEIGHT)
+        monkeypatch.setattr(w, "_get_screen_rect", lambda: bounds)
+        w._correct_position_after_layout()
+        expected = w._get_visible_geometry(bounds) if visible else w._get_hidden_geometry(bounds)
+        assert w.geometry() == expected
+        assert w.height() == min(ew.WINDOW_HEIGHT, bounds.height())
+    finally:
+        w.close()
+        w.deleteLater()
+
+
+def test_small_screen_fit_does_not_reduce_preferred_size(env):
+    w = _ProbeWindow()
+    try:
+        w._laid_out = True
+        small = QRect(0, 25, 1280, 675)
+        w.setGeometry(w._get_visible_geometry(small))
+        assert w._get_visible_geometry(AVAIL).height() == ew.WINDOW_HEIGHT
+    finally:
+        w.close()
+        w.deleteLater()

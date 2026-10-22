@@ -356,3 +356,82 @@ STRINGS = {
         "refresh": 'Обновить',
     },
 }
+
+# Shared library shell and empty-state copy.
+_LIBRARY_KEYS = (
+    "clipboard_history", "clipboard_subtitle", "my_files", "your_library",
+    "tags_heading", "all_records", "library_hint", "recent_records",
+    "list_view", "timeline_view", "click_to_copy", "empty_history_title",
+    "empty_history_description", "empty_filter_title", "empty_filter_description",
+)
+_LIBRARY_COPY = {
+    "zh_CN": (
+        "剪贴板", "复制过的，都在这里。", "我的文件", "你的随身资料库",
+        "标签", "全部记录", "文字、图片与灵感\n随时留存，随手找回。", "最近记录",
+        "列表视图", "时间线视图", "点击记录即可复制", "从一次复制开始",
+        "复制文字或图片，它们会自动出现在这里。", "没有找到相关记录", "试试其他关键词，或取消当前筛选。",
+    ),
+    "en_US": (
+        "Clipboard", "Everything you copied, in one place.", "My files", "Your everyday library",
+        "TAGS", "All records", "Words, images, ideas.\nReady when you need them.", "Recent records",
+        "List view", "Timeline view", "Click a record to copy", "Start with a copy",
+        "Copy text or an image. It will appear here automatically.", "No matching records", "Try another keyword or clear your filters.",
+    ),
+    "ja_JP": (
+        "クリップボード", "コピーしたものを、ひとつの場所に。", "ファイル", "あなたのライブラリ",
+        "タグ", "すべての履歴", "テキストも画像も、\n必要なときにすぐ。", "最近の履歴",
+        "リスト表示", "タイムライン表示", "クリックしてコピー", "コピーから始めましょう",
+        "テキストや画像をコピーすると、ここに表示されます。", "該当する履歴がありません", "キーワードやフィルターを変更してください。",
+    ),
+    "ko_KR": (
+        "클립보드", "복사한 모든 것을 한곳에.", "내 파일", "나만의 자료실",
+        "태그", "모든 기록", "글, 이미지, 아이디어.\n필요할 때 바로 찾으세요.", "최근 기록",
+        "목록 보기", "타임라인 보기", "기록을 클릭하여 복사", "복사부터 시작하세요",
+        "글이나 이미지를 복사하면 자동으로 여기에 표시됩니다.", "일치하는 기록 없음", "다른 검색어를 입력하거나 필터를 해제하세요.",
+    ),
+    "es_ES": (
+        "Portapapeles", "Todo lo que copias, en un lugar.", "Mis archivos", "Tu biblioteca personal",
+        "ETIQUETAS", "Todos", "Textos, imágenes e ideas.\nSiempre a mano.", "Recientes",
+        "Vista de lista", "Cronología", "Haz clic para copiar", "Empieza copiando",
+        "Copia texto o una imagen y aparecerá aquí automáticamente.", "Sin coincidencias", "Prueba otra palabra o borra los filtros.",
+    ),
+    "fr_FR": (
+        "Presse-papiers", "Toutes vos copies au même endroit.", "Mes fichiers", "Votre bibliothèque",
+        "ÉTIQUETTES", "Tout", "Textes, images et idées.\nToujours à portée de main.", "Récents",
+        "Vue liste", "Chronologie", "Cliquez pour copier", "Commencez par copier",
+        "Copiez du texte ou une image pour les retrouver ici.", "Aucun résultat", "Essayez un autre mot ou effacez les filtres.",
+    ),
+    "de_DE": (
+        "Zwischenablage", "Alles Kopierte an einem Ort.", "Meine Dateien", "Deine Bibliothek",
+        "TAGS", "Alle Einträge", "Texte, Bilder und Ideen.\nJederzeit griffbereit.", "Zuletzt kopiert",
+        "Listenansicht", "Zeitleiste", "Zum Kopieren klicken", "Mit einer Kopie beginnen",
+        "Kopiere Text oder ein Bild. Es erscheint automatisch hier.", "Keine Treffer", "Versuche ein anderes Wort oder entferne die Filter.",
+    ),
+    "ru_RU": (
+        "Буфер обмена", "Всё скопированное в одном месте.", "Мои файлы", "Ваша библиотека",
+        "МЕТКИ", "Все записи", "Тексты, изображения, идеи.\nВсегда под рукой.", "Недавние записи",
+        "Список", "Хронология", "Нажмите для копирования", "Начните с копирования",
+        "Скопируйте текст или изображение — они появятся здесь.", "Ничего не найдено", "Измените запрос или сбросьте фильтры.",
+    ),
+}
+for _language, _copy in _LIBRARY_COPY.items():
+    STRINGS[_language].update(zip(_LIBRARY_KEYS, _copy))
+
+for _language, _clear in {
+    "zh_CN": "清空搜索", "en_US": "Clear search", "ja_JP": "検索をクリア",
+    "ko_KR": "검색 지우기", "es_ES": "Borrar búsqueda", "fr_FR": "Effacer la recherche",
+    "de_DE": "Suche löschen", "ru_RU": "Очистить поиск",
+}.items():
+    STRINGS[_language]["clear_search"] = _clear
+
+for _language, (_appearance, _follow) in {
+    "zh_CN": ("外观", "跟随系统，自动切换浅色 / 深色"),
+    "en_US": ("Appearance", "Follow system · Automatic light / dark"),
+    "ja_JP": ("外観", "システムに合わせてライト / ダークを自動切替"),
+    "ko_KR": ("화면 모드", "시스템에 따라 밝게 / 어둡게 자동 전환"),
+    "es_ES": ("Apariencia", "Según el sistema · Claro / oscuro automático"),
+    "fr_FR": ("Apparence", "Selon le système · Clair / sombre automatique"),
+    "de_DE": ("Darstellung", "Systemeinstellung · Automatisch hell / dunkel"),
+    "ru_RU": ("Оформление", "Как в системе · Автоматически светлое / тёмное"),
+}.items():
+    STRINGS[_language].update(appearance=_appearance, appearance_follow_system=_follow)

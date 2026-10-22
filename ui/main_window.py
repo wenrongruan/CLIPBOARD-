@@ -10,12 +10,14 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
-from PySide6.QtCore import Signal, QTimer
+from PySide6.QtCore import QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLineEdit,
+    QLabel,
     QPushButton,
     QStackedWidget,
     QButtonGroup,
@@ -29,7 +31,8 @@ from config import (
 )
 from i18n import t
 from .edge_window import EdgeHiddenWindow
-from .styles import MAIN_STYLE
+from .theme import follow_system_theme
+from .icons import icon
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +116,8 @@ class MainWindow(EdgeHiddenWindow):
         self.plugin_controller = PluginActionController(self, self.ctx)
         self.cloud_controller = CloudLifecycleController(self, self.ctx)
 
-        self.setStyleSheet(MAIN_STYLE)
+        self.setObjectName("mainWindow")
+        follow_system_theme(self)
         self._setup_ui()
         self._connect_signals()
         self.list_controller.load_items()
@@ -152,29 +156,68 @@ class MainWindow(EdgeHiddenWindow):
 
         # --- 右侧主内容 ---
         main_container = QWidget()
+        main_container.setObjectName("mainContent")
         layout = QVBoxLayout(main_container)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 16)
+        layout.setSpacing(16)
         root.addWidget(main_container, 1)
 
-        # 顶部:搜索和设置
+        # 标题与窗口操作各有自己的空间，搜索不再挤在按钮之间。
         header_layout = QHBoxLayout()
-        header_layout.setSpacing(8)
+        header_layout.setSpacing(4)
+        title_column = QVBoxLayout()
+        title_column.setSpacing(4)
+        self.title_label = QLabel(t("clipboard_history"))
+        self.title_label.setObjectName("windowTitle")
+        self.title_label.setWordWrap(True)
+        title_column.addWidget(self.title_label)
+        subtitle = QLabel(t("clipboard_subtitle"))
+        subtitle.setObjectName("windowSubtitle")
+        subtitle.setWordWrap(True)
+        title_column.addWidget(subtitle)
+        header_layout.addLayout(title_column, 1)
 
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText(t("search_placeholder"))
-        self.search_input.textChanged.connect(self.list_controller.on_search_changed)
-        header_layout.addWidget(self.search_input, 1)
-
-        def _mk(text, tip, size, slot):
-            btn = QPushButton(text)
+        def _mk(name, tip, slot):
+            btn = QPushButton()
+            btn.setObjectName("iconButton")
+            btn.setIcon(icon(name))
+            btn.setIconSize(QSize(17, 17))
             btn.setToolTip(tip)
-            btn.setFixedSize(size, size)
+            btn.setAccessibleName(tip)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setFixedSize(30, 30)
             btn.clicked.connect(slot)
-            header_layout.addWidget(btn)
             return btn
 
-        self.search_help_btn = _mk("ⓘ",
+        self.pin_btn = _mk("pin", t("pin_window"), self._toggle_pin)
+        self.pin_btn.setCheckable(True)
+        self.pin_btn.setChecked(self._is_pinned)
+        self.settings_btn = _mk("settings", t("settings"), self._show_settings)
+        self.minimize_btn = _mk("minus", t("minimize"), self._minimize_window)
+        self.quit_btn = _mk("close", t("quit_app"), self._request_quit)
+        self.quit_btn.setObjectName("closeButton")
+        for btn in (self.pin_btn, self.settings_btn, self.minimize_btn, self.quit_btn):
+            header_layout.addWidget(btn, 0, Qt.AlignTop)
+        layout.addLayout(header_layout)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self.search_input = QLineEdit()
+        self.search_input.setObjectName("searchInput")
+        self.search_input.setMinimumWidth(80)
+        self.search_input.setPlaceholderText(t("search_placeholder"))
+        self.search_input.setAccessibleName(t("search_placeholder"))
+        self.search_input.addAction(icon("search"), QLineEdit.LeadingPosition)
+        self._clear_search_action = self.search_input.addAction(icon("close"), QLineEdit.TrailingPosition)
+        self._clear_search_action.setText(t("clear_search"))
+        self._clear_search_action.triggered.connect(self.search_input.clear)
+        self._clear_search_action.setVisible(False)
+        self.search_input.textChanged.connect(lambda text: self._clear_search_action.setVisible(bool(text)))
+        self.search_input.textChanged.connect(self.list_controller.on_search_changed)
+        self._search_shortcut = QShortcut(QKeySequence.Find, self)
+        self._search_shortcut.activated.connect(self.search_input.setFocus)
+        search_row.addWidget(self.search_input, 1)
+        self.search_help_btn = _mk("help",
             "支持结构化搜索：\n"
             "  from:chrome  — 按来源 app 过滤\n"
             "  tag:work    — 按标签过滤\n"
@@ -183,33 +226,32 @@ class MainWindow(EdgeHiddenWindow):
             "  is:starred  is:text  is:image\n"
             "  \"引号短语\"  /正则/\n"
             "  -from:foo   — 否定",
-            24, self.list_controller.show_search_help)
-        self.star_filter_btn = _mk("☆", t("show_starred_only"), 28, self.list_controller.toggle_starred_filter)
-        self.pin_btn = _mk("⇩", t("pin_window"), 28, self._toggle_pin)
-        self.settings_btn = _mk("⚙", t("settings"), 28, self._show_settings)
-        self.minimize_btn = _mk("—", t("minimize"), 28, self._minimize_window)
-        self.quit_btn = _mk("✕", t("quit_app"), 28, self._request_quit)
-
-        layout.addLayout(header_layout)
+            self.list_controller.show_search_help)
+        search_row.addWidget(self.search_help_btn)
+        layout.addLayout(search_row)
 
         # Tab 切换:剪贴板 / 我的文件
         tab_row = QHBoxLayout()
-        tab_row.setSpacing(12)
+        tab_row.setSpacing(20)
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
         for idx, (label, attr, checked) in enumerate([
-            ("剪贴板", "history_tab_btn", True),
-            ("我的文件", "files_tab_btn", False),
+            (t("clipboard_history"), "history_tab_btn", True),
+            (t("my_files"), "files_tab_btn", False),
         ]):
             btn = QPushButton(label)
             btn.setObjectName("tabBtn")
             btn.setCheckable(True)
             btn.setChecked(checked)
+            btn.setCursor(Qt.PointingHandCursor)
             setattr(self, attr, btn)
             self._tab_group.addButton(btn, idx)
             tab_row.addWidget(btn)
         self._tab_group.idClicked.connect(self.list_controller.on_tab_changed)
         tab_row.addStretch()
+        self.star_filter_btn = _mk("star", t("show_starred_only"), self.list_controller.toggle_starred_filter)
+        self.star_filter_btn.setCheckable(True)
+        tab_row.addWidget(self.star_filter_btn)
         layout.addLayout(tab_row)
 
         # 堆叠容器:页 0 = 剪贴板列表,页 1 = 文件管理
@@ -279,7 +321,8 @@ class MainWindow(EdgeHiddenWindow):
         is_pinned = self.toggle_pin()
         if not is_pinned and self._is_floating:
             self._snap_to_nearest_edge()
-        self.pin_btn.setText("⇧" if is_pinned else "⇩")
+        self.pin_btn.setChecked(is_pinned)
+        self.pin_btn.setIcon(icon("pin", "accent" if is_pinned else "secondary"))
         self.pin_btn.setToolTip(t("unpin_window") if is_pinned else t("pin_window"))
 
     def _minimize_window(self):

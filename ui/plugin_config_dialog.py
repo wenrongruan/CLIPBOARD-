@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
 )
 
 from i18n import t
-from .styles import MAIN_STYLE
+from .theme import follow_system_theme
+from ui.styles import theme_style
 
 
 _PERMISSION_LABELS = {
@@ -43,7 +44,7 @@ class PluginConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(t("plugin_config_title", name=plugin_name))
         self.setFixedWidth(420)
-        self.setStyleSheet(MAIN_STYLE)
+        follow_system_theme(self)
         self._schema = schema
         self._permissions = list(permissions or [])
         self._widgets = {}
@@ -58,21 +59,21 @@ class PluginConfigDialog(QDialog):
         if self._permissions:
             perm_box = QFrame()
             perm_box.setStyleSheet(
-                "QFrame{background:rgba(88,166,255,0.08);"
-                "border:1px solid rgba(88,166,255,0.4);border-radius:6px;padding:8px;}"
+                theme_style("QFrame{background:$accent_soft;"
+                "border:1px solid $accent_border;border-radius:8px;padding:8px;}")
             )
             perm_layout = QVBoxLayout(perm_box)
             perm_layout.setSpacing(4)
             title = QLabel("此插件声明使用的权限")
             title.setStyleSheet(
-                "color:#58a6ff;font-weight:600;background:transparent;border:none;"
+                theme_style("color:$accent;font-weight:600;background:transparent;border:none;")
             )
             perm_layout.addWidget(title)
             for p in self._permissions:
                 label, desc = _format_permission(p)
                 row = QLabel(f"· <b>{label}</b> — {desc}")
                 row.setTextFormat(Qt.RichText)
-                row.setStyleSheet("color:#ddd;background:transparent;border:none;font-size:11px;")
+                row.setStyleSheet(theme_style("color:$text;background:transparent;border:none;font-size:11px;"))
                 row.setWordWrap(True)
                 perm_layout.addWidget(row)
             layout.addWidget(perm_box)
